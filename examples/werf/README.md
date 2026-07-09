@@ -13,7 +13,7 @@ The chart contains:
 - a one-shot `Job`.
 
 The nginx resources are deployed to both clusters. The Job has
-`kubeconfig.proxy/single-context: "true"`, so `kubeconfig-proxy` creates it only
+`kubeconfig-proxy.io/single-context: "true"`, so `kubeconfig-proxy` creates it only
 in the first selected context by alphabetical name.
 
 ## Prerequisites
@@ -29,7 +29,8 @@ GOTOOLCHAIN=auto go run ./cmd/kubeconfig-proxy \
   --listen 127.0.0.1:9443 \
   --request-timeout 30s \
   --retries 1 \
-  --retry-backoff 200ms
+  --retry-backoff 200ms \
+  --helm-release-proxy
 ```
 
 Install werf if it is not installed yet:
@@ -59,9 +60,10 @@ KUBECONFIG=/tmp/kubeconfig-proxy.kind.yaml \
   werf converge --env kind --dev
 ```
 
-The proxy reads Helm release history from the primary context only, while
-resource mutations are still sent to both kind clusters. This keeps werf from
-seeing duplicate release Secret objects on the next converge.
+With `--helm-release-proxy`, the proxy reads Helm release history from the
+primary context only, while resource mutations are still sent to both kind
+clusters. This keeps werf from seeing duplicate release Secret objects on the
+next converge.
 
 By default werf deploys this project into the namespace:
 
@@ -124,7 +126,7 @@ To force the Job into a specific context instead, replace the Job annotation in
 [.helm/templates/job.yaml](.helm/templates/job.yaml):
 
 ```yaml
-kubeconfig.proxy/context-name: kind-proxy-b
+kubeconfig-proxy.io/context-name: kind-proxy-b
 ```
 
 ## Cleanup

@@ -20,8 +20,8 @@ import (
 )
 
 const (
-	contextNameAnnotation   = "kubeconfig.proxy/context-name"
-	singleContextAnnotation = "kubeconfig.proxy/single-context"
+	contextNameAnnotation   = "kubeconfig-proxy.io/context-name"
+	singleContextAnnotation = "kubeconfig-proxy.io/single-context"
 	sourceContextAnnotation = "kubeconfig-proxy.io/context"
 	sourceContextLabel      = "context"
 )
@@ -54,10 +54,11 @@ type watchOpenResult struct {
 }
 
 type Options struct {
-	RequestTimeout time.Duration
-	Retries        int
-	RetryBackoff   time.Duration
-	BearerToken    string
+	RequestTimeout   time.Duration
+	Retries          int
+	RetryBackoff     time.Duration
+	BearerToken      string
+	HelmReleaseProxy bool
 }
 
 func New(targets []Target, primary Target) (*Proxy, error) {
@@ -93,13 +94,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
-	case isWatchRequest(r) && isHelmStorageListRequest(r):
+	case isWatchRequest(r) && p.options.HelmReleaseProxy && isHelmStorageListRequest(r):
 		p.streamSingle(w, r, p.primary)
 	case isWatchRequest(r):
 		p.aggregateWatch(w, r)
 	case isLongRunningRequest(r):
 		p.forwardLongRunning(w, r)
-	case shouldUsePrimaryOnly(r):
+	case p.shouldUsePrimaryOnly(r):
 		p.forwardSingle(w, r, p.primary)
 	case isNamedResourceGetRequest(r):
 		p.forwardExistingObject(w, r)
@@ -782,8 +783,8 @@ func decodeObject(body []byte) (map[string]any, error) {
 	return object, nil
 }
 
-func shouldUsePrimaryOnly(r *http.Request) bool {
-	return isDiscoveryPath(r.URL.Path) || isHelmStorageListRequest(r)
+func (p *Proxy) shouldUsePrimaryOnly(r *http.Request) bool {
+	return isDiscoveryPath(r.URL.Path) || p.options.HelmReleaseProxy && isHelmStorageListRequest(r)
 }
 
 func shouldUseRequestTimeout(r *http.Request) bool {

@@ -44,6 +44,7 @@ func run() error {
 		requestTimeout = flag.Duration("request-timeout", 30*time.Second, "timeout for one upstream Kubernetes API request; 0 disables it")
 		retries        = flag.Int("retries", 0, "number of retries for failed upstream requests")
 		retryBackoff   = flag.Duration("retry-backoff", 200*time.Millisecond, "delay between upstream request retries")
+		helmRelease    = flag.Bool("helm-release-proxy", false, "proxy Helm release storage list/watch requests only through the primary context")
 	)
 	flag.Parse()
 
@@ -59,10 +60,11 @@ func run() error {
 	}
 
 	handler, err := proxy.NewWithOptions(targets, primary, proxy.Options{
-		RequestTimeout: *requestTimeout,
-		Retries:        *retries,
-		RetryBackoff:   *retryBackoff,
-		BearerToken:    bearerToken,
+		RequestTimeout:   *requestTimeout,
+		Retries:          *retries,
+		RetryBackoff:     *retryBackoff,
+		BearerToken:      bearerToken,
+		HelmReleaseProxy: *helmRelease,
 	})
 	if err != nil {
 		return err
@@ -93,6 +95,7 @@ func run() error {
 	log.Printf("request timeout:   %s", durationLogValue(*requestTimeout))
 	log.Printf("retries:           %d", *retries)
 	log.Printf("retry backoff:     %s", *retryBackoff)
+	log.Printf("helm release mode: %t", *helmRelease)
 
 	errCh := make(chan error, 1)
 	go func() {

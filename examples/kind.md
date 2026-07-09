@@ -129,7 +129,7 @@ kind: ConfigMap
 metadata:
   name: context-name-demo
   annotations:
-    kubeconfig.proxy/context-name: kind-proxy-b
+    kubeconfig-proxy.io/context-name: kind-proxy-b
 data:
   value: only-b
 EOF
@@ -153,7 +153,7 @@ kind: ConfigMap
 metadata:
   name: single-context-demo
   annotations:
-    kubeconfig.proxy/single-context: "true"
+    kubeconfig-proxy.io/single-context: "true"
 data:
   value: first-context
 EOF

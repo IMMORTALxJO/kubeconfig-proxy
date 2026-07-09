@@ -200,7 +200,7 @@ func TestContextNameAnnotationRoutesMutationToNamedTarget(t *testing.T) {
 		"kind":"ConfigMap",
 		"metadata":{
 			"name":"demo",
-			"annotations":{"kubeconfig.proxy/context-name":"two"}
+			"annotations":{"kubeconfig-proxy.io/context-name":"two"}
 		}
 	}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/namespaces/default/configmaps", body)
@@ -239,7 +239,7 @@ func TestSingleContextAnnotationRoutesMutationToAlphabeticallyFirstTarget(t *tes
 		"kind":"ConfigMap",
 		"metadata":{
 			"name":"demo",
-			"annotations":{"kubeconfig.proxy/single-context":"true"}
+			"annotations":{"kubeconfig-proxy.io/single-context":"true"}
 		}
 	}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/namespaces/default/configmaps", body)
@@ -279,7 +279,7 @@ kind: ConfigMap
 metadata:
   name: demo
   annotations:
-    kubeconfig.proxy/single-context: "true"
+    kubeconfig-proxy.io/single-context: "true"
 `)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/namespaces/default/configmaps", body)
 	rec := httptest.NewRecorder()
@@ -314,7 +314,7 @@ func TestContextNameAnnotationRejectsUnknownTarget(t *testing.T) {
 		"kind":"ConfigMap",
 		"metadata":{
 			"name":"demo",
-			"annotations":{"kubeconfig.proxy/context-name":"missing"}
+			"annotations":{"kubeconfig-proxy.io/context-name":"missing"}
 		}
 	}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/namespaces/default/configmaps", body)
@@ -504,7 +504,7 @@ func TestHelmStorageListUsesPrimaryOnly(t *testing.T) {
 	})
 	defer cleanup()
 
-	p, err := newTestProxy(targets, targets[0])
+	p, err := newTestProxyWithOptions(targets, targets[0], Options{HelmReleaseProxy: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,6 +519,48 @@ func TestHelmStorageListUsesPrimaryOnly(t *testing.T) {
 	gotCalls := calls.snapshot()
 	if len(gotCalls) != 1 || gotCalls[0] != "one" {
 		t.Fatalf("calls = %v, want primary target only", gotCalls)
+	}
+}
+
+func TestHelmStorageListAggregatesByDefault(t *testing.T) {
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"SecretList","items":[{"metadata":{"name":"sh.helm.release.v1.demo.v1"}}]}`))
+		},
+		"two": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"SecretList","items":[{"metadata":{"name":"sh.helm.release.v1.demo.v1"}}]}`))
+		},
+	})
+	defer cleanup()
+
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/namespaces/default/secrets?labelSelector=owner%3Dhelm%2Cname%3Ddemo", http.NoBody)
+	rec := httptest.NewRecorder()
+	serveTestHTTP(p, rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Items []struct {
+			Metadata struct {
+				Labels map[string]string `json:"labels"`
+			} `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 2 {
+		t.Fatalf("items = %d, want aggregated Helm release items by default; body=%s", len(payload.Items), rec.Body.String())
+	}
+	if payload.Items[0].Metadata.Labels["context"] != "one" || payload.Items[1].Metadata.Labels["context"] != "two" {
+		t.Fatalf("items = %#v, want context labels from both targets", payload.Items)
 	}
 }
 

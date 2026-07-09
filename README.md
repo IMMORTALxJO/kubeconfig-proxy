@@ -16,10 +16,10 @@ Current MVP behavior:
 - logs, exec, attach, port-forward and discovery requests are proxied only to
   one context.
 
-Helm release storage list requests are also proxied only to the primary context.
-Helm and werf expect release history to be a single linear stream; returning the
-same release Secret or ConfigMap from multiple clusters can break their release
-planner.
+When `--helm-release-proxy` is enabled, Helm release storage list/watch requests
+are proxied only to the primary context. Helm and werf expect release history to
+be a single linear stream; returning the same release Secret or ConfigMap from
+multiple clusters can break their release planner.
 
 ## Usage
 
@@ -43,7 +43,9 @@ Useful flags:
 - `--request-timeout 30s` sets the timeout for one upstream Kubernetes API
   request; use `0` to disable it;
 - `--retries 2` retries failed upstream requests twice;
-- `--retry-backoff 500ms` sets the delay between retry attempts.
+- `--retry-backoff 500ms` sets the delay between retry attempts;
+- `--helm-release-proxy` reads Helm release history only from the primary
+  context for Helm/werf compatibility.
 
 Retries are disabled by default. When enabled, the proxy retries network errors
 and temporary upstream HTTP responses: `429`, `500`, `502`, `503` and `504`.
@@ -58,7 +60,7 @@ context:
 ```yaml
 metadata:
   annotations:
-    kubeconfig.proxy/context-name: dev
+    kubeconfig-proxy.io/context-name: dev
 ```
 
 Add this annotation to create or update a resource only in one context selected
@@ -67,10 +69,10 @@ by the proxy. The selected context is the first one by alphabetical context name
 ```yaml
 metadata:
   annotations:
-    kubeconfig.proxy/single-context: "true"
+    kubeconfig-proxy.io/single-context: "true"
 ```
 
-If both annotations are present, `kubeconfig.proxy/context-name` wins.
+If both annotations are present, `kubeconfig-proxy.io/context-name` wins.
 
 The proxy annotates aggregated list items with:
 

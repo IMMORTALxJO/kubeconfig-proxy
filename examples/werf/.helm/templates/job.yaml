@@ -3,7 +3,7 @@ kind: Job
 metadata:
   name: {{ .Chart.Name }}-smoke
   annotations:
-    kubeconfig.proxy/single-context: "true"
+    kubeconfig-proxy.io/single-context: "true"
   labels:
     app.kubernetes.io/name: {{ .Chart.Name }}-smoke
     app.kubernetes.io/part-of: {{ .Chart.Name }}
