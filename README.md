@@ -168,3 +168,7 @@ GOTOOLCHAIN=auto go build -trimpath -o kubeconfig-proxy ./cmd/kubeconfig-proxy
 ```
 
 Release builds are produced by GitHub Actions when a `v*` tag is pushed.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
