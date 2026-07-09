@@ -21,7 +21,7 @@ in the first selected context by alphabetical name.
 Complete [../kind.md](../kind.md) first and keep `kubeconfig-proxy` running:
 
 ```bash
-go run ./cmd/kubeconfig-proxy \
+GOTOOLCHAIN=auto go run ./cmd/kubeconfig-proxy \
   --kubeconfig /Users/aleksandr.prusov/.kube/proxy-config \
   --contexts kind-proxy-a,kind-proxy-b \
   --primary-context kind-proxy-a \

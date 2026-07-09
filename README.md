@@ -24,7 +24,7 @@ planner.
 ## Usage
 
 ```bash
-go run ./cmd/kubeconfig-proxy \
+GOTOOLCHAIN=auto go run ./cmd/kubeconfig-proxy \
   --kubeconfig ~/.kube/config \
   --output ~/.kube/config.proxy
 ```

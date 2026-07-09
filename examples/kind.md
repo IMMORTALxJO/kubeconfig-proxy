@@ -7,10 +7,17 @@ clusters created by [kind](https://kind.sigs.k8s.io/).
 
 Install:
 
-- Go 1.23+
+- Go 1.26.5+
 - Docker
 - kubectl
 - kind
+
+If your local `go` binary is older but supports toolchain downloads, run the Go
+commands below with `GOTOOLCHAIN=auto`. For example:
+
+```bash
+GOTOOLCHAIN=auto go test ./...
+```
 
 ## Create local clusters
 
@@ -30,7 +37,7 @@ kubectl config get-contexts kind-proxy-a kind-proxy-b
 Run the proxy from the repository root:
 
 ```bash
-go run ./cmd/kubeconfig-proxy \
+GOTOOLCHAIN=auto go run ./cmd/kubeconfig-proxy \
   --contexts kind-proxy-a,kind-proxy-b \
   --primary-context kind-proxy-a \
   --output /tmp/kubeconfig-proxy.kind.yaml \

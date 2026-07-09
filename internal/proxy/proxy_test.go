@@ -23,17 +23,34 @@ type seenUpdate struct {
 
 const testBearerToken = "test-token"
 
+type callRecorder struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (r *callRecorder) add(call string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, call)
+}
+
+func (r *callRecorder) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.calls...)
+}
+
 func TestFanOutMutationsToAllTargets(t *testing.T) {
-	var calls []string
+	calls := &callRecorder{}
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
 		"one": func(w http.ResponseWriter, r *http.Request) {
-			calls = append(calls, "one:"+r.URL.Path)
+			calls.add("one:" + r.URL.Path)
 			_, _ = io.Copy(io.Discard, r.Body)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"kind":"Deployment","metadata":{"name":"demo"}}`))
 		},
 		"two": func(w http.ResponseWriter, r *http.Request) {
-			calls = append(calls, "two:"+r.URL.Path)
+			calls.add("two:" + r.URL.Path)
 			_, _ = io.Copy(io.Discard, r.Body)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"kind":"Deployment","metadata":{"name":"demo"}}`))
@@ -53,20 +70,21 @@ func TestFanOutMutationsToAllTargets(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if len(calls) != 2 {
-		t.Fatalf("calls = %v, want two upstream calls", calls)
+	gotCalls := calls.snapshot()
+	if len(gotCalls) != 2 {
+		t.Fatalf("calls = %v, want two upstream calls", gotCalls)
 	}
 }
 
 func TestJobMutationsFanOutWithoutAnnotations(t *testing.T) {
-	var calls []string
+	calls := &callRecorder{}
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
 		"one": func(w http.ResponseWriter, r *http.Request) {
-			calls = append(calls, "one")
+			calls.add("one")
 			_, _ = w.Write([]byte(`{"kind":"Job","metadata":{"name":"demo"}}`))
 		},
 		"two": func(w http.ResponseWriter, r *http.Request) {
-			calls = append(calls, "two")
+			calls.add("two")
 			_, _ = w.Write([]byte(`{"kind":"Job","metadata":{"name":"demo"}}`))
 		},
 	})
@@ -84,8 +102,9 @@ func TestJobMutationsFanOutWithoutAnnotations(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if len(calls) != 2 {
-		t.Fatalf("calls = %v, want two upstream calls", calls)
+	gotCalls := calls.snapshot()
+	if len(gotCalls) != 2 {
+		t.Fatalf("calls = %v, want two upstream calls", gotCalls)
 	}
 }
 
@@ -159,14 +178,14 @@ func TestPutFanOutRewritesObjectIdentityPerTarget(t *testing.T) {
 }
 
 func TestContextNameAnnotationRoutesMutationToNamedTarget(t *testing.T) {
-	var calls []string
+	calls := &callRecorder{}
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
 		"one": func(w http.ResponseWriter, r *http.Request) {
-			calls = append(calls, "one")
+			calls.add("one")
 			_, _ = w.Write([]byte(`{"kind":"ConfigMap","metadata":{"name":"demo"}}`))
 		},
 		"two": func(w http.ResponseWriter, r *http.Request) {
-			calls = append(calls, "two")
+			calls.add("two")
 			_, _ = w.Write([]byte(`{"kind":"ConfigMap","metadata":{"name":"demo"}}`))
 		},
 	})
@@ -191,20 +210,21 @@ func TestContextNameAnnotationRoutesMutationToNamedTarget(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if len(calls) != 1 || calls[0] != "two" {
-		t.Fatalf("calls = %v, want target from annotation", calls)
+	gotCalls := calls.snapshot()
+	if len(gotCalls) != 1 || gotCalls[0] != "two" {
+		t.Fatalf("calls = %v, want target from annotation", gotCalls)
 	}
 }
 
 func TestSingleContextAnnotationRoutesMutationToAlphabeticallyFirstTarget(t *testing.T) {
-	var calls []string
+	calls := &callRecorder{}
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
 		"one": func(w http.ResponseWriter, r *http.Request) {
-			calls = append(calls, "one")
+			calls.add("one")
 			_, _ = w.Write([]byte(`{"kind":"ConfigMap","metadata":{"name":"demo"}}`))
 		},
 		"two": func(w http.ResponseWriter, r *http.Request) {
-			calls = append(calls, "two")
+			calls.add("two")
 			_, _ = w.Write([]byte(`{"kind":"ConfigMap","metadata":{"name":"demo"}}`))
 		},
 	})
@@ -229,20 +249,21 @@ func TestSingleContextAnnotationRoutesMutationToAlphabeticallyFirstTarget(t *tes
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if len(calls) != 1 || calls[0] != "one" {
-		t.Fatalf("calls = %v, want alphabetically first target", calls)
+	gotCalls := calls.snapshot()
+	if len(gotCalls) != 1 || gotCalls[0] != "one" {
+		t.Fatalf("calls = %v, want alphabetically first target", gotCalls)
 	}
 }
 
 func TestSingleContextAnnotationRoutesYAMLMutationBody(t *testing.T) {
-	var calls []string
+	calls := &callRecorder{}
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
 		"one": func(w http.ResponseWriter, r *http.Request) {
-			calls = append(calls, "one")
+			calls.add("one")
 			_, _ = w.Write([]byte(`{"kind":"ConfigMap","metadata":{"name":"demo"}}`))
 		},
 		"two": func(w http.ResponseWriter, r *http.Request) {
-			calls = append(calls, "two")
+			calls.add("two")
 			_, _ = w.Write([]byte(`{"kind":"ConfigMap","metadata":{"name":"demo"}}`))
 		},
 	})
@@ -267,8 +288,9 @@ metadata:
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if len(calls) != 1 || calls[0] != "one" {
-		t.Fatalf("calls = %v, want alphabetically first target", calls)
+	gotCalls := calls.snapshot()
+	if len(gotCalls) != 1 || gotCalls[0] != "one" {
+		t.Fatalf("calls = %v, want alphabetically first target", gotCalls)
 	}
 }
 
@@ -429,20 +451,54 @@ func TestAggregatesTableResponses(t *testing.T) {
 	}
 }
 
-func TestHelmStorageListUsesPrimaryOnly(t *testing.T) {
-	var calls []string
-	var mu sync.Mutex
+func TestResourcePathContainingLogSegmentIsNotLongRunning(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
 		"one": func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			calls = append(calls, "one")
-			mu.Unlock()
+			_, _ = w.Write([]byte(`{"apiVersion":"observability.example.com/v1","kind":"LoggingConfigList","items":[{"metadata":{"name":"a"}}]}`))
+		},
+		"two": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"apiVersion":"observability.example.com/v1","kind":"LoggingConfigList","items":[{"metadata":{"name":"b"}}]}`))
+		},
+	})
+	defer cleanup()
+
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/apis/observability.example.com/v1/namespaces/default/loggingconfigs", http.NoBody)
+	rec := httptest.NewRecorder()
+	serveTestHTTP(p, rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 2 {
+		t.Fatalf("items = %d, want aggregated items from both targets; body=%s", len(payload.Items), rec.Body.String())
+	}
+}
+
+func TestHelmStorageListUsesPrimaryOnly(t *testing.T) {
+	calls := &callRecorder{}
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
+			calls.add("one")
 			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"SecretList","items":[{"metadata":{"name":"sh.helm.release.v1.demo.v1"}}]}`))
 		},
 		"two": func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			calls = append(calls, "two")
-			mu.Unlock()
+			calls.add("two")
 			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"SecretList","items":[{"metadata":{"name":"sh.helm.release.v1.demo.v1"}}]}`))
 		},
 	})
@@ -460,8 +516,9 @@ func TestHelmStorageListUsesPrimaryOnly(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if len(calls) != 1 || calls[0] != "one" {
-		t.Fatalf("calls = %v, want primary target only", calls)
+	gotCalls := calls.snapshot()
+	if len(gotCalls) != 1 || gotCalls[0] != "one" {
+		t.Fatalf("calls = %v, want primary target only", gotCalls)
 	}
 }
 
@@ -571,21 +628,20 @@ func decodeUpdate(t *testing.T, target string, r *http.Request) seenUpdate {
 	}
 }
 
-func TestRequestTimeoutDoesNotApplyToWatch(t *testing.T) {
-	var calls []string
-	var mu sync.Mutex
+func TestRequestTimeoutDoesNotCloseOpenedWatch(t *testing.T) {
+	calls := &callRecorder{}
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
 		"one": func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			calls = append(calls, "one")
-			mu.Unlock()
+			calls.add("one")
+			w.WriteHeader(http.StatusOK)
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
 			time.Sleep(20 * time.Millisecond)
 			_, _ = w.Write([]byte(`{"type":"MODIFIED","object":{"metadata":{"name":"demo"}}}` + "\n"))
 		},
 		"two": func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			calls = append(calls, "two")
-			mu.Unlock()
+			calls.add("two")
 			_, _ = w.Write([]byte(`{"type":"MODIFIED","object":{"metadata":{"name":"demo"}}}` + "\n"))
 		},
 	})
@@ -603,13 +659,50 @@ func TestRequestTimeoutDoesNotApplyToWatch(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
+	gotCalls := calls.snapshot()
 	for _, target := range []string{"one", "two"} {
-		if !slices.Contains(calls, target) {
-			t.Fatalf("calls = %v, want watch request to %s", calls, target)
+		if !slices.Contains(gotCalls, target) {
+			t.Fatalf("calls = %v, want watch request to %s", gotCalls, target)
 		}
 		if !strings.Contains(rec.Body.String(), `"context":"`+target+`"`) {
 			t.Fatalf("body = %s, want context label for %s", rec.Body.String(), target)
 		}
+	}
+}
+
+func TestWatchOpenUsesTimeoutAndStartsTargetsInParallel(t *testing.T) {
+	var calls int32
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&calls, 1)
+			<-r.Context().Done()
+		},
+		"two": func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&calls, 1)
+			<-r.Context().Done()
+		},
+	})
+	defer cleanup()
+
+	p, err := newTestProxyWithOptions(targets, targets[0], Options{RequestTimeout: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/apis/apps/v1/namespaces/default/deployments?watch=true", http.NoBody)
+	rec := httptest.NewRecorder()
+	start := time.Now()
+	serveTestHTTP(p, rec, req)
+	elapsed := time.Since(start)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("calls = %d, want both watch opens to start", got)
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("watch open took %s, want bounded by request timeout", elapsed)
 	}
 }
 

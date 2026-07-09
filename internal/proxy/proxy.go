@@ -44,6 +44,13 @@ type watchStream struct {
 	target   Target
 	header   http.Header
 	response *http.Response
+	cancel   context.CancelFunc
+}
+
+type watchOpenResult struct {
+	stream   watchStream
+	response upstreamResponse
+	failed   bool
 }
 
 type Options struct {
@@ -109,7 +116,7 @@ func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
 	streams, failed := p.openWatchStreams(r.Context(), r)
 	if failed != nil {
 		for _, stream := range streams {
-			_ = stream.response.Body.Close()
+			closeWatchStream(stream)
 		}
 		if failed.err != nil {
 			writeStatusError(w, http.StatusBadGateway, failed.err.Error())
@@ -120,7 +127,7 @@ func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		for _, stream := range streams {
-			_ = stream.response.Body.Close()
+			closeWatchStream(stream)
 		}
 	}()
 
@@ -150,42 +157,103 @@ func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) openWatchStreams(ctx context.Context, original *http.Request) ([]watchStream, *upstreamResponse) {
-	streams := make([]watchStream, 0, len(p.targets))
-	for _, target := range p.targets {
-		upstreamURL := buildUpstreamURL(target.Host, original.URL)
-		request, err := http.NewRequestWithContext(ctx, original.Method, upstreamURL.String(), nil)
-		if err != nil {
-			return streams, &upstreamResponse{target: target, err: err}
-		}
-		copyHeaders(request.Header, original.Header)
-		request.Header.Del("Authorization")
-		request.Host = target.Host.Host
+	results := make([]watchOpenResult, len(p.targets))
+	var wg sync.WaitGroup
+	for i, target := range p.targets {
+		i, target := i, target
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i] = p.openWatchStream(ctx, original, target)
+		}()
+	}
+	wg.Wait()
 
-		response, err := target.Client.Do(request)
-		if err != nil {
-			return streams, &upstreamResponse{target: target, err: err}
+	streams := make([]watchStream, 0, len(results))
+	for _, result := range results {
+		if result.failed {
+			return streams, &result.response
 		}
-		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			body, readErr := io.ReadAll(response.Body)
-			_ = response.Body.Close()
-			if readErr != nil {
-				return streams, &upstreamResponse{target: target, err: readErr}
-			}
-			return streams, &upstreamResponse{
+		streams = append(streams, result.stream)
+	}
+	return streams, nil
+}
+
+func (p *Proxy) openWatchStream(ctx context.Context, original *http.Request, target Target) watchOpenResult {
+	requestCtx, cancel := context.WithCancel(ctx)
+	timer := (*time.Timer)(nil)
+	if p.options.RequestTimeout > 0 {
+		timer = time.AfterFunc(p.options.RequestTimeout, cancel)
+	}
+
+	upstreamURL := buildUpstreamURL(target.Host, original.URL)
+	request, err := http.NewRequestWithContext(requestCtx, original.Method, upstreamURL.String(), nil)
+	if err != nil {
+		cancel()
+		if timer != nil {
+			timer.Stop()
+		}
+		return failedWatchOpen(target, err)
+	}
+	copyHeaders(request.Header, original.Header)
+	request.Header.Del("Authorization")
+	request.Host = target.Host.Host
+
+	response, err := target.Client.Do(request)
+	if err != nil {
+		if requestCtx.Err() != nil && ctx.Err() == nil {
+			err = context.DeadlineExceeded
+		}
+		cancel()
+		if timer != nil {
+			timer.Stop()
+		}
+		return failedWatchOpen(target, err)
+	}
+	if timer != nil && !timer.Stop() {
+		_ = response.Body.Close()
+		cancel()
+		return failedWatchOpen(target, context.DeadlineExceeded)
+	}
+
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, readErr := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		cancel()
+		if readErr != nil {
+			return failedWatchOpen(target, readErr)
+		}
+		return watchOpenResult{
+			response: upstreamResponse{
 				target: target,
 				status: response.StatusCode,
 				header: response.Header.Clone(),
 				body:   body,
-			}
+			},
+			failed: true,
 		}
+	}
 
-		streams = append(streams, watchStream{
+	return watchOpenResult{
+		stream: watchStream{
 			target:   target,
 			header:   response.Header.Clone(),
 			response: response,
-		})
+			cancel:   cancel,
+		},
 	}
-	return streams, nil
+}
+
+func failedWatchOpen(target Target, err error) watchOpenResult {
+	return watchOpenResult{
+		response: upstreamResponse{target: target, err: err},
+		failed:   true,
+	}
+}
+
+func closeWatchStream(stream watchStream) {
+	_ = stream.response.Body.Close()
+	stream.cancel()
 }
 
 func copyWatchStream(ctx context.Context, stream watchStream, w io.Writer, flusher http.Flusher, writeMu *sync.Mutex) {
@@ -723,14 +791,11 @@ func shouldUseRequestTimeout(r *http.Request) bool {
 }
 
 func isLongRunningRequest(r *http.Request) bool {
-	path := r.URL.Path
 	if isWatchRequest(r) {
 		return true
 	}
-	return strings.Contains(path, "/exec") ||
-		strings.Contains(path, "/attach") ||
-		strings.Contains(path, "/portforward") ||
-		strings.Contains(path, "/log")
+	_, ok := podObjectPathForSubresource(r.URL.Path)
+	return ok
 }
 
 func podObjectPathForSubresource(path string) (string, bool) {
