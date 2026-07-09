@@ -35,18 +35,25 @@ func main() {
 }
 
 func run() error {
+	return runWithArgs(os.Args[1:], nil)
+}
+
+func runWithArgs(args []string, stop <-chan os.Signal) error {
+	flags := flag.NewFlagSet("kubeconfig-proxy", flag.ContinueOnError)
 	var (
-		kubeconfigPath = flag.String("kubeconfig", "", "source kubeconfig path; defaults to standard kubeconfig loading rules")
-		outputPath     = flag.String("output", filepath.Join(mustHomeDir(), ".kube", "config.proxy"), "proxy kubeconfig output path")
-		listenAddr     = flag.String("listen", "127.0.0.1:0", "proxy listen address")
-		contextsCSV    = flag.String("contexts", "", "comma-separated kubeconfig contexts to include; defaults to all contexts")
-		primaryContext = flag.String("primary-context", "", "context used for single-cluster operations; defaults to current context")
-		requestTimeout = flag.Duration("request-timeout", 30*time.Second, "timeout for one upstream Kubernetes API request; 0 disables it")
-		retries        = flag.Int("retries", 0, "number of retries for failed upstream requests")
-		retryBackoff   = flag.Duration("retry-backoff", 200*time.Millisecond, "delay between upstream request retries")
-		helmRelease    = flag.Bool("helm-release-proxy", false, "proxy Helm release storage list/watch requests only through the primary context")
+		kubeconfigPath = flags.String("kubeconfig", "", "source kubeconfig path; defaults to standard kubeconfig loading rules")
+		outputPath     = flags.String("output", filepath.Join(mustHomeDir(), ".kube", "config.proxy"), "proxy kubeconfig output path")
+		listenAddr     = flags.String("listen", "127.0.0.1:0", "proxy listen address")
+		contextsCSV    = flags.String("contexts", "", "comma-separated kubeconfig contexts to include; defaults to all contexts")
+		primaryContext = flags.String("primary-context", "", "context used for single-cluster operations; defaults to current context")
+		requestTimeout = flags.Duration("request-timeout", 30*time.Second, "timeout for one upstream Kubernetes API request; 0 disables it")
+		retries        = flags.Int("retries", 0, "number of retries for failed upstream requests")
+		retryBackoff   = flags.Duration("retry-backoff", 200*time.Millisecond, "delay between upstream request retries")
+		helmRelease    = flags.Bool("helm-release-proxy", false, "proxy Helm release storage list/watch requests only through the primary context")
 	)
-	flag.Parse()
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
 
 	selectedContexts := splitCSV(*contextsCSV)
 	targets, primary, err := proxy.LoadTargets(*kubeconfigPath, selectedContexts, *primaryContext)
@@ -106,8 +113,12 @@ func run() error {
 		errCh <- server.Serve(tlsListener)
 	}()
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	if stop == nil {
+		signalStop := make(chan os.Signal, 1)
+		signal.Notify(signalStop, os.Interrupt, syscall.SIGTERM)
+		defer signal.Stop(signalStop)
+		stop = signalStop
+	}
 	select {
 	case <-stop:
 		log.Printf("shutting down")
