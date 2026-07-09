@@ -1,61 +1,75 @@
 # kubeconfig-proxy
 
-`kubeconfig-proxy` starts a local Kubernetes API proxy for every context in a
-source kubeconfig and writes a new kubeconfig that points `kubectl` to that
-proxy.
+`kubeconfig-proxy` is a local Kubernetes API proxy that lets one generated
+kubeconfig work with several source kubeconfig contexts at the same time.
 
-On every start, the proxy generates a temporary bearer token, writes it into the
-generated kubeconfig, and requires it on every incoming request.
+It is useful when you want to run ordinary Kubernetes tools against a group of
+clusters as if they were one logical target:
 
-Current MVP behavior:
+- inspect resources from multiple clusters in one `kubectl get`;
+- create or update the same resource in every selected cluster;
+- route selected resources to one specific cluster with annotations;
+- deploy simple Helm/werf projects through one proxy kubeconfig.
 
-- list requests are aggregated from all selected source contexts;
-- watch requests are streamed from all selected source contexts;
-- create, update, patch and delete requests are sent to all selected contexts;
-- resources can opt into single-context mutations with annotations;
-- logs, exec, attach, port-forward and discovery requests are proxied only to
-  one context.
+On startup, the proxy reads a source kubeconfig, starts a local HTTPS proxy, and
+writes a new kubeconfig that points to that proxy. The generated kubeconfig
+contains temporary proxy credentials, so only clients with that file can use the
+local proxy.
 
-When `--helm-release-proxy` is enabled, Helm release storage list/watch requests
-are proxied only to the primary context. Helm and werf expect release history to
-be a single linear stream; returning the same release Secret or ConfigMap from
-multiple clusters can break their release planner.
+## How It Works
 
-## Usage
+The proxy keeps a list of source contexts from the original kubeconfig. Requests
+made through the generated kubeconfig are routed according to request type:
+
+- list requests are aggregated from all selected contexts;
+- watch requests are streamed from all selected contexts;
+- create, update, patch, and delete requests are sent to all selected contexts;
+- discovery requests use the primary context;
+- named pod subresources such as `logs`, `exec`, `attach`, and `port-forward`
+  are routed to the context that contains the pod;
+- resources can opt into single-context mutation with annotations.
+
+Aggregated objects are marked with:
+
+```yaml
+kubeconfig-proxy.io/context: <source-context>
+```
+
+The proxy also injects a virtual `context` label into aggregated responses, so
+you can display the source cluster directly:
 
 ```bash
-GOTOOLCHAIN=auto go run ./cmd/kubeconfig-proxy \
+kubectl get pods -A -L context
+```
+
+## Quick Start
+
+Run the compiled binary:
+
+```bash
+kubeconfig-proxy \
   --kubeconfig ~/.kube/config \
-  --output ~/.kube/config.proxy
+  --contexts dev,stage \
+  --primary-context dev \
+  --output ~/.kube/config.proxy \
+  --listen 127.0.0.1:9443
 ```
 
-In another terminal:
+Keep the process running. In another terminal, use the generated kubeconfig:
 
 ```bash
-KUBECONFIG=~/.kube/config.proxy kubectl get pods -A
+KUBECONFIG=~/.kube/config.proxy kubectl get namespaces -L context
 ```
 
-Useful flags:
+If `--contexts` is omitted, all contexts from the source kubeconfig are used. If
+`--primary-context` is omitted, the source kubeconfig current context is used;
+when there is no current context, the first selected context is used.
 
-- `--contexts dev,stage,prod` limits the proxy to specific source contexts;
-- `--primary-context dev` selects the target for primary-only API calls;
-- `--listen 127.0.0.1:9443` uses a stable local address;
-- `--request-timeout 30s` sets the timeout for one upstream Kubernetes API
-  request; use `0` to disable it;
-- `--retries 2` retries failed upstream requests twice;
-- `--retry-backoff 500ms` sets the delay between retry attempts;
-- `--helm-release-proxy` reads Helm release history only from the primary
-  context for Helm/werf compatibility.
-
-Retries are disabled by default. When enabled, the proxy retries network errors
-and temporary upstream HTTP responses: `429`, `500`, `502`, `503` and `504`.
-
-## Resource routing annotations
+## Resource Routing Annotations
 
 By default, mutating requests are sent to every selected context.
 
-Add this annotation to create or update a resource only in one specific source
-context:
+To create or update a resource only in one specific source context, add:
 
 ```yaml
 metadata:
@@ -63,8 +77,7 @@ metadata:
     kubeconfig-proxy.io/context-name: dev
 ```
 
-Add this annotation to create or update a resource only in one context selected
-by the proxy. The selected context is the first one by alphabetical context name:
+To create or update a resource in any single context, add:
 
 ```yaml
 metadata:
@@ -72,22 +85,86 @@ metadata:
     kubeconfig-proxy.io/single-context: "true"
 ```
 
-If both annotations are present, `kubeconfig-proxy.io/context-name` wins.
+The selected context for `single-context` is the first configured context by
+alphabetical name. If both annotations are present,
+`kubeconfig-proxy.io/context-name` wins.
 
-The proxy annotates aggregated list items with:
+## Helm And Werf
 
-```yaml
-kubeconfig-proxy.io/context: <source-context>
-```
+Helm and werf store release history in Kubernetes Secrets or ConfigMaps and
+expect that history to be a single linear stream. If the proxy returns the same
+release record from several clusters, their release planner can fail.
 
-It also injects a virtual `context` label into aggregated responses, so the
-source context can be shown in table output:
+Use `--helm-release-proxy` when deploying Helm/werf projects through the proxy:
 
 ```bash
-kubectl get pods -A -L context
+kubeconfig-proxy \
+  --kubeconfig ~/.kube/config \
+  --contexts dev,stage \
+  --primary-context dev \
+  --output ~/.kube/config.proxy \
+  --listen 127.0.0.1:9443 \
+  --helm-release-proxy
 ```
 
-Named pod subresources such as `kubectl logs <pod>` are resolved against the
-cluster that contains the pod.
-Upgrade-based subresources such as `exec`, `attach` and `port-forward` are
-proxied as upgraded bidirectional streams.
+With this mode enabled, Helm release storage list/watch requests are read only
+from the primary context, while ordinary application resources are still fanned
+out to all selected contexts.
+
+See [examples/werf/README.md](examples/werf/README.md) for a complete local
+werf example.
+
+## Flags
+
+- `--kubeconfig ~/.kube/config` selects the source kubeconfig. If omitted,
+  standard Kubernetes kubeconfig loading rules are used.
+- `--output ~/.kube/config.proxy` sets the generated proxy kubeconfig path.
+- `--contexts dev,stage,prod` limits the proxy to specific source contexts.
+- `--primary-context dev` selects the context used for discovery and other
+  primary-only operations.
+- `--listen 127.0.0.1:9443` sets the proxy listen address.
+- `--request-timeout 30s` sets the timeout for one upstream Kubernetes API
+  request. Use `0` to disable it.
+- `--retries 2` retries temporary upstream failures.
+- `--retry-backoff 500ms` sets the delay between retry attempts.
+- `--helm-release-proxy` enables Helm/werf release-history compatibility mode.
+
+Retries are disabled by default. When enabled, the proxy retries network errors
+and temporary upstream HTTP responses: `429`, `500`, `502`, `503`, and `504`.
+
+## Security
+
+The proxy uses the credentials from the source kubeconfig to talk to the source
+clusters. Protect the listen address accordingly.
+
+On every startup, the proxy generates:
+
+- a temporary bearer token required by every incoming request;
+- a temporary self-signed TLS certificate for the generated kubeconfig.
+
+The generated kubeconfig is written with file mode `0600`. Keep the proxy bound
+to `127.0.0.1` unless you intentionally want to expose it to a trusted network.
+
+## Local Examples
+
+- [examples/kind.md](examples/kind.md) shows how to test the proxy with two
+  local kind clusters.
+- [examples/werf/README.md](examples/werf/README.md) shows how to deploy a
+  simple nginx chart and a single-context Job through werf.
+
+## Development
+
+Run tests:
+
+```bash
+GOTOOLCHAIN=auto go test ./...
+GOTOOLCHAIN=auto go test -race ./internal/proxy
+```
+
+Build the binary:
+
+```bash
+GOTOOLCHAIN=auto go build -trimpath -o kubeconfig-proxy ./cmd/kubeconfig-proxy
+```
+
+Release builds are produced by GitHub Actions when a `v*` tag is pushed.
