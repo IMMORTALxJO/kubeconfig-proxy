@@ -1,0 +1,6 @@
+apiVersion: v2
+name: kubeconfig-proxy-werf
+description: Example chart for deploying through kubeconfig-proxy with werf.
+type: application
+version: 0.1.0
+appVersion: "1.0"

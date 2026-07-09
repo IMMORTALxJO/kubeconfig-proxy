@@ -1,0 +1,23 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Chart.Name }}-smoke
+  annotations:
+    kubeconfig.proxy/single-context: "true"
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-smoke
+    app.kubernetes.io/part-of: {{ .Chart.Name }}
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}-smoke
+        app.kubernetes.io/part-of: {{ .Chart.Name }}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: smoke
+          image: {{ .Values.job.image | quote }}
+          command:
+{{ toYaml .Values.job.command | indent 12 }}

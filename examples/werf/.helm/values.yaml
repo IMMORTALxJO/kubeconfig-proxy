@@ -1,0 +1,11 @@
+nginx:
+  replicas: 1
+  image: nginx:1.27-alpine
+  port: 80
+
+job:
+  image: busybox:1.37
+  command:
+    - sh
+    - -c
+    - echo "hello from $(hostname)"

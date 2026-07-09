@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}-nginx
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-nginx
+    app.kubernetes.io/part-of: {{ .Chart.Name }}
+spec:
+  replicas: {{ .Values.nginx.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}-nginx
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}-nginx
+        app.kubernetes.io/part-of: {{ .Chart.Name }}
+    spec:
+      containers:
+        - name: nginx
+          image: {{ .Values.nginx.image | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.nginx.port }}
