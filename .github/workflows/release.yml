@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  attestations: write
+  id-token: write
 
 jobs:
   release:
@@ -15,13 +17,18 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Vulnerability scan
+        env:
+          GOTOOLCHAIN: go1.26.5
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.5.0 ./...
 
       - name: Test
         run: go test ./...
@@ -67,6 +74,24 @@ jobs:
           done
 
           (cd dist && sha256sum * > checksums.txt)
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+        with:
+          cosign-release: v3.1.0
+
+      - name: Sign release assets
+        run: |
+          set -euo pipefail
+
+          for artifact in dist/*.tar.gz dist/*.zip dist/checksums.txt; do
+            cosign sign-blob --yes --bundle "${artifact}.bundle" "$artifact"
+          done
+
+      - name: Generate build provenance
+        uses: actions/attest-build-provenance@e4d4f7c39adfa4c260fb5c147f0622000aa14b99 # v4.0.0
+        with:
+          subject-checksums: dist/checksums.txt
 
       - name: Publish GitHub Release
         env:
