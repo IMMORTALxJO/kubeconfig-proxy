@@ -22,7 +22,6 @@ Complete [../kind.md](../kind.md) first and keep `kubeconfig-proxy` running:
 
 ```bash
 GOTOOLCHAIN=auto go run ./cmd/kubeconfig-proxy \
-  --kubeconfig /Users/aleksandr.prusov/.kube/proxy-config \
   --contexts kind-proxy-a,kind-proxy-b \
   --primary-context kind-proxy-a \
   --output /tmp/kubeconfig-proxy.kind.yaml \
@@ -86,12 +85,10 @@ and once from `kind-proxy-b`.
 You can also check the original clusters directly:
 
 ```bash
-kubectl --kubeconfig /Users/aleksandr.prusov/.kube/proxy-config \
-  --context kind-proxy-a \
+kubectl --context kind-proxy-a \
   -n kubeconfig-proxy-werf-kind get deploy,svc
 
-kubectl --kubeconfig /Users/aleksandr.prusov/.kube/proxy-config \
-  --context kind-proxy-b \
+kubectl --context kind-proxy-b \
   -n kubeconfig-proxy-werf-kind get deploy,svc
 ```
 
@@ -108,12 +105,10 @@ KUBECONFIG=/tmp/kubeconfig-proxy.kind.yaml \
 Direct cluster checks:
 
 ```bash
-kubectl --kubeconfig /Users/aleksandr.prusov/.kube/proxy-config \
-  --context kind-proxy-a \
+kubectl --context kind-proxy-a \
   -n kubeconfig-proxy-werf-kind get job kubeconfig-proxy-werf-smoke
 
-kubectl --kubeconfig /Users/aleksandr.prusov/.kube/proxy-config \
-  --context kind-proxy-b \
+kubectl --context kind-proxy-b \
   -n kubeconfig-proxy-werf-kind get job kubeconfig-proxy-werf-smoke
 ```
 
@@ -143,8 +138,7 @@ clusters:
 
 ```bash
 for ctx in kind-proxy-a kind-proxy-b; do
-  kubectl --kubeconfig /Users/aleksandr.prusov/.kube/proxy-config \
-    --context "$ctx" \
+  kubectl --context "$ctx" \
     delete namespace kubeconfig-proxy-werf-kind --ignore-not-found
 done
 ```
