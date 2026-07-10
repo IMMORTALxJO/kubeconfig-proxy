@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,10 +21,12 @@ import (
 )
 
 const (
-	contextNameAnnotation   = "kubeconfig-proxy.io/context-name"
-	singleContextAnnotation = "kubeconfig-proxy.io/single-context"
-	sourceContextAnnotation = "kubeconfig-proxy.io/context"
-	sourceContextLabel      = "context"
+	contextNameAnnotation            = "kubeconfig-proxy.io/context-name"
+	singleContextAnnotation          = "kubeconfig-proxy.io/single-context"
+	sourceContextAnnotation          = "kubeconfig-proxy.io/context"
+	sourceContextLabel               = "context"
+	aggregateResourceVersionPrefix   = "kubeconfig-proxy:"
+	aggregateResourceVersionQueryKey = "resourceVersion"
 )
 
 type Proxy struct {
@@ -114,6 +117,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
+	empty, failed := p.selectedWatchIsEmpty(r)
+	if failed != nil {
+		if failed.err != nil {
+			writeStatusError(w, http.StatusBadGateway, failed.err.Error())
+			return
+		}
+		writeUpstreamResponse(w, *failed)
+		return
+	}
+	if empty {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	streams, failed := p.openWatchStreams(r.Context(), r)
 	if failed != nil {
 		for _, stream := range streams {
@@ -157,6 +175,45 @@ func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 }
 
+func (p *Proxy) selectedWatchIsEmpty(r *http.Request) (bool, *upstreamResponse) {
+	if !isNamedFieldSelector(r.URL.Query().Get("fieldSelector")) {
+		return false, nil
+	}
+
+	listURL := *r.URL
+	query := listURL.Query()
+	for _, key := range []string{"watch", "resourceVersion", "resourceVersionMatch", "allowWatchBookmarks", "timeoutSeconds", "sendInitialEvents"} {
+		query.Del(key)
+	}
+	listURL.RawQuery = query.Encode()
+
+	listRequest := r.Clone(r.Context())
+	listRequest.Method = http.MethodGet
+	listRequest.URL = &listURL
+	listRequest.Body = nil
+	listRequest.ContentLength = 0
+
+	responses := p.doAll(r.Context(), listRequest, nil)
+	for _, response := range responses {
+		if response.err != nil {
+			return false, &response
+		}
+		if response.status < 200 || response.status >= 300 {
+			return false, &response
+		}
+
+		var payload map[string]any
+		if err := json.Unmarshal(response.body, &payload); err != nil {
+			return false, &upstreamResponse{target: response.target, err: err}
+		}
+		items, ok := payload["items"].([]any)
+		if !ok || len(items) > 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func (p *Proxy) openWatchStreams(ctx context.Context, original *http.Request) ([]watchStream, *upstreamResponse) {
 	results := make([]watchOpenResult, len(p.targets))
 	var wg sync.WaitGroup
@@ -188,6 +245,7 @@ func (p *Proxy) openWatchStream(ctx context.Context, original *http.Request, tar
 	}
 
 	upstreamURL := buildUpstreamURL(target.Host, original.URL)
+	applyAggregateResourceVersion(upstreamURL, target.Name)
 	request, err := http.NewRequestWithContext(requestCtx, original.Method, upstreamURL.String(), nil)
 	if err != nil {
 		cancel()
@@ -390,7 +448,7 @@ func (p *Proxy) fanOut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	targets, err := p.targetsForMutation(body)
+	targets, err := p.targetsForMutationRequest(r.Context(), r, body)
 	if err != nil {
 		writeStatusError(w, http.StatusBadRequest, err.Error())
 		return
@@ -555,10 +613,14 @@ func buildUpstreamURL(host *url.URL, requestURL *url.URL) *url.URL {
 
 func mergeLists(responses []upstreamResponse) ([]byte, error) {
 	var merged map[string]any
+	resourceVersions := map[string]string{}
 	for _, response := range responses {
 		var payload map[string]any
 		if err := json.Unmarshal(response.body, &payload); err != nil {
 			return nil, fmt.Errorf("%s: decode list response: %w", response.target.Name, err)
+		}
+		if resourceVersion := payloadResourceVersion(payload); resourceVersion != "" {
+			resourceVersions[response.target.Name] = resourceVersion
 		}
 
 		switch {
@@ -571,6 +633,10 @@ func mergeLists(responses []upstreamResponse) ([]byte, error) {
 		}
 	}
 
+	if merged != nil {
+		metadata := ensureMap(merged, "metadata")
+		metadata["resourceVersion"] = encodeAggregateResourceVersion(resourceVersions)
+	}
 	return json.Marshal(merged)
 }
 
@@ -587,8 +653,6 @@ func mergeListItems(payload map[string]any, merged *map[string]any, contextName 
 
 	if *merged == nil {
 		*merged = payload
-		metadata := ensureMap(*merged, "metadata")
-		metadata["resourceVersion"] = ""
 		(*merged)["items"] = items
 		return
 	}
@@ -612,8 +676,6 @@ func mergeTableRows(payload map[string]any, merged *map[string]any, contextName 
 
 	if *merged == nil {
 		*merged = payload
-		metadata := ensureMap(*merged, "metadata")
-		metadata["resourceVersion"] = ""
 		(*merged)["rows"] = rows
 		return
 	}
@@ -669,6 +731,99 @@ func ensureMap(parent map[string]any, key string) map[string]any {
 func hasArray(payload map[string]any, key string) bool {
 	_, ok := payload[key].([]any)
 	return ok
+}
+
+func payloadResourceVersion(payload map[string]any) string {
+	metadata, ok := payload["metadata"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	resourceVersion, _ := metadata["resourceVersion"].(string)
+	return resourceVersion
+}
+
+func encodeAggregateResourceVersion(resourceVersions map[string]string) string {
+	if len(resourceVersions) == 0 {
+		return ""
+	}
+	payload, err := json.Marshal(resourceVersions)
+	if err != nil {
+		return ""
+	}
+	return aggregateResourceVersionPrefix + base64.RawURLEncoding.EncodeToString(payload)
+}
+
+func decodeAggregateResourceVersion(resourceVersion string) (map[string]string, bool) {
+	if !strings.HasPrefix(resourceVersion, aggregateResourceVersionPrefix) {
+		return nil, false
+	}
+	encoded := strings.TrimPrefix(resourceVersion, aggregateResourceVersionPrefix)
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, false
+	}
+	var resourceVersions map[string]string
+	if err := json.Unmarshal(payload, &resourceVersions); err != nil {
+		return nil, false
+	}
+	return resourceVersions, true
+}
+
+func applyAggregateResourceVersion(upstreamURL *url.URL, targetName string) {
+	query := upstreamURL.Query()
+	resourceVersions, ok := decodeAggregateResourceVersion(query.Get(aggregateResourceVersionQueryKey))
+	if !ok {
+		return
+	}
+	if resourceVersion := resourceVersions[targetName]; resourceVersion != "" {
+		query.Set(aggregateResourceVersionQueryKey, resourceVersion)
+	} else {
+		query.Del(aggregateResourceVersionQueryKey)
+	}
+	upstreamURL.RawQuery = query.Encode()
+}
+
+func (p *Proxy) targetsForMutationRequest(ctx context.Context, original *http.Request, body []byte) ([]Target, error) {
+	if original.Method == http.MethodDelete && isNamedResourcePath(original.URL.Path) {
+		if targets, ok, err := p.targetsForExistingResourceMutation(ctx, original); err != nil || ok {
+			return targets, err
+		}
+	}
+	return p.targetsForMutation(body)
+}
+
+func (p *Proxy) targetsForExistingResourceMutation(ctx context.Context, original *http.Request) ([]Target, bool, error) {
+	for _, target := range p.targets {
+		objectURL := *original.URL
+		objectURL.RawQuery = ""
+
+		request := original.Clone(ctx)
+		request.Method = http.MethodGet
+		request.URL = &objectURL
+		request.Body = nil
+		request.ContentLength = 0
+
+		response := p.do(ctx, target, request, nil)
+		if response.err != nil {
+			return nil, false, response.err
+		}
+		if response.status == http.StatusNotFound {
+			continue
+		}
+		if response.status < 200 || response.status >= 300 {
+			return nil, false, fmt.Errorf("%s: get existing resource before mutation returned HTTP %d", target.Name, response.status)
+		}
+
+		targets, err := p.targetsForMutation(response.body)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(targets) != len(p.targets) {
+			return targets, true, nil
+		}
+		return p.targets, false, nil
+	}
+	return nil, false, nil
 }
 
 func (p *Proxy) targetsForMutation(body []byte) ([]Target, error) {
@@ -857,6 +1012,16 @@ func labelSelectorHas(selector, key, value string) bool {
 	for _, requirement := range strings.Split(selector, ",") {
 		requirement = strings.TrimSpace(requirement)
 		if requirement == key+"="+value || requirement == key+"=="+value {
+			return true
+		}
+	}
+	return false
+}
+
+func isNamedFieldSelector(selector string) bool {
+	for _, requirement := range strings.Split(selector, ",") {
+		requirement = strings.TrimSpace(requirement)
+		if strings.HasPrefix(requirement, "metadata.name=") || strings.HasPrefix(requirement, "metadata.name==") {
 			return true
 		}
 	}
