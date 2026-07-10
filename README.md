@@ -125,12 +125,13 @@ werf example.
 - `--listen 127.0.0.1:9443` sets the proxy listen address.
 - `--request-timeout 30s` sets the timeout for one upstream Kubernetes API
   request. Use `0` to disable it.
-- `--retries 2` retries temporary upstream failures.
+- `--retries 5` retries temporary upstream failures.
 - `--retry-backoff 500ms` sets the delay between retry attempts.
 - `--helm-release-proxy` enables Helm/werf release-history compatibility mode.
 
-Retries are disabled by default. When enabled, the proxy retries network errors
-and temporary upstream HTTP responses: `429`, `500`, `502`, `503`, and `504`.
+Retries default to `5`. Set `--retries 0` to disable them. The proxy retries
+network errors and temporary upstream HTTP responses: `429`, `500`, `502`,
+`503`, and `504`.
 
 ## Security
 

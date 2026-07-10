@@ -23,6 +23,12 @@ type seenUpdate struct {
 
 const testBearerToken = "test-token"
 
+func TestDefaultRetries(t *testing.T) {
+	if DefaultRetries != 5 {
+		t.Fatalf("DefaultRetries = %d, want 5", DefaultRetries)
+	}
+}
+
 type callRecorder struct {
 	mu    sync.Mutex
 	calls []string
