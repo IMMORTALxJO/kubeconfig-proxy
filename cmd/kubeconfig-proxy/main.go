@@ -47,7 +47,7 @@ func runWithArgs(args []string, stop <-chan os.Signal) error {
 		contextsCSV    = flags.String("contexts", "", "comma-separated kubeconfig contexts to include; defaults to all contexts")
 		primaryContext = flags.String("primary-context", "", "context used for single-cluster operations; defaults to current context")
 		requestTimeout = flags.Duration("request-timeout", 30*time.Second, "timeout for one upstream Kubernetes API request; 0 disables it")
-		retries        = flags.Int("retries", 0, "number of retries for failed upstream requests")
+		retries        = flags.Int("retries", proxy.DefaultRetries, "number of retries for failed upstream requests")
 		retryBackoff   = flags.Duration("retry-backoff", 200*time.Millisecond, "delay between upstream request retries")
 		helmRelease    = flags.Bool("helm-release-proxy", false, "proxy Helm release storage list/watch requests only through the primary context")
 	)

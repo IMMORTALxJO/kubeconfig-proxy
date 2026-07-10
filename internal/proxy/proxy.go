@@ -21,6 +21,7 @@ import (
 )
 
 const (
+	DefaultRetries                   = 5
 	contextNameAnnotation            = "kubeconfig-proxy.io/context-name"
 	singleContextAnnotation          = "kubeconfig-proxy.io/single-context"
 	sourceContextAnnotation          = "kubeconfig-proxy.io/context"
@@ -67,6 +68,7 @@ type Options struct {
 func New(targets []Target, primary Target) (*Proxy, error) {
 	return NewWithOptions(targets, primary, Options{
 		RequestTimeout: 30 * time.Second,
+		Retries:        DefaultRetries,
 		RetryBackoff:   200 * time.Millisecond,
 	})
 }
