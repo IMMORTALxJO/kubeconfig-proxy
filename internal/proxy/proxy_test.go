@@ -294,6 +294,53 @@ metadata:
 	}
 }
 
+func TestDeleteNamedResourceUsesExistingResourceAnnotations(t *testing.T) {
+	calls := &callRecorder{}
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				calls.add("one:get")
+				_, _ = w.Write([]byte(`{"kind":"Job","metadata":{"name":"demo","annotations":{"kubeconfig-proxy.io/single-context":"true"}}}`))
+			case http.MethodDelete:
+				calls.add("one:delete")
+				_, _ = w.Write([]byte(`{"kind":"Status","status":"Success"}`))
+			default:
+				t.Fatalf("unexpected method %s", r.Method)
+			}
+		},
+		"two": func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				calls.add("two:get")
+				http.NotFound(w, r)
+			case http.MethodDelete:
+				t.Fatalf("delete should be routed only to the annotated target")
+			default:
+				t.Fatalf("unexpected method %s", r.Method)
+			}
+		},
+	})
+	defer cleanup()
+
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/apis/batch/v1/namespaces/default/jobs/demo", http.NoBody)
+	rec := httptest.NewRecorder()
+	serveTestHTTP(p, rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	gotCalls := calls.snapshot()
+	if !slices.Contains(gotCalls, "one:get") || !slices.Contains(gotCalls, "one:delete") {
+		t.Fatalf("calls = %v, want get and delete on annotated target", gotCalls)
+	}
+}
+
 func TestContextNameAnnotationRejectsUnknownTarget(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
 		"one": func(w http.ResponseWriter, r *http.Request) {
@@ -376,6 +423,116 @@ func TestAggregatesListResponses(t *testing.T) {
 	}
 	if payload.Items[1].Metadata.Labels["context"] != "two" {
 		t.Fatalf("second item labels = %#v", payload.Items[1].Metadata.Labels)
+	}
+}
+
+func TestAggregateWatchUsesPerTargetResourceVersions(t *testing.T) {
+	calls := &callRecorder{}
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("watch") == "true" {
+				calls.add("one:" + r.URL.Query().Get("resourceVersion"))
+				_, _ = w.Write([]byte(`{"type":"BOOKMARK","object":{"metadata":{"name":"a"}}}` + "\n"))
+				return
+			}
+			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"10"},"items":[{"metadata":{"name":"a"}}]}`))
+		},
+		"two": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("watch") == "true" {
+				calls.add("two:" + r.URL.Query().Get("resourceVersion"))
+				_, _ = w.Write([]byte(`{"type":"BOOKMARK","object":{"metadata":{"name":"b"}}}` + "\n"))
+				return
+			}
+			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"11"},"items":[{"metadata":{"name":"b"}}]}`))
+		},
+	})
+	defer cleanup()
+
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/namespaces/default/pods", http.NoBody)
+	listRec := httptest.NewRecorder()
+	serveTestHTTP(p, listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want %d; body=%s", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+
+	var listPayload struct {
+		Metadata struct {
+			ResourceVersion string `json:"resourceVersion"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listPayload); err != nil {
+		t.Fatal(err)
+	}
+	if listPayload.Metadata.ResourceVersion == "" {
+		t.Fatalf("list resourceVersion is empty; body=%s", listRec.Body.String())
+	}
+
+	query := url.Values{}
+	query.Set("watch", "true")
+	query.Set("resourceVersion", listPayload.Metadata.ResourceVersion)
+	watchReq := httptest.NewRequest(http.MethodGet, "/api/v1/namespaces/default/pods?"+query.Encode(), http.NoBody)
+	watchRec := httptest.NewRecorder()
+	serveTestHTTP(p, watchRec, watchReq)
+
+	if watchRec.Code != http.StatusOK {
+		t.Fatalf("watch status = %d, want %d; body=%s", watchRec.Code, http.StatusOK, watchRec.Body.String())
+	}
+	gotCalls := calls.snapshot()
+	for _, want := range []string{"one:10", "two:11"} {
+		if !slices.Contains(gotCalls, want) {
+			t.Fatalf("calls = %v, want %s", gotCalls, want)
+		}
+	}
+}
+
+func TestAggregateWatchForMissingNamedResourceClosesImmediately(t *testing.T) {
+	calls := &callRecorder{}
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("watch") == "true" {
+				t.Fatalf("watch should not be opened when selected list is empty")
+			}
+			calls.add("one:list")
+			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"10"},"items":[]}`))
+		},
+		"two": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("watch") == "true" {
+				t.Fatalf("watch should not be opened when selected list is empty")
+			}
+			calls.add("two:list")
+			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"11"},"items":[]}`))
+		},
+	})
+	defer cleanup()
+
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	query := url.Values{}
+	query.Set("watch", "true")
+	query.Set("fieldSelector", "metadata.name=demo")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/namespaces/default/pods?"+query.Encode(), http.NoBody)
+	rec := httptest.NewRecorder()
+	serveTestHTTP(p, rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("body = %q, want empty closed watch response", rec.Body.String())
+	}
+	gotCalls := calls.snapshot()
+	for _, want := range []string{"one:list", "two:list"} {
+		if !slices.Contains(gotCalls, want) {
+			t.Fatalf("calls = %v, want %s", gotCalls, want)
+		}
 	}
 }
 
