@@ -93,6 +93,7 @@ func runWithArgs(args []string, stop <-chan os.Signal) error {
 	if err := kubeconfig.WriteProxyConfig(*outputPath, serverURL, "kubeconfig-proxy", primary.Namespace, bearerToken, certificateAuthorityData); err != nil {
 		return err
 	}
+	defer cleanupProxyKubeconfig(*outputPath)
 
 	log.Printf("source kubeconfig: %s", displayKubeconfigPath(*kubeconfigPath))
 	log.Printf("proxy kubeconfig:  %s", *outputPath)
@@ -172,6 +173,12 @@ func durationLogValue(value time.Duration) string {
 		return "disabled"
 	}
 	return value.String()
+}
+
+func cleanupProxyKubeconfig(path string) {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("remove proxy kubeconfig: %v", err)
+	}
 }
 
 func generateBearerToken() (string, error) {

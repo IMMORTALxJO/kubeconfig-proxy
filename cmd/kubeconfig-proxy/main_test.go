@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -59,6 +60,9 @@ func TestRunWithArgsWritesProxyKubeconfigAndServes(t *testing.T) {
 	}()
 
 	proxyConfig := waitForProxyConfig(t, outputPath, errCh)
+	if _, err := os.Stat(outputPath); err != nil {
+		t.Fatalf("proxy config should exist while proxy is running: %v", err)
+	}
 	proxyCluster := proxyConfig.Clusters["proxy"]
 	if proxyCluster == nil {
 		t.Fatal("generated proxy cluster is missing")
@@ -120,6 +124,9 @@ func TestRunWithArgsWritesProxyKubeconfigAndServes(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("runWithArgs did not stop")
+	}
+	if _, err := os.Stat(outputPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("proxy config should be removed after shutdown, stat err = %v", err)
 	}
 }
 

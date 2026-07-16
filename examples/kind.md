@@ -176,5 +176,4 @@ Stop the `kubeconfig-proxy` process, then remove the kind clusters:
 ```bash
 kind delete cluster --name proxy-a
 kind delete cluster --name proxy-b
-rm -f /tmp/kubeconfig-proxy.kind.yaml
 ```
