@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"encoding/base64"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -67,6 +70,55 @@ func TestLoadTargetsUsesSelectedContextsAndCurrentPrimary(t *testing.T) {
 	}
 	if seenAuth["beta"] != "Bearer beta-token" {
 		t.Fatalf("beta auth = %q, want bearer token from kubeconfig", seenAuth["beta"])
+	}
+}
+
+func TestLoadTargetsSupportsOIDCAuthProvider(t *testing.T) {
+	var seenAuth string
+	var seenAuthMu sync.Mutex
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuthMu.Lock()
+		seenAuth = r.Header.Get("Authorization")
+		seenAuthMu.Unlock()
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	idToken := validOIDCTestToken()
+	kubeconfigPath := writeTargetsTestKubeconfig(t, []targetContext{
+		{
+			name:   "oidc",
+			server: server.URL,
+			caData: serverCAData(server),
+			authProvider: &clientcmdapi.AuthProviderConfig{
+				Name: "oidc",
+				Config: map[string]string{
+					"idp-issuer-url": "https://issuer.example.test",
+					"client-id":      "kubeconfig-proxy-test",
+					"id-token":       idToken,
+				},
+			},
+		},
+	}, "oidc")
+
+	targets, primary, err := LoadTargets(kubeconfigPath, []string{"oidc"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if primary.Name != "oidc" {
+		t.Fatalf("primary = %q, want oidc", primary.Name)
+	}
+	resp, err := targets[0].Client.Get(targets[0].Host.String() + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	seenAuthMu.Lock()
+	defer seenAuthMu.Unlock()
+	if seenAuth != "Bearer "+idToken {
+		t.Fatalf("auth = %q, want OIDC id-token from kubeconfig", seenAuth)
 	}
 }
 
@@ -146,11 +198,12 @@ func TestLoadTargetsRejectsInvalidKubeconfigSelections(t *testing.T) {
 }
 
 type targetContext struct {
-	name      string
-	server    string
-	caData    []byte
-	token     string
-	namespace string
+	name         string
+	server       string
+	caData       []byte
+	token        string
+	authProvider *clientcmdapi.AuthProviderConfig
+	namespace    string
 }
 
 func writeTargetsTestKubeconfig(t *testing.T, contexts []targetContext, currentContext string) string {
@@ -164,7 +217,10 @@ func writeTargetsTestKubeconfig(t *testing.T, contexts []targetContext, currentC
 			Server:                   context.server,
 			CertificateAuthorityData: context.caData,
 		}
-		config.AuthInfos[authName] = &clientcmdapi.AuthInfo{Token: context.token}
+		config.AuthInfos[authName] = &clientcmdapi.AuthInfo{
+			Token:        context.token,
+			AuthProvider: context.authProvider,
+		}
 		config.Contexts[context.name] = &clientcmdapi.Context{
 			Cluster:   clusterName,
 			AuthInfo:  authName,
@@ -178,6 +234,12 @@ func writeTargetsTestKubeconfig(t *testing.T, contexts []targetContext, currentC
 		t.Fatal(err)
 	}
 	return path
+}
+
+func validOIDCTestToken() string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, time.Now().Add(time.Hour).Unix())))
+	return header + "." + payload + "."
 }
 
 func serverCAData(server *httptest.Server) []byte {
