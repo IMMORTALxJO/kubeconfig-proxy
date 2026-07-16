@@ -1,7 +1,8 @@
 # kubeconfig-proxy
 
-`kubeconfig-proxy` is a local Kubernetes API proxy that lets one generated
-kubeconfig work with several source kubeconfig contexts at the same time.
+`kubeconfig-proxy` is a local Kubernetes API proxy that adds an auto-started
+proxy context to your kubeconfig. That context can work with several source
+kubeconfig contexts at the same time.
 
 It is useful when you want to run ordinary Kubernetes tools against a group of
 clusters as if they were one logical target:
@@ -9,17 +10,15 @@ clusters as if they were one logical target:
 - inspect resources from multiple clusters in one `kubectl get`;
 - create or update the same resource in every selected cluster;
 - route selected resources to one specific cluster with annotations;
-- deploy simple Helm/werf projects through one proxy kubeconfig.
+- deploy simple Helm/werf projects through one proxy context.
 
-On startup, the proxy reads a source kubeconfig, starts a local HTTPS proxy, and
-writes a new kubeconfig that points to that proxy. The generated kubeconfig
-contains temporary proxy credentials, so only clients with that file can use the
-local proxy.
+The proxy context is backed by a local state file and a Kubernetes exec
+credential plugin. The local proxy uses HTTPS and bearer-token authentication.
 
 ## How It Works
 
 The proxy keeps a list of source contexts from the original kubeconfig. Requests
-made through the generated kubeconfig are routed according to request type:
+made through the proxy context are routed according to request type:
 
 - list requests are aggregated from all selected contexts;
 - watch requests are streamed from all selected contexts;
@@ -44,21 +43,52 @@ kubectl get pods -A -L context
 
 ## Quick Start
 
-Run the compiled binary:
+Add an auto-started proxy context to your current kubeconfig:
 
 ```bash
-kubeconfig-proxy \
+kubeconfig-proxy add-context prod-proxy \
   --kubeconfig ~/.kube/config \
-  --contexts dev,stage \
-  --primary-context dev \
-  --output ~/.kube/config.proxy \
-  --listen 127.0.0.1:9443
+  --contexts prod-a,prod-b \
+  --primary-context prod-a \
+  --proxy-ttl 10m
 ```
 
-Keep the process running. In another terminal, use the generated kubeconfig:
+Use it like any other kubeconfig context:
 
 ```bash
-KUBECONFIG=~/.kube/config.proxy kubectl get namespaces -L context
+kubectl --context prod-proxy get pods -A -L context
+```
+
+The generated `prod-proxy` context points to a local HTTPS endpoint and uses a
+kubeconfig exec credential command. When `kubectl` uses that context, it runs
+`kubeconfig-proxy credential --state <path>`. The credential command starts
+`kubeconfig-proxy serve --state <path>` automatically if the proxy is not
+already running, waits for readiness, and returns the bearer token expected by
+the local proxy.
+
+The state file defaults to:
+
+```text
+~/.kube/kubeconfig-proxy/<context-name>.yaml
+```
+
+It is written with file mode `0600` and contains the proxy's private TLS key,
+certificate, bearer token, selected source contexts, primary context, listen
+address, and runtime options. The kubeconfig stores only the public proxy server
+URL, certificate authority data, and exec command.
+
+`--proxy-ttl` controls idle shutdown. If no proxied Kubernetes API requests are
+active for that duration, the auto-started proxy process exits by itself. Health
+checks made by the credential command do not extend the TTL. Set `--proxy-ttl 0`
+to disable idle shutdown.
+
+You can also select source contexts with a regular expression:
+
+```bash
+kubeconfig-proxy add-context prod-proxy \
+  --kubeconfig ~/.kube/config \
+  --context-regexp '^prod-' \
+  --primary-context prod-a
 ```
 
 If `--contexts` is omitted, all contexts from the source kubeconfig are used. If
@@ -98,12 +128,10 @@ release record from several clusters, their release planner can fail.
 Use `--helm-release-proxy` when deploying Helm/werf projects through the proxy:
 
 ```bash
-kubeconfig-proxy \
+kubeconfig-proxy add-context dev-stage-proxy \
   --kubeconfig ~/.kube/config \
   --contexts dev,stage \
   --primary-context dev \
-  --output ~/.kube/config.proxy \
-  --listen 127.0.0.1:9443 \
   --helm-release-proxy
 ```
 
@@ -114,20 +142,25 @@ out to all selected contexts.
 See [examples/werf/README.md](examples/werf/README.md) for a complete local
 werf example.
 
-## Flags
+## Commands And Flags
 
+- `add-context <name>` adds an auto-started proxy context to a kubeconfig.
 - `--kubeconfig ~/.kube/config` selects the source kubeconfig. If omitted,
   standard Kubernetes kubeconfig loading rules are used.
-- `--output ~/.kube/config.proxy` sets the generated proxy kubeconfig path.
 - `--contexts dev,stage,prod` limits the proxy to specific source contexts.
+- `--context-regexp '^prod-'` selects source contexts by regular expression.
 - `--primary-context dev` selects the context used for discovery and other
   primary-only operations.
 - `--listen 127.0.0.1:9443` sets the proxy listen address.
+- `--proxy-ttl 10m` sets the auto-started proxy idle lifetime. Use `0` to
+  disable idle shutdown.
 - `--request-timeout 30s` sets the timeout for one upstream Kubernetes API
   request. Use `0` to disable it.
 - `--retries 5` retries temporary upstream failures.
 - `--retry-backoff 500ms` sets the delay between retry attempts.
 - `--helm-release-proxy` enables Helm/werf release-history compatibility mode.
+- `credential --state <path>` is the kubeconfig exec credential entrypoint.
+- `serve --state <path>` runs a state-backed proxy process.
 
 Retries default to `5`. Set `--retries 0` to disable them. The proxy retries
 network errors and temporary upstream HTTP responses: `429`, `500`, `502`,
@@ -138,14 +171,14 @@ network errors and temporary upstream HTTP responses: `429`, `500`, `502`,
 The proxy uses the credentials from the source kubeconfig to talk to the source
 clusters. Protect the listen address accordingly.
 
-On every startup, the proxy generates:
+When a context is added, the proxy generates:
 
-- a temporary bearer token required by every incoming request;
-- a temporary self-signed TLS certificate for the generated kubeconfig.
+- a bearer token required by every incoming request;
+- a self-signed TLS certificate and private key for the local proxy.
 
-The generated kubeconfig is written with file mode `0600` and removed when the
-proxy stops. Keep the proxy bound to `127.0.0.1` unless you intentionally want
-to expose it to a trusted network.
+The state file is written with file mode `0600` and contains the bearer token
+and TLS private key. Keep the proxy bound to `127.0.0.1` unless you
+intentionally want to expose it to a trusted network.
 
 ## Local Examples
 

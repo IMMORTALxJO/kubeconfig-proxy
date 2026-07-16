@@ -32,27 +32,29 @@ Check that both contexts exist:
 kubectl config get-contexts kind-proxy-a kind-proxy-b
 ```
 
-## Start kubeconfig-proxy
+## Add the proxy context
 
-Run the proxy from the repository root:
+Build the binary from the repository root:
 
 ```bash
-GOTOOLCHAIN=auto go run ./cmd/kubeconfig-proxy \
+GOTOOLCHAIN=auto go build -trimpath -o ./kubeconfig-proxy ./cmd/kubeconfig-proxy
+```
+
+Add an auto-started proxy context to your kubeconfig:
+
+```bash
+./kubeconfig-proxy add-context kind-proxy \
   --contexts kind-proxy-a,kind-proxy-b \
   --primary-context kind-proxy-a \
-  --output /tmp/kubeconfig-proxy.kind.yaml \
-  --listen 127.0.0.1:9443 \
   --request-timeout 30s \
   --retries 1 \
   --retry-backoff 200ms
 ```
 
-Keep this process running. In another terminal, point `kubectl` at the generated
-proxy kubeconfig:
+Use the proxy context like any other kubeconfig context:
 
 ```bash
-export KUBECONFIG=/tmp/kubeconfig-proxy.kind.yaml
-kubectl cluster-info
+kubectl --context kind-proxy cluster-info
 ```
 
 `cluster-info` is a discovery-style command, so it is proxied only to
@@ -67,10 +69,10 @@ kubectl --context kind-proxy-a create configmap only-a --from-literal=value=a
 kubectl --context kind-proxy-b create configmap only-b --from-literal=value=b
 ```
 
-List through the proxy kubeconfig:
+List through the proxy context:
 
 ```bash
-KUBECONFIG=/tmp/kubeconfig-proxy.kind.yaml kubectl get configmaps
+kubectl --context kind-proxy get configmaps
 ```
 
 Expected result: both `only-a` and `only-b` are visible in the same output.
@@ -78,7 +80,7 @@ Expected result: both `only-a` and `only-b` are visible in the same output.
 To see which source context each item came from:
 
 ```bash
-KUBECONFIG=/tmp/kubeconfig-proxy.kind.yaml kubectl get configmaps -o yaml
+kubectl --context kind-proxy get configmaps -o yaml
 ```
 
 Each aggregated item has this annotation:
@@ -97,7 +99,7 @@ The proxy also injects a virtual `context` label into aggregated responses, so
 you can show the source context directly in table output:
 
 ```bash
-KUBECONFIG=/tmp/kubeconfig-proxy.kind.yaml kubectl get configmaps -L context
+kubectl --context kind-proxy get configmaps -L context
 ```
 
 ## Test fan-out mutations
@@ -105,8 +107,7 @@ KUBECONFIG=/tmp/kubeconfig-proxy.kind.yaml kubectl get configmaps -L context
 Create a ConfigMap through the proxy:
 
 ```bash
-KUBECONFIG=/tmp/kubeconfig-proxy.kind.yaml \
-  kubectl create configmap fanout-demo --from-literal=value=shared
+kubectl --context kind-proxy create configmap fanout-demo --from-literal=value=shared
 ```
 
 Check both original clusters:
@@ -123,7 +124,7 @@ Expected result: `fanout-demo` exists in both clusters.
 Create a ConfigMap that targets one specific source context:
 
 ```bash
-cat <<'EOF' | KUBECONFIG=/tmp/kubeconfig-proxy.kind.yaml kubectl apply -f -
+cat <<'EOF' | kubectl --context kind-proxy apply -f -
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -147,7 +148,7 @@ Expected result: `context-name-demo` exists only in `kind-proxy-b`.
 Create another ConfigMap that can be placed in any single context:
 
 ```bash
-cat <<'EOF' | KUBECONFIG=/tmp/kubeconfig-proxy.kind.yaml kubectl apply -f -
+cat <<'EOF' | kubectl --context kind-proxy apply -f -
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -171,7 +172,7 @@ Expected result: `single-context-demo` exists only in `kind-proxy-a`, because
 
 ## Cleanup
 
-Stop the `kubeconfig-proxy` process, then remove the kind clusters:
+Remove the kind clusters:
 
 ```bash
 kind delete cluster --name proxy-a

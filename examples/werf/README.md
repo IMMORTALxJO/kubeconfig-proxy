@@ -18,14 +18,13 @@ in the first selected context by alphabetical name.
 
 ## Prerequisites
 
-Complete [../kind.md](../kind.md) first and keep `kubeconfig-proxy` running:
+Complete [../kind.md](../kind.md) first. From the repository root, update the
+proxy context with Helm/werf release-history compatibility enabled:
 
 ```bash
-GOTOOLCHAIN=auto go run ./cmd/kubeconfig-proxy \
+./kubeconfig-proxy add-context kind-proxy \
   --contexts kind-proxy-a,kind-proxy-b \
   --primary-context kind-proxy-a \
-  --output /tmp/kubeconfig-proxy.kind.yaml \
-  --listen 127.0.0.1:9443 \
   --request-timeout 30s \
   --retries 1 \
   --retry-backoff 200ms \
@@ -48,15 +47,13 @@ Run from this directory:
 ```bash
 cd examples/werf
 
-KUBECONFIG=/tmp/kubeconfig-proxy.kind.yaml \
-  werf converge --env kind
+werf converge --env kind --kube-context kind-proxy
 ```
 
 While experimenting with uncommitted local changes, add `--dev`:
 
 ```bash
-KUBECONFIG=/tmp/kubeconfig-proxy.kind.yaml \
-  werf converge --env kind --dev
+werf converge --env kind --dev --kube-context kind-proxy
 ```
 
 With `--helm-release-proxy`, the proxy reads Helm release history from the
@@ -75,8 +72,8 @@ kubeconfig-proxy-werf-kind
 The nginx Deployment should exist in both clusters:
 
 ```bash
-KUBECONFIG=/tmp/kubeconfig-proxy.kind.yaml \
-  kubectl -n kubeconfig-proxy-werf-kind get deploy,svc -L context
+kubectl --context kind-proxy \
+  -n kubeconfig-proxy-werf-kind get deploy,svc -L context
 ```
 
 Expected result: nginx resources are visible twice, once from `kind-proxy-a`
@@ -98,8 +95,8 @@ The Job should exist only in `kind-proxy-a`, because `kind-proxy-a` is the first
 selected context by alphabetical name:
 
 ```bash
-KUBECONFIG=/tmp/kubeconfig-proxy.kind.yaml \
-  kubectl -n kubeconfig-proxy-werf-kind get job -L context
+kubectl --context kind-proxy \
+  -n kubeconfig-proxy-werf-kind get job -L context
 ```
 
 Direct cluster checks:
@@ -129,8 +126,7 @@ kubeconfig-proxy.io/context-name: kind-proxy-b
 Run the dismiss through the proxy:
 
 ```bash
-KUBECONFIG=/tmp/kubeconfig-proxy.kind.yaml \
-  werf dismiss --env kind --with-namespace
+werf dismiss --env kind --with-namespace --kube-context kind-proxy
 ```
 
 If you need a hard cleanup, remove the namespace from both original kind
