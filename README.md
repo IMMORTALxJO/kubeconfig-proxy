@@ -143,8 +143,9 @@ On every startup, the proxy generates:
 - a temporary bearer token required by every incoming request;
 - a temporary self-signed TLS certificate for the generated kubeconfig.
 
-The generated kubeconfig is written with file mode `0600`. Keep the proxy bound
-to `127.0.0.1` unless you intentionally want to expose it to a trusted network.
+The generated kubeconfig is written with file mode `0600` and removed when the
+proxy stops. Keep the proxy bound to `127.0.0.1` unless you intentionally want
+to expose it to a trusted network.
 
 ## Local Examples
 
