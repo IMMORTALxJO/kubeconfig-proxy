@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc" // register legacy kubeconfig OIDC auth-provider
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
