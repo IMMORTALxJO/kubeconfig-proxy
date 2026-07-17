@@ -46,8 +46,6 @@ jobs:
             "linux/arm64"
             "darwin/amd64"
             "darwin/arm64"
-            "windows/amd64"
-            "windows/arm64"
           )
 
           for target in "${targets[@]}"; do
@@ -56,19 +54,11 @@ jobs:
             name="kubeconfig-proxy_${VERSION}_${goos}_${goarch}"
             binary="kubeconfig-proxy"
 
-            if [ "$goos" = "windows" ]; then
-              binary="${binary}.exe"
-            fi
-
             mkdir -p "dist/${name}"
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
               go build -trimpath -ldflags="-s -w" -o "dist/${name}/${binary}" ./cmd/kubeconfig-proxy
 
-            if [ "$goos" = "windows" ]; then
-              (cd dist && zip -q -r "${name}.zip" "${name}")
-            else
-              tar -C dist -czf "dist/${name}.tar.gz" "${name}"
-            fi
+            tar -C dist -czf "dist/${name}.tar.gz" "${name}"
 
             rm -rf "dist/${name}"
           done
