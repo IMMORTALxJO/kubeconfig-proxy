@@ -28,8 +28,44 @@ func TestRunWithArgsRequiresSubcommand(t *testing.T) {
 	if err == nil {
 		t.Fatal("runWithArgs returned nil error")
 	}
-	if err.Error() != "usage: kubeconfig-proxy <add-context|delete-context|credential|serve> [flags]" {
+	if err.Error() != "usage: kubeconfig-proxy <add-context|delete-context|credential|serve|version> [flags]" {
 		t.Fatalf("error = %q, want usage error", err.Error())
+	}
+}
+
+func TestRunVersionWritesUnknownByDefault(t *testing.T) {
+	var buf bytes.Buffer
+	if err := runVersion(nil, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := buf.String(), "unknown\n"; got != want {
+		t.Fatalf("version output = %q, want %q", got, want)
+	}
+}
+
+func TestRunVersionWritesInjectedVersion(t *testing.T) {
+	oldVersion := cliVersion
+	cliVersion = "v1.2.3"
+	t.Cleanup(func() {
+		cliVersion = oldVersion
+	})
+
+	var buf bytes.Buffer
+	if err := runVersion(nil, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := buf.String(), "v1.2.3\n"; got != want {
+		t.Fatalf("version output = %q, want %q", got, want)
+	}
+}
+
+func TestRunVersionRejectsArgs(t *testing.T) {
+	err := runVersion([]string{"extra"}, io.Discard)
+	if err == nil {
+		t.Fatal("runVersion returned nil error")
+	}
+	if err.Error() != "usage: kubeconfig-proxy version" {
+		t.Fatalf("error = %q, want version usage", err.Error())
 	}
 }
 
@@ -255,10 +291,13 @@ func TestDeleteContextRemovesKubeconfigAndStateArtifacts(t *testing.T) {
 	if config.AuthInfos["kubeconfig-proxy/prod-proxy"] != nil {
 		t.Fatal("proxy auth info should be removed")
 	}
-	for _, path := range []string{statePath, statePath + ".log", statePath + ".lock"} {
+	for _, path := range []string{statePath, statePath + ".log"} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("%s stat error = %v, want not exists", path, err)
 		}
+	}
+	if _, err := os.Stat(statePath + ".lock"); err != nil {
+		t.Fatalf("%s.lock stat error = %v, want lock file preserved", statePath, err)
 	}
 }
 

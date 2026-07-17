@@ -44,6 +44,7 @@ const statePollInterval = time.Second
 var (
 	errStateFileChanged = errors.New("state file changed")
 	errStateFileRemoved = errors.New("state file removed")
+	cliVersion          = "unknown"
 )
 
 func main() {
@@ -67,9 +68,19 @@ func runWithArgs(args []string, stop <-chan os.Signal) error {
 			return runCredential(args[1:])
 		case "serve":
 			return runServeState(args[1:], stop)
+		case "version":
+			return runVersion(args[1:], os.Stdout)
 		}
 	}
-	return fmt.Errorf("usage: kubeconfig-proxy <add-context|delete-context|credential|serve> [flags]")
+	return fmt.Errorf("usage: kubeconfig-proxy <add-context|delete-context|credential|serve|version> [flags]")
+}
+
+func runVersion(args []string, out io.Writer) error {
+	if len(args) != 0 {
+		return fmt.Errorf("usage: kubeconfig-proxy version")
+	}
+	_, err := fmt.Fprintln(out, cliVersion)
+	return err
 }
 
 func runAddContext(args []string) error {
@@ -939,7 +950,7 @@ func discardLogs() func() {
 
 func removeStateArtifacts(statePaths []string) error {
 	for _, statePath := range statePaths {
-		for _, path := range []string{statePath, statePath + ".log", statePath + ".lock"} {
+		for _, path := range []string{statePath, statePath + ".log"} {
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				return err
 			}
