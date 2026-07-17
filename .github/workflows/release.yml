@@ -74,7 +74,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          for artifact in dist/*.tar.gz dist/*.zip dist/checksums.txt; do
+          for artifact in dist/*.tar.gz dist/checksums.txt; do
             cosign sign-blob --yes --bundle "${artifact}.bundle" "$artifact"
           done
 
