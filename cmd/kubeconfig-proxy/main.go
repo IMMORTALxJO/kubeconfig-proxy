@@ -39,6 +39,14 @@ import (
 
 const readinessPath = "/-/kubeconfig-proxy/ready"
 
+const statePollInterval = time.Second
+
+var (
+	errStateFileChanged = errors.New("state file changed")
+	errStateFileRemoved = errors.New("state file removed")
+	cliVersion          = "unknown"
+)
+
 func main() {
 	if err := run(); err != nil {
 		log.Fatalf("error: %v", err)
@@ -54,13 +62,25 @@ func runWithArgs(args []string, stop <-chan os.Signal) error {
 		switch args[0] {
 		case "add-context":
 			return runAddContext(args[1:])
+		case "delete-context":
+			return runDeleteContext(args[1:])
 		case "credential":
 			return runCredential(args[1:])
 		case "serve":
 			return runServeState(args[1:], stop)
+		case "version":
+			return runVersion(args[1:], os.Stdout)
 		}
 	}
-	return fmt.Errorf("usage: kubeconfig-proxy <add-context|credential|serve> [flags]")
+	return fmt.Errorf("usage: kubeconfig-proxy <add-context|delete-context|credential|serve|version> [flags]")
+}
+
+func runVersion(args []string, out io.Writer) error {
+	if len(args) != 0 {
+		return fmt.Errorf("usage: kubeconfig-proxy version")
+	}
+	_, err := fmt.Fprintln(out, cliVersion)
+	return err
 }
 
 func runAddContext(args []string) error {
@@ -82,6 +102,7 @@ func runAddContext(args []string) error {
 		retries        = flags.Int("retries", proxy.DefaultRetries, "number of retries for failed upstream requests")
 		retryBackoff   = flags.Duration("retry-backoff", 200*time.Millisecond, "delay between upstream request retries")
 		helmRelease    = flags.Bool("helm-release-proxy", false, "proxy Helm release storage list/watch requests only through the primary context")
+		logsEnabled    = flags.Bool("logs-enabled", false, "write serve logs to the state log file")
 		execCommand    = flags.String("exec-command", defaultExecCommand(), "command written to kubeconfig exec auth")
 	)
 	if err := flags.Parse(args); err != nil {
@@ -137,6 +158,7 @@ func runAddContext(args []string) error {
 		PrimaryContext:   primary.Name,
 		BearerToken:      bearerToken,
 		ProxyTTL:         proxyTTL.String(),
+		LogsEnabled:      *logsEnabled,
 		TLS: proxystate.TLS{
 			CertPEM: string(certPEM),
 			KeyPEM:  string(keyPEM),
@@ -164,6 +186,58 @@ func runAddContext(args []string) error {
 	log.Printf("targets:            %s", proxy.TargetNames(targets))
 	log.Printf("primary target:     %s", primary.Name)
 	log.Printf("proxy ttl:          %s", durationLogValue(*proxyTTL))
+	log.Printf("serve logs:         %t", *logsEnabled)
+	return nil
+}
+
+func runDeleteContext(args []string) error {
+	flags := flag.NewFlagSet("kubeconfig-proxy delete-context", flag.ContinueOnError)
+	contextName := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		contextName = args[0]
+		args = args[1:]
+	}
+	var (
+		kubeconfigPath = flags.String("kubeconfig", defaultKubeconfigPath(), "kubeconfig path to update")
+		statePath      = flags.String("state", "", "additional state file path to remove")
+	)
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if contextName == "" && flags.NArg() == 1 {
+		contextName = flags.Arg(0)
+	}
+	if contextName == "" || flags.NArg() > 1 {
+		return fmt.Errorf("usage: kubeconfig-proxy delete-context <context-name> [flags]")
+	}
+
+	absoluteKubeconfigPath, err := filepath.Abs(*kubeconfigPath)
+	if err != nil {
+		return err
+	}
+	statePaths, err := kubeconfig.DeleteProxyContext(absoluteKubeconfigPath, contextName)
+	if err != nil {
+		return err
+	}
+	if *statePath != "" {
+		absoluteStatePath, err := filepath.Abs(*statePath)
+		if err != nil {
+			return err
+		}
+		statePaths = appendUniqueStrings(statePaths, absoluteStatePath)
+	}
+	if len(statePaths) == 0 {
+		statePaths = append(statePaths, defaultStatePath(contextName))
+	}
+	if err := removeStateArtifacts(statePaths); err != nil {
+		return err
+	}
+
+	log.Printf("updated kubeconfig: %s", absoluteKubeconfigPath)
+	log.Printf("deleted context:    %s", contextName)
+	for _, statePath := range statePaths {
+		log.Printf("deleted state:      %s", statePath)
+	}
 	return nil
 }
 
@@ -192,7 +266,7 @@ func runCredential(args []string) error {
 		return err
 	}
 	if !ready(profile) {
-		if err := startDetachedServe(*statePath); err != nil {
+		if err := startDetachedServe(*statePath, profile.LogsEnabled); err != nil {
 			return err
 		}
 		if err := waitReady(profile, 10*time.Second); err != nil {
@@ -213,26 +287,71 @@ func runServeState(args []string, stop <-chan os.Signal) error {
 		return fmt.Errorf("--state is required")
 	}
 
-	profile, err := proxystate.Load(*statePath)
+	runtime, snapshot, err := loadServeRuntime(*statePath)
 	if err != nil {
 		return err
+	}
+	if !runtime.profile.LogsEnabled {
+		restoreLogs := discardLogs()
+		defer restoreLogs()
+	}
+
+	for {
+		restart, err := serveRuntime(*statePath, runtime, snapshot, stop)
+		if !restart {
+			return err
+		}
+
+		runtime, snapshot, err = loadServeRuntime(*statePath)
+		if err != nil {
+			return err
+		}
+	}
+}
+
+type serveRuntimeConfig struct {
+	profile        *proxystate.Profile
+	requestTimeout time.Duration
+	retryBackoff   time.Duration
+	proxyTTL       time.Duration
+	targets        []proxy.Target
+	primary        proxy.Target
+	handler        http.Handler
+	tlsCertificate tls.Certificate
+}
+
+func loadServeRuntime(statePath string) (*serveRuntimeConfig, stateFileSnapshot, error) {
+	snapshot, err := readStateFileSnapshot(statePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, stateFileSnapshot{}, stateFileRemovedError(statePath)
+		}
+		return nil, stateFileSnapshot{}, err
+	}
+
+	profile, err := proxystate.Load(statePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, stateFileSnapshot{}, stateFileRemovedError(statePath)
+		}
+		return nil, stateFileSnapshot{}, err
 	}
 	requestTimeout, err := profile.RequestTimeoutDuration()
 	if err != nil {
-		return err
+		return nil, stateFileSnapshot{}, err
 	}
 	retryBackoff, err := profile.RetryBackoffDuration()
 	if err != nil {
-		return err
+		return nil, stateFileSnapshot{}, err
 	}
 	proxyTTL, err := profile.ProxyTTLDuration()
 	if err != nil {
-		return err
+		return nil, stateFileSnapshot{}, err
 	}
 
 	targets, primary, err := proxy.LoadTargets(profile.SourceKubeconfig, profile.Contexts, profile.PrimaryContext)
 	if err != nil {
-		return err
+		return nil, stateFileSnapshot{}, err
 	}
 	handler, err := proxy.NewWithOptions(targets, primary, proxy.Options{
 		RequestTimeout:   requestTimeout,
@@ -242,32 +361,55 @@ func runServeState(args []string, stop <-chan os.Signal) error {
 		HelmReleaseProxy: profile.Options.HelmReleaseProxy,
 	})
 	if err != nil {
-		return err
+		return nil, stateFileSnapshot{}, err
 	}
 
 	tlsCertificate, err := tls.X509KeyPair([]byte(profile.TLS.CertPEM), []byte(profile.TLS.KeyPEM))
 	if err != nil {
-		return fmt.Errorf("load TLS key pair from state: %w", err)
+		return nil, stateFileSnapshot{}, fmt.Errorf("load TLS key pair from state: %w", err)
 	}
-	listener, err := proxy.Listen(profile.Listen)
+
+	return &serveRuntimeConfig{
+		profile:        profile,
+		requestTimeout: requestTimeout,
+		retryBackoff:   retryBackoff,
+		proxyTTL:       proxyTTL,
+		targets:        targets,
+		primary:        primary,
+		handler:        handler,
+		tlsCertificate: tlsCertificate,
+	}, snapshot, nil
+}
+
+func serveRuntime(statePath string, runtime *serveRuntimeConfig, snapshot stateFileSnapshot, stop <-chan os.Signal) (bool, error) {
+	listener, err := proxy.Listen(runtime.profile.Listen)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer listener.Close()
 
-	log.Printf("state file:       %s", *statePath)
+	log.Printf("state file:       %s", statePath)
 	log.Printf("listen:           https://%s", listener.Addr().String())
-	log.Printf("targets:          %s", proxy.TargetNames(targets))
-	log.Printf("primary target:   %s", primary.Name)
-	log.Printf("proxy ttl:        %s", durationLogValue(proxyTTL))
-	log.Printf("request timeout: %s", durationLogValue(requestTimeout))
-	log.Printf("retries:         %d", profile.Options.Retries)
-	log.Printf("retry backoff:   %s", retryBackoff)
+	log.Printf("targets:          %s", proxy.TargetNames(runtime.targets))
+	log.Printf("primary target:   %s", runtime.primary.Name)
+	log.Printf("proxy ttl:        %s", durationLogValue(runtime.proxyTTL))
+	log.Printf("request timeout: %s", durationLogValue(runtime.requestTimeout))
+	log.Printf("retries:         %d", runtime.profile.Options.Retries)
+	log.Printf("retry backoff:   %s", runtime.retryBackoff)
 
-	return serveHTTP(listener, handler, tlsCertificate, proxyTTL, profile.BearerToken, stop)
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	defer cancelWatch()
+	stateChanged := watchStateFile(watchCtx, statePath, snapshot)
+
+	err = serveHTTP(listener, runtime.handler, runtime.tlsCertificate, runtime.proxyTTL, runtime.profile.BearerToken, stop, stateChanged)
+	if errors.Is(err, errStateFileChanged) {
+		log.Printf("state file changed, restarting serve")
+		return true, nil
+	}
+	return false, err
 }
 
-func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.Certificate, proxyTTL time.Duration, bearerToken string, stop <-chan os.Signal) error {
+func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.Certificate, proxyTTL time.Duration, bearerToken string, stop <-chan os.Signal, stateChanged <-chan error) error {
 	activityHandler := newActivityHandler(handler, bearerToken)
 	server := &http.Server{Addr: listener.Addr().String(), Handler: activityHandler}
 	errCh := make(chan error, 1)
@@ -299,6 +441,21 @@ func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.C
 		case <-stop:
 			log.Printf("shutting down")
 			return shutdownServer(server)
+		case err, ok := <-stateChanged:
+			if !ok {
+				stateChanged = nil
+				continue
+			}
+			if err != nil {
+				log.Printf("shutting down after state file error: %v", err)
+			}
+			if shutdownErr := shutdownServer(server); shutdownErr != nil {
+				return shutdownErr
+			}
+			if err != nil {
+				return err
+			}
+			return errStateFileChanged
 		case <-ttlCh:
 			if activityHandler.idleFor(proxyTTL) {
 				log.Printf("shutting down after %s without active requests", proxyTTL)
@@ -311,6 +468,57 @@ func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.C
 			return nil
 		}
 	}
+}
+
+type stateFileSnapshot struct {
+	modTime time.Time
+	size    int64
+}
+
+func readStateFileSnapshot(path string) (stateFileSnapshot, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return stateFileSnapshot{}, err
+	}
+	return stateFileSnapshot{modTime: info.ModTime(), size: info.Size()}, nil
+}
+
+func (s stateFileSnapshot) equal(other stateFileSnapshot) bool {
+	return s.size == other.size && s.modTime.Equal(other.modTime)
+}
+
+func watchStateFile(ctx context.Context, path string, snapshot stateFileSnapshot) <-chan error {
+	changed := make(chan error, 1)
+	ticker := time.NewTicker(statePollInterval)
+	go func() {
+		defer ticker.Stop()
+		defer close(changed)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				next, err := readStateFileSnapshot(path)
+				if err != nil {
+					if os.IsNotExist(err) {
+						changed <- stateFileRemovedError(path)
+						return
+					}
+					changed <- fmt.Errorf("stat state file %s: %w", path, err)
+					return
+				}
+				if !snapshot.equal(next) {
+					changed <- nil
+					return
+				}
+			}
+		}
+	}()
+	return changed
+}
+
+func stateFileRemovedError(path string) error {
+	return fmt.Errorf("state file disappeared: %s: %w", path, errStateFileRemoved)
 }
 
 type activityHandler struct {
@@ -465,6 +673,16 @@ func contains(values []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func appendUniqueStrings(values []string, more ...string) []string {
+	for _, value := range more {
+		if value == "" || contains(values, value) {
+			continue
+		}
+		values = append(values, value)
+	}
+	return values
 }
 
 func defaultKubeconfigPath() string {
@@ -683,31 +901,60 @@ func profileHTTPClient(profile *proxystate.Profile) (*http.Client, error) {
 	}, nil
 }
 
-func startDetachedServe(statePath string) error {
+func startDetachedServe(statePath string, logsEnabled bool) error {
 	executable, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	logPath := statePath + ".log"
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	defer logFile.Close()
-
 	nullFile, err := os.Open(os.DevNull)
 	if err != nil {
 		return err
 	}
 	defer nullFile.Close()
 
+	stdout := io.Writer(nullFile)
+	stderr := io.Writer(nullFile)
+	if logsEnabled {
+		logPath := statePath + ".log"
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return err
+		}
+		defer logFile.Close()
+		stdout = logFile
+		stderr = logFile
+	}
+
 	cmd := exec.Command(executable, "serve", "--state", statePath)
 	cmd.Stdin = nullFile
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	cmd.Env = os.Environ()
 	if err := cmd.Start(); err != nil {
 		return err
+	}
+	return nil
+}
+
+func discardLogs() func() {
+	output := log.Writer()
+	flags := log.Flags()
+	prefix := log.Prefix()
+	log.SetOutput(io.Discard)
+	return func() {
+		log.SetOutput(output)
+		log.SetFlags(flags)
+		log.SetPrefix(prefix)
+	}
+}
+
+func removeStateArtifacts(statePaths []string) error {
+	for _, statePath := range statePaths {
+		for _, path := range []string{statePath, statePath + ".log"} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
 	}
 	return nil
 }

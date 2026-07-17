@@ -81,3 +81,60 @@ func TestAddProxyContextWritesExecContext(t *testing.T) {
 		t.Fatalf("mode = %v, want 0600", info.Mode().Perm())
 	}
 }
+
+func TestDeleteProxyContextRemovesManagedEntriesAndReturnsStatePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	config := clientcmdapi.NewConfig()
+	config.Clusters["source-cluster"] = &clientcmdapi.Cluster{Server: "https://source.example.test"}
+	config.AuthInfos["source-user"] = &clientcmdapi.AuthInfo{Token: "source-token"}
+	config.Contexts["source"] = &clientcmdapi.Context{Cluster: "source-cluster", AuthInfo: "source-user"}
+	config.CurrentContext = "source"
+	if err := clientcmd.WriteToFile(*config, path); err != nil {
+		t.Fatal(err)
+	}
+
+	caData := []byte("test-ca")
+	if err := AddProxyContext(path, "prod-proxy", "https://127.0.0.1:9443", "default", "/usr/local/bin/kubeconfig-proxy", "/tmp/prod-proxy.yaml", caData); err != nil {
+		t.Fatal(err)
+	}
+
+	statePaths, err := DeleteProxyContext(path, "prod-proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(statePaths, []string{"/tmp/prod-proxy.yaml"}) {
+		t.Fatalf("state paths = %v, want [/tmp/prod-proxy.yaml]", statePaths)
+	}
+
+	got, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Contexts["source"] == nil {
+		t.Fatal("source context should be preserved")
+	}
+	if got.Contexts["prod-proxy"] != nil {
+		t.Fatal("proxy context should be removed")
+	}
+	if got.Clusters["kubeconfig-proxy/prod-proxy"] != nil {
+		t.Fatal("proxy cluster should be removed")
+	}
+	if got.AuthInfos["kubeconfig-proxy/prod-proxy"] != nil {
+		t.Fatal("proxy auth info should be removed")
+	}
+}
+
+func TestDeleteProxyContextRejectsUnmanagedContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	config := clientcmdapi.NewConfig()
+	config.Clusters["source-cluster"] = &clientcmdapi.Cluster{Server: "https://source.example.test"}
+	config.AuthInfos["source-user"] = &clientcmdapi.AuthInfo{Token: "source-token"}
+	config.Contexts["prod-proxy"] = &clientcmdapi.Context{Cluster: "source-cluster", AuthInfo: "source-user"}
+	if err := clientcmd.WriteToFile(*config, path); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := DeleteProxyContext(path, "prod-proxy"); err == nil {
+		t.Fatal("DeleteProxyContext returned nil error, want unmanaged context error")
+	}
+}

@@ -15,6 +15,22 @@ clusters as if they were one logical target:
 The proxy context is backed by a local state file and a Kubernetes exec
 credential plugin. The local proxy uses HTTPS and bearer-token authentication.
 
+## Installation
+
+Install the latest released CLI:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/IMMORTALxJO/kubeconfig-proxy/master/install.sh | sh
+```
+
+The installer downloads the latest GitHub Release for your OS and architecture,
+verifies it with `checksums.txt`, and installs `kubeconfig-proxy` to
+`/usr/local/bin`. To install a specific version or use another directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/IMMORTALxJO/kubeconfig-proxy/master/install.sh | KUBECONFIG_PROXY_VERSION=v0.0.5 INSTALL_DIR="$HOME/.local/bin" sh
+```
+
 ## How It Works
 
 The proxy keeps a list of source contexts from the original kubeconfig. Requests
@@ -81,6 +97,21 @@ URL, certificate authority data, and exec command.
 active for that duration, the auto-started proxy process exits by itself. Health
 checks made by the credential command do not extend the TTL. Set `--proxy-ttl 0`
 to disable idle shutdown.
+
+Serve logs are disabled by default. Pass `--logs-enabled` to `add-context` to
+write auto-started `serve` output to `<state>.log`.
+
+Remove a generated proxy context and its state artifacts:
+
+```bash
+kubeconfig-proxy delete-context prod-proxy --kubeconfig ~/.kube/config
+```
+
+Show the CLI version:
+
+```bash
+kubeconfig-proxy version
+```
 
 You can also select source contexts with a regular expression:
 
@@ -159,8 +190,13 @@ werf example.
 - `--retries 5` retries temporary upstream failures.
 - `--retry-backoff 500ms` sets the delay between retry attempts.
 - `--helm-release-proxy` enables Helm/werf release-history compatibility mode.
+- `--logs-enabled` writes auto-started `serve` output to `<state>.log`.
+- `delete-context <name>` removes the generated kubeconfig context, cluster,
+  auth info, state file, and log file.
 - `credential --state <path>` is the kubeconfig exec credential entrypoint.
 - `serve --state <path>` runs a state-backed proxy process.
+- `version` prints the CLI version. Local builds print `unknown`; release
+  builds print the release tag.
 
 Retries default to `5`. Set `--retries 0` to disable them. The proxy retries
 network errors and temporary upstream HTTP responses: `429`, `500`, `502`,
@@ -202,7 +238,8 @@ Build the binary:
 GOTOOLCHAIN=auto go build -trimpath -o kubeconfig-proxy ./cmd/kubeconfig-proxy
 ```
 
-Release builds are produced by GitHub Actions when a `v*` tag is pushed.
+Release builds are produced by GitHub Actions when a `v*` tag is pushed. The
+release workflow injects that tag into `kubeconfig-proxy version`.
 
 ## License
 

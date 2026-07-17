@@ -5,12 +5,16 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,8 +28,44 @@ func TestRunWithArgsRequiresSubcommand(t *testing.T) {
 	if err == nil {
 		t.Fatal("runWithArgs returned nil error")
 	}
-	if err.Error() != "usage: kubeconfig-proxy <add-context|credential|serve> [flags]" {
+	if err.Error() != "usage: kubeconfig-proxy <add-context|delete-context|credential|serve|version> [flags]" {
 		t.Fatalf("error = %q, want usage error", err.Error())
+	}
+}
+
+func TestRunVersionWritesUnknownByDefault(t *testing.T) {
+	var buf bytes.Buffer
+	if err := runVersion(nil, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := buf.String(), "unknown\n"; got != want {
+		t.Fatalf("version output = %q, want %q", got, want)
+	}
+}
+
+func TestRunVersionWritesInjectedVersion(t *testing.T) {
+	oldVersion := cliVersion
+	cliVersion = "v1.2.3"
+	t.Cleanup(func() {
+		cliVersion = oldVersion
+	})
+
+	var buf bytes.Buffer
+	if err := runVersion(nil, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := buf.String(), "v1.2.3\n"; got != want {
+		t.Fatalf("version output = %q, want %q", got, want)
+	}
+}
+
+func TestRunVersionRejectsArgs(t *testing.T) {
+	err := runVersion([]string{"extra"}, io.Discard)
+	if err == nil {
+		t.Fatal("runVersion returned nil error")
+	}
+	if err.Error() != "usage: kubeconfig-proxy version" {
+		t.Fatalf("error = %q, want version usage", err.Error())
 	}
 }
 
@@ -81,6 +121,9 @@ func TestAddContextWritesStateAndKubeconfigExecContext(t *testing.T) {
 	if profile.ProxyTTL != "3m0s" {
 		t.Fatalf("profile proxyTTL = %q, want 3m0s", profile.ProxyTTL)
 	}
+	if profile.LogsEnabled {
+		t.Fatal("profile logsEnabled = true, want false by default")
+	}
 	if profile.BearerToken == "" || profile.TLS.CertPEM == "" || profile.TLS.KeyPEM == "" {
 		t.Fatal("profile should contain proxy token and TLS material")
 	}
@@ -122,6 +165,35 @@ func TestAddContextWritesStateAndKubeconfigExecContext(t *testing.T) {
 	}
 	if !slices.Equal(auth.Exec.Args, []string{"credential", "--state", statePath}) {
 		t.Fatalf("exec args = %v, want credential state args", auth.Exec.Args)
+	}
+}
+
+func TestAddContextWritesLogsEnabledState(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	kubeconfigPath := writeMainTestKubeconfig(t, upstream.URL, mainTestServerCAData(upstream))
+	statePath := filepath.Join(t.TempDir(), "logs-proxy.yaml")
+	if err := runWithArgs([]string{
+		"add-context", "logs-proxy",
+		"--kubeconfig", kubeconfigPath,
+		"--state", statePath,
+		"--listen", "127.0.0.1:27444",
+		"--contexts", "alpha",
+		"--primary-context", "alpha",
+		"--logs-enabled",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	profile, err := proxystate.Load(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !profile.LogsEnabled {
+		t.Fatal("profile logsEnabled = false, want true")
 	}
 }
 
@@ -169,6 +241,63 @@ func TestAddContextResolvesExplicitZeroListenPort(t *testing.T) {
 	}
 	if cluster.Server != "https://"+profile.Listen {
 		t.Fatalf("cluster server = %q, want https://%s", cluster.Server, profile.Listen)
+	}
+}
+
+func TestDeleteContextRemovesKubeconfigAndStateArtifacts(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	kubeconfigPath := writeMainTestKubeconfig(t, upstream.URL, mainTestServerCAData(upstream))
+	statePath := filepath.Join(t.TempDir(), "prod-proxy.yaml")
+	if err := runWithArgs([]string{
+		"add-context", "prod-proxy",
+		"--kubeconfig", kubeconfigPath,
+		"--state", statePath,
+		"--listen", "127.0.0.1:27445",
+		"--contexts", "alpha",
+		"--primary-context", "alpha",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{statePath + ".log", statePath + ".lock"} {
+		if err := os.WriteFile(path, []byte("test"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := runWithArgs([]string{
+		"delete-context", "prod-proxy",
+		"--kubeconfig", kubeconfigPath,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	config, err := clientcmd.LoadFromFile(kubeconfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Contexts["alpha"] == nil {
+		t.Fatal("source context should be preserved")
+	}
+	if config.Contexts["prod-proxy"] != nil {
+		t.Fatal("proxy context should be removed")
+	}
+	if config.Clusters["kubeconfig-proxy/prod-proxy"] != nil {
+		t.Fatal("proxy cluster should be removed")
+	}
+	if config.AuthInfos["kubeconfig-proxy/prod-proxy"] != nil {
+		t.Fatal("proxy auth info should be removed")
+	}
+	for _, path := range []string{statePath, statePath + ".log"} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s stat error = %v, want not exists", path, err)
+		}
+	}
+	if _, err := os.Stat(statePath + ".lock"); err != nil {
+		t.Fatalf("%s.lock stat error = %v, want lock file preserved", statePath, err)
 	}
 }
 
@@ -241,6 +370,149 @@ func TestServeStateStopsAfterTTLWithoutRequests(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("serve did not stop after proxyTTL")
+	}
+}
+
+func TestServeStateRestartsWhenStateFileChanges(t *testing.T) {
+	alpha := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"target":"alpha"}`))
+	}))
+	defer alpha.Close()
+	beta := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"target":"beta"}`))
+	}))
+	defer beta.Close()
+
+	sourcePath := writeMainTestKubeconfigWithContexts(t, []mainTestContext{
+		{name: "alpha", serverURL: alpha.URL, caData: mainTestServerCAData(alpha)},
+		{name: "beta", serverURL: beta.URL, caData: mainTestServerCAData(beta)},
+	})
+	listenAddr, err := pickAvailableListenAddr()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, certPEM, keyPEM, err := generateTLSCertificate(listenAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := &proxystate.Profile{
+		Version:          proxystate.Version,
+		Name:             "restart-proxy",
+		SourceKubeconfig: sourcePath,
+		Listen:           listenAddr,
+		Contexts:         []string{"alpha"},
+		PrimaryContext:   "alpha",
+		BearerToken:      "state-token",
+		ProxyTTL:         "0s",
+		TLS: proxystate.TLS{
+			CertPEM: string(certPEM),
+			KeyPEM:  string(keyPEM),
+		},
+		Options: proxystate.ProxyOptions{
+			RequestTimeout: "2s",
+			Retries:        0,
+			RetryBackoff:   "1ms",
+		},
+	}
+	statePath := filepath.Join(t.TempDir(), "restart-proxy.yaml")
+	if err := proxystate.Save(statePath, profile); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan os.Signal, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runWithArgs([]string{"serve", "--state", statePath}, stop)
+	}()
+	defer stopServeAndWait(t, stop, errCh)
+
+	if err := waitReady(profile, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if body := getProxyBody(t, profile, "/version"); !strings.Contains(body, `"target":"alpha"`) {
+		t.Fatalf("initial proxy body = %s, want alpha target", body)
+	}
+
+	profile.Contexts = []string{"beta"}
+	profile.PrimaryContext = "beta"
+	if err := proxystate.Save(statePath, profile); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("serve did not restart with updated state")
+		}
+		body, err := tryGetProxyBody(profile, "/version")
+		if err == nil && strings.Contains(body, `"target":"beta"`) {
+			return
+		}
+		select {
+		case err := <-errCh:
+			t.Fatalf("serve exited while waiting for restart: %v", err)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func TestServeStateStopsWhenStateFileDisappears(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"gitVersion":"v1.test"}`))
+	}))
+	defer upstream.Close()
+
+	sourcePath := writeMainTestKubeconfig(t, upstream.URL, mainTestServerCAData(upstream))
+	listenAddr, err := pickAvailableListenAddr()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, certPEM, keyPEM, err := generateTLSCertificate(listenAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := &proxystate.Profile{
+		Version:          proxystate.Version,
+		Name:             "removed-proxy",
+		SourceKubeconfig: sourcePath,
+		Listen:           listenAddr,
+		Contexts:         []string{"alpha"},
+		PrimaryContext:   "alpha",
+		BearerToken:      "state-token",
+		ProxyTTL:         "0s",
+		TLS: proxystate.TLS{
+			CertPEM: string(certPEM),
+			KeyPEM:  string(keyPEM),
+		},
+		Options: proxystate.ProxyOptions{
+			RequestTimeout: "2s",
+			Retries:        0,
+			RetryBackoff:   "1ms",
+		},
+	}
+	statePath := filepath.Join(t.TempDir(), "removed-proxy.yaml")
+	if err := proxystate.Save(statePath, profile); err != nil {
+		t.Fatal(err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runWithArgs([]string{"serve", "--state", statePath}, nil)
+	}()
+	if err := waitReady(profile, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, errStateFileRemoved) {
+			t.Fatalf("serve error = %v, want errStateFileRemoved", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("serve did not stop after state file disappeared")
 	}
 }
 
@@ -339,24 +611,101 @@ func TestGenerateTLSCertificateIncludesListenHost(t *testing.T) {
 func writeMainTestKubeconfig(t *testing.T, serverURL string, caData []byte) string {
 	t.Helper()
 
+	return writeMainTestKubeconfigWithContexts(t, []mainTestContext{
+		{name: "alpha", serverURL: serverURL, caData: caData},
+	})
+}
+
+type mainTestContext struct {
+	name      string
+	serverURL string
+	caData    []byte
+}
+
+func writeMainTestKubeconfigWithContexts(t *testing.T, contexts []mainTestContext) string {
+	t.Helper()
+
 	config := clientcmdapi.NewConfig()
-	config.Clusters["cluster-alpha"] = &clientcmdapi.Cluster{
-		Server:                   serverURL,
-		CertificateAuthorityData: caData,
+	for _, context := range contexts {
+		clusterName := "cluster-" + context.name
+		userName := "user-" + context.name
+		config.Clusters[clusterName] = &clientcmdapi.Cluster{
+			Server:                   context.serverURL,
+			CertificateAuthorityData: context.caData,
+		}
+		config.AuthInfos[userName] = &clientcmdapi.AuthInfo{Token: "source-token"}
+		config.Contexts[context.name] = &clientcmdapi.Context{
+			Cluster:   clusterName,
+			AuthInfo:  userName,
+			Namespace: "test-ns",
+		}
 	}
-	config.AuthInfos["user-alpha"] = &clientcmdapi.AuthInfo{Token: "source-token"}
-	config.Contexts["alpha"] = &clientcmdapi.Context{
-		Cluster:   "cluster-alpha",
-		AuthInfo:  "user-alpha",
-		Namespace: "test-ns",
+	if len(contexts) > 0 {
+		config.CurrentContext = contexts[0].name
 	}
-	config.CurrentContext = "alpha"
 
 	path := filepath.Join(t.TempDir(), "source.yaml")
 	if err := clientcmd.WriteToFile(*config, path); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func getProxyBody(t *testing.T, profile *proxystate.Profile, path string) string {
+	t.Helper()
+
+	body, err := tryGetProxyBody(profile, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func tryGetProxyBody(profile *proxystate.Profile, path string) (string, error) {
+	client, err := profileHTTPClient(profile)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://"+profile.Listen+path, http.NoBody)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+profile.BearerToken)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("proxy status %d: %s", resp.StatusCode, data)
+	}
+	return string(data), nil
+}
+
+func stopServeAndWait(t *testing.T, stop chan<- os.Signal, errCh <-chan error) {
+	t.Helper()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("serve exited unexpectedly: %v", err)
+		}
+		return
+	default:
+	}
+	stop <- os.Interrupt
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("serve stop error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("serve did not stop")
+	}
 }
 
 func mainTestServerCAData(server *httptest.Server) []byte {
