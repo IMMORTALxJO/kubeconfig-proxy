@@ -258,6 +258,7 @@ func (p *Proxy) openWatchStream(ctx context.Context, original *http.Request, tar
 	}
 	copyHeaders(request.Header, original.Header)
 	request.Header.Del("Authorization")
+	request.Header.Del("Accept-Encoding")
 	request.Host = target.Host.Host
 
 	response, err := target.Client.Do(request)
@@ -555,6 +556,7 @@ func (p *Proxy) doOnce(ctx context.Context, target Target, original *http.Reques
 	}
 	copyHeaders(request.Header, original.Header)
 	request.Header.Del("Authorization")
+	request.Header.Del("Accept-Encoding")
 	request.Host = target.Host.Host
 
 	response, err := target.Client.Do(request)

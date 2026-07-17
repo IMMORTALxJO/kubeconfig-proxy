@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -429,6 +430,42 @@ func TestAggregatesListResponses(t *testing.T) {
 	}
 	if payload.Items[1].Metadata.Labels["context"] != "two" {
 		t.Fatalf("second item labels = %#v", payload.Items[1].Metadata.Labels)
+	}
+}
+
+func TestAggregatesGzipListResponses(t *testing.T) {
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": gzipListHandler(t, `{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"10"},"items":[{"metadata":{"name":"a"}}]}`),
+		"two": gzipListHandler(t, `{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"11"},"items":[{"metadata":{"name":"b"}}]}`),
+	})
+	defer cleanup()
+
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/namespaces/default/pods", http.NoBody)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	serveTestHTTP(p, rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 2 {
+		t.Fatalf("items = %d, want 2", len(payload.Items))
 	}
 }
 
@@ -1088,6 +1125,26 @@ func newTestProxyWithOptions(targets []Target, primary Target, options Options) 
 func serveTestHTTP(p *Proxy, rec *httptest.ResponseRecorder, req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+testBearerToken)
 	p.ServeHTTP(rec, req)
+}
+
+func gzipListHandler(t *testing.T, body string) http.HandlerFunc {
+	t.Helper()
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			t.Fatalf("upstream Accept-Encoding = %q, want gzip from Go transport", r.Header.Get("Accept-Encoding"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		_, err := gz.Write([]byte(body))
+		if closeErr := gz.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func testTargets(t *testing.T, handlers map[string]http.HandlerFunc) ([]Target, func()) {
