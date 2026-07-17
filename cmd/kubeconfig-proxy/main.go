@@ -39,6 +39,13 @@ import (
 
 const readinessPath = "/-/kubeconfig-proxy/ready"
 
+const statePollInterval = time.Second
+
+var (
+	errStateFileChanged = errors.New("state file changed")
+	errStateFileRemoved = errors.New("state file removed")
+)
+
 func main() {
 	if err := run(); err != nil {
 		log.Fatalf("error: %v", err)
@@ -269,30 +276,71 @@ func runServeState(args []string, stop <-chan os.Signal) error {
 		return fmt.Errorf("--state is required")
 	}
 
-	profile, err := proxystate.Load(*statePath)
+	runtime, snapshot, err := loadServeRuntime(*statePath)
 	if err != nil {
 		return err
 	}
-	if !profile.LogsEnabled {
+	if !runtime.profile.LogsEnabled {
 		restoreLogs := discardLogs()
 		defer restoreLogs()
 	}
+
+	for {
+		restart, err := serveRuntime(*statePath, runtime, snapshot, stop)
+		if !restart {
+			return err
+		}
+
+		runtime, snapshot, err = loadServeRuntime(*statePath)
+		if err != nil {
+			return err
+		}
+	}
+}
+
+type serveRuntimeConfig struct {
+	profile        *proxystate.Profile
+	requestTimeout time.Duration
+	retryBackoff   time.Duration
+	proxyTTL       time.Duration
+	targets        []proxy.Target
+	primary        proxy.Target
+	handler        http.Handler
+	tlsCertificate tls.Certificate
+}
+
+func loadServeRuntime(statePath string) (*serveRuntimeConfig, stateFileSnapshot, error) {
+	snapshot, err := readStateFileSnapshot(statePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, stateFileSnapshot{}, stateFileRemovedError(statePath)
+		}
+		return nil, stateFileSnapshot{}, err
+	}
+
+	profile, err := proxystate.Load(statePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, stateFileSnapshot{}, stateFileRemovedError(statePath)
+		}
+		return nil, stateFileSnapshot{}, err
+	}
 	requestTimeout, err := profile.RequestTimeoutDuration()
 	if err != nil {
-		return err
+		return nil, stateFileSnapshot{}, err
 	}
 	retryBackoff, err := profile.RetryBackoffDuration()
 	if err != nil {
-		return err
+		return nil, stateFileSnapshot{}, err
 	}
 	proxyTTL, err := profile.ProxyTTLDuration()
 	if err != nil {
-		return err
+		return nil, stateFileSnapshot{}, err
 	}
 
 	targets, primary, err := proxy.LoadTargets(profile.SourceKubeconfig, profile.Contexts, profile.PrimaryContext)
 	if err != nil {
-		return err
+		return nil, stateFileSnapshot{}, err
 	}
 	handler, err := proxy.NewWithOptions(targets, primary, proxy.Options{
 		RequestTimeout:   requestTimeout,
@@ -302,32 +350,55 @@ func runServeState(args []string, stop <-chan os.Signal) error {
 		HelmReleaseProxy: profile.Options.HelmReleaseProxy,
 	})
 	if err != nil {
-		return err
+		return nil, stateFileSnapshot{}, err
 	}
 
 	tlsCertificate, err := tls.X509KeyPair([]byte(profile.TLS.CertPEM), []byte(profile.TLS.KeyPEM))
 	if err != nil {
-		return fmt.Errorf("load TLS key pair from state: %w", err)
+		return nil, stateFileSnapshot{}, fmt.Errorf("load TLS key pair from state: %w", err)
 	}
-	listener, err := proxy.Listen(profile.Listen)
+
+	return &serveRuntimeConfig{
+		profile:        profile,
+		requestTimeout: requestTimeout,
+		retryBackoff:   retryBackoff,
+		proxyTTL:       proxyTTL,
+		targets:        targets,
+		primary:        primary,
+		handler:        handler,
+		tlsCertificate: tlsCertificate,
+	}, snapshot, nil
+}
+
+func serveRuntime(statePath string, runtime *serveRuntimeConfig, snapshot stateFileSnapshot, stop <-chan os.Signal) (bool, error) {
+	listener, err := proxy.Listen(runtime.profile.Listen)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer listener.Close()
 
-	log.Printf("state file:       %s", *statePath)
+	log.Printf("state file:       %s", statePath)
 	log.Printf("listen:           https://%s", listener.Addr().String())
-	log.Printf("targets:          %s", proxy.TargetNames(targets))
-	log.Printf("primary target:   %s", primary.Name)
-	log.Printf("proxy ttl:        %s", durationLogValue(proxyTTL))
-	log.Printf("request timeout: %s", durationLogValue(requestTimeout))
-	log.Printf("retries:         %d", profile.Options.Retries)
-	log.Printf("retry backoff:   %s", retryBackoff)
+	log.Printf("targets:          %s", proxy.TargetNames(runtime.targets))
+	log.Printf("primary target:   %s", runtime.primary.Name)
+	log.Printf("proxy ttl:        %s", durationLogValue(runtime.proxyTTL))
+	log.Printf("request timeout: %s", durationLogValue(runtime.requestTimeout))
+	log.Printf("retries:         %d", runtime.profile.Options.Retries)
+	log.Printf("retry backoff:   %s", runtime.retryBackoff)
 
-	return serveHTTP(listener, handler, tlsCertificate, proxyTTL, profile.BearerToken, stop)
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	defer cancelWatch()
+	stateChanged := watchStateFile(watchCtx, statePath, snapshot)
+
+	err = serveHTTP(listener, runtime.handler, runtime.tlsCertificate, runtime.proxyTTL, runtime.profile.BearerToken, stop, stateChanged)
+	if errors.Is(err, errStateFileChanged) {
+		log.Printf("state file changed, restarting serve")
+		return true, nil
+	}
+	return false, err
 }
 
-func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.Certificate, proxyTTL time.Duration, bearerToken string, stop <-chan os.Signal) error {
+func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.Certificate, proxyTTL time.Duration, bearerToken string, stop <-chan os.Signal, stateChanged <-chan error) error {
 	activityHandler := newActivityHandler(handler, bearerToken)
 	server := &http.Server{Addr: listener.Addr().String(), Handler: activityHandler}
 	errCh := make(chan error, 1)
@@ -359,6 +430,21 @@ func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.C
 		case <-stop:
 			log.Printf("shutting down")
 			return shutdownServer(server)
+		case err, ok := <-stateChanged:
+			if !ok {
+				stateChanged = nil
+				continue
+			}
+			if err != nil {
+				log.Printf("shutting down after state file error: %v", err)
+			}
+			if shutdownErr := shutdownServer(server); shutdownErr != nil {
+				return shutdownErr
+			}
+			if err != nil {
+				return err
+			}
+			return errStateFileChanged
 		case <-ttlCh:
 			if activityHandler.idleFor(proxyTTL) {
 				log.Printf("shutting down after %s without active requests", proxyTTL)
@@ -371,6 +457,57 @@ func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.C
 			return nil
 		}
 	}
+}
+
+type stateFileSnapshot struct {
+	modTime time.Time
+	size    int64
+}
+
+func readStateFileSnapshot(path string) (stateFileSnapshot, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return stateFileSnapshot{}, err
+	}
+	return stateFileSnapshot{modTime: info.ModTime(), size: info.Size()}, nil
+}
+
+func (s stateFileSnapshot) equal(other stateFileSnapshot) bool {
+	return s.size == other.size && s.modTime.Equal(other.modTime)
+}
+
+func watchStateFile(ctx context.Context, path string, snapshot stateFileSnapshot) <-chan error {
+	changed := make(chan error, 1)
+	ticker := time.NewTicker(statePollInterval)
+	go func() {
+		defer ticker.Stop()
+		defer close(changed)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				next, err := readStateFileSnapshot(path)
+				if err != nil {
+					if os.IsNotExist(err) {
+						changed <- stateFileRemovedError(path)
+						return
+					}
+					changed <- fmt.Errorf("stat state file %s: %w", path, err)
+					return
+				}
+				if !snapshot.equal(next) {
+					changed <- nil
+					return
+				}
+			}
+		}
+	}()
+	return changed
+}
+
+func stateFileRemovedError(path string) error {
+	return fmt.Errorf("state file disappeared: %s: %w", path, errStateFileRemoved)
 }
 
 type activityHandler struct {
