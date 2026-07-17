@@ -82,6 +82,15 @@ active for that duration, the auto-started proxy process exits by itself. Health
 checks made by the credential command do not extend the TTL. Set `--proxy-ttl 0`
 to disable idle shutdown.
 
+Serve logs are disabled by default. Pass `--logs-enabled` to `add-context` to
+write auto-started `serve` output to `<state>.log`.
+
+Remove a generated proxy context and its state artifacts:
+
+```bash
+kubeconfig-proxy delete-context prod-proxy --kubeconfig ~/.kube/config
+```
+
 You can also select source contexts with a regular expression:
 
 ```bash
@@ -159,6 +168,9 @@ werf example.
 - `--retries 5` retries temporary upstream failures.
 - `--retry-backoff 500ms` sets the delay between retry attempts.
 - `--helm-release-proxy` enables Helm/werf release-history compatibility mode.
+- `--logs-enabled` writes auto-started `serve` output to `<state>.log`.
+- `delete-context <name>` removes the generated kubeconfig context, cluster,
+  auth info, state file, log file, and lock file.
 - `credential --state <path>` is the kubeconfig exec credential entrypoint.
 - `serve --state <path>` runs a state-backed proxy process.
 

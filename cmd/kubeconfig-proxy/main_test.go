@@ -24,7 +24,7 @@ func TestRunWithArgsRequiresSubcommand(t *testing.T) {
 	if err == nil {
 		t.Fatal("runWithArgs returned nil error")
 	}
-	if err.Error() != "usage: kubeconfig-proxy <add-context|credential|serve> [flags]" {
+	if err.Error() != "usage: kubeconfig-proxy <add-context|delete-context|credential|serve> [flags]" {
 		t.Fatalf("error = %q, want usage error", err.Error())
 	}
 }
@@ -81,6 +81,9 @@ func TestAddContextWritesStateAndKubeconfigExecContext(t *testing.T) {
 	if profile.ProxyTTL != "3m0s" {
 		t.Fatalf("profile proxyTTL = %q, want 3m0s", profile.ProxyTTL)
 	}
+	if profile.LogsEnabled {
+		t.Fatal("profile logsEnabled = true, want false by default")
+	}
 	if profile.BearerToken == "" || profile.TLS.CertPEM == "" || profile.TLS.KeyPEM == "" {
 		t.Fatal("profile should contain proxy token and TLS material")
 	}
@@ -122,6 +125,35 @@ func TestAddContextWritesStateAndKubeconfigExecContext(t *testing.T) {
 	}
 	if !slices.Equal(auth.Exec.Args, []string{"credential", "--state", statePath}) {
 		t.Fatalf("exec args = %v, want credential state args", auth.Exec.Args)
+	}
+}
+
+func TestAddContextWritesLogsEnabledState(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	kubeconfigPath := writeMainTestKubeconfig(t, upstream.URL, mainTestServerCAData(upstream))
+	statePath := filepath.Join(t.TempDir(), "logs-proxy.yaml")
+	if err := runWithArgs([]string{
+		"add-context", "logs-proxy",
+		"--kubeconfig", kubeconfigPath,
+		"--state", statePath,
+		"--listen", "127.0.0.1:27444",
+		"--contexts", "alpha",
+		"--primary-context", "alpha",
+		"--logs-enabled",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	profile, err := proxystate.Load(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !profile.LogsEnabled {
+		t.Fatal("profile logsEnabled = false, want true")
 	}
 }
 
@@ -169,6 +201,60 @@ func TestAddContextResolvesExplicitZeroListenPort(t *testing.T) {
 	}
 	if cluster.Server != "https://"+profile.Listen {
 		t.Fatalf("cluster server = %q, want https://%s", cluster.Server, profile.Listen)
+	}
+}
+
+func TestDeleteContextRemovesKubeconfigAndStateArtifacts(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	kubeconfigPath := writeMainTestKubeconfig(t, upstream.URL, mainTestServerCAData(upstream))
+	statePath := filepath.Join(t.TempDir(), "prod-proxy.yaml")
+	if err := runWithArgs([]string{
+		"add-context", "prod-proxy",
+		"--kubeconfig", kubeconfigPath,
+		"--state", statePath,
+		"--listen", "127.0.0.1:27445",
+		"--contexts", "alpha",
+		"--primary-context", "alpha",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{statePath + ".log", statePath + ".lock"} {
+		if err := os.WriteFile(path, []byte("test"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := runWithArgs([]string{
+		"delete-context", "prod-proxy",
+		"--kubeconfig", kubeconfigPath,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	config, err := clientcmd.LoadFromFile(kubeconfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Contexts["alpha"] == nil {
+		t.Fatal("source context should be preserved")
+	}
+	if config.Contexts["prod-proxy"] != nil {
+		t.Fatal("proxy context should be removed")
+	}
+	if config.Clusters["kubeconfig-proxy/prod-proxy"] != nil {
+		t.Fatal("proxy cluster should be removed")
+	}
+	if config.AuthInfos["kubeconfig-proxy/prod-proxy"] != nil {
+		t.Fatal("proxy auth info should be removed")
+	}
+	for _, path := range []string{statePath, statePath + ".log", statePath + ".lock"} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s stat error = %v, want not exists", path, err)
+		}
 	}
 }
 

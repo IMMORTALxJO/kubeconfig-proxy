@@ -20,6 +20,7 @@ type Profile struct {
 	PrimaryContext   string       `json:"primaryContext"`
 	BearerToken      string       `json:"bearerToken"`
 	ProxyTTL         string       `json:"proxyTTL"`
+	LogsEnabled      bool         `json:"logsEnabled"`
 	TLS              TLS          `json:"tls"`
 	Options          ProxyOptions `json:"options"`
 }

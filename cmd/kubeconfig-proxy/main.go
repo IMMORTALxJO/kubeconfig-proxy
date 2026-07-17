@@ -54,13 +54,15 @@ func runWithArgs(args []string, stop <-chan os.Signal) error {
 		switch args[0] {
 		case "add-context":
 			return runAddContext(args[1:])
+		case "delete-context":
+			return runDeleteContext(args[1:])
 		case "credential":
 			return runCredential(args[1:])
 		case "serve":
 			return runServeState(args[1:], stop)
 		}
 	}
-	return fmt.Errorf("usage: kubeconfig-proxy <add-context|credential|serve> [flags]")
+	return fmt.Errorf("usage: kubeconfig-proxy <add-context|delete-context|credential|serve> [flags]")
 }
 
 func runAddContext(args []string) error {
@@ -82,6 +84,7 @@ func runAddContext(args []string) error {
 		retries        = flags.Int("retries", proxy.DefaultRetries, "number of retries for failed upstream requests")
 		retryBackoff   = flags.Duration("retry-backoff", 200*time.Millisecond, "delay between upstream request retries")
 		helmRelease    = flags.Bool("helm-release-proxy", false, "proxy Helm release storage list/watch requests only through the primary context")
+		logsEnabled    = flags.Bool("logs-enabled", false, "write serve logs to the state log file")
 		execCommand    = flags.String("exec-command", defaultExecCommand(), "command written to kubeconfig exec auth")
 	)
 	if err := flags.Parse(args); err != nil {
@@ -137,6 +140,7 @@ func runAddContext(args []string) error {
 		PrimaryContext:   primary.Name,
 		BearerToken:      bearerToken,
 		ProxyTTL:         proxyTTL.String(),
+		LogsEnabled:      *logsEnabled,
 		TLS: proxystate.TLS{
 			CertPEM: string(certPEM),
 			KeyPEM:  string(keyPEM),
@@ -164,6 +168,58 @@ func runAddContext(args []string) error {
 	log.Printf("targets:            %s", proxy.TargetNames(targets))
 	log.Printf("primary target:     %s", primary.Name)
 	log.Printf("proxy ttl:          %s", durationLogValue(*proxyTTL))
+	log.Printf("serve logs:         %t", *logsEnabled)
+	return nil
+}
+
+func runDeleteContext(args []string) error {
+	flags := flag.NewFlagSet("kubeconfig-proxy delete-context", flag.ContinueOnError)
+	contextName := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		contextName = args[0]
+		args = args[1:]
+	}
+	var (
+		kubeconfigPath = flags.String("kubeconfig", defaultKubeconfigPath(), "kubeconfig path to update")
+		statePath      = flags.String("state", "", "additional state file path to remove")
+	)
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if contextName == "" && flags.NArg() == 1 {
+		contextName = flags.Arg(0)
+	}
+	if contextName == "" || flags.NArg() > 1 {
+		return fmt.Errorf("usage: kubeconfig-proxy delete-context <context-name> [flags]")
+	}
+
+	absoluteKubeconfigPath, err := filepath.Abs(*kubeconfigPath)
+	if err != nil {
+		return err
+	}
+	statePaths, err := kubeconfig.DeleteProxyContext(absoluteKubeconfigPath, contextName)
+	if err != nil {
+		return err
+	}
+	if *statePath != "" {
+		absoluteStatePath, err := filepath.Abs(*statePath)
+		if err != nil {
+			return err
+		}
+		statePaths = appendUniqueStrings(statePaths, absoluteStatePath)
+	}
+	if len(statePaths) == 0 {
+		statePaths = append(statePaths, defaultStatePath(contextName))
+	}
+	if err := removeStateArtifacts(statePaths); err != nil {
+		return err
+	}
+
+	log.Printf("updated kubeconfig: %s", absoluteKubeconfigPath)
+	log.Printf("deleted context:    %s", contextName)
+	for _, statePath := range statePaths {
+		log.Printf("deleted state:      %s", statePath)
+	}
 	return nil
 }
 
@@ -192,7 +248,7 @@ func runCredential(args []string) error {
 		return err
 	}
 	if !ready(profile) {
-		if err := startDetachedServe(*statePath); err != nil {
+		if err := startDetachedServe(*statePath, profile.LogsEnabled); err != nil {
 			return err
 		}
 		if err := waitReady(profile, 10*time.Second); err != nil {
@@ -216,6 +272,10 @@ func runServeState(args []string, stop <-chan os.Signal) error {
 	profile, err := proxystate.Load(*statePath)
 	if err != nil {
 		return err
+	}
+	if !profile.LogsEnabled {
+		restoreLogs := discardLogs()
+		defer restoreLogs()
 	}
 	requestTimeout, err := profile.RequestTimeoutDuration()
 	if err != nil {
@@ -467,6 +527,16 @@ func contains(values []string, needle string) bool {
 	return false
 }
 
+func appendUniqueStrings(values []string, more ...string) []string {
+	for _, value := range more {
+		if value == "" || contains(values, value) {
+			continue
+		}
+		values = append(values, value)
+	}
+	return values
+}
+
 func defaultKubeconfigPath() string {
 	if value := os.Getenv("KUBECONFIG"); value != "" {
 		return filepath.SplitList(value)[0]
@@ -683,31 +753,60 @@ func profileHTTPClient(profile *proxystate.Profile) (*http.Client, error) {
 	}, nil
 }
 
-func startDetachedServe(statePath string) error {
+func startDetachedServe(statePath string, logsEnabled bool) error {
 	executable, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	logPath := statePath + ".log"
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	defer logFile.Close()
-
 	nullFile, err := os.Open(os.DevNull)
 	if err != nil {
 		return err
 	}
 	defer nullFile.Close()
 
+	stdout := io.Writer(nullFile)
+	stderr := io.Writer(nullFile)
+	if logsEnabled {
+		logPath := statePath + ".log"
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return err
+		}
+		defer logFile.Close()
+		stdout = logFile
+		stderr = logFile
+	}
+
 	cmd := exec.Command(executable, "serve", "--state", statePath)
 	cmd.Stdin = nullFile
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	cmd.Env = os.Environ()
 	if err := cmd.Start(); err != nil {
 		return err
+	}
+	return nil
+}
+
+func discardLogs() func() {
+	output := log.Writer()
+	flags := log.Flags()
+	prefix := log.Prefix()
+	log.SetOutput(io.Discard)
+	return func() {
+		log.SetOutput(output)
+		log.SetFlags(flags)
+		log.SetPrefix(prefix)
+	}
+}
+
+func removeStateArtifacts(statePaths []string) error {
+	for _, statePath := range statePaths {
+		for _, path := range []string{statePath, statePath + ".log", statePath + ".lock"} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
 	}
 	return nil
 }
