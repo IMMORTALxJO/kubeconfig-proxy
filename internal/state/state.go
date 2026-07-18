@@ -38,7 +38,7 @@ type ProxyOptions struct {
 }
 
 func Load(path string) (*Profile, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- state path is an explicit local CLI input or a path recorded in the generated kubeconfig.
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +56,7 @@ func Save(path string, profile *Profile) error {
 	if err := profile.Validate(); err != nil {
 		return err
 	}
-	data, err := yaml.Marshal(profile)
+	data, err := yaml.Marshal(profile) // #nosec G117 -- state intentionally stores proxy secrets and is written with 0600 permissions.
 	if err != nil {
 		return err
 	}

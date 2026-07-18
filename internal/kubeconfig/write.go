@@ -42,7 +42,7 @@ func AddProxyContext(path, contextName, serverURL, namespace, command, statePath
 		Namespace: namespace,
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	if err := clientcmd.WriteToFile(*config, path); err != nil {
@@ -89,7 +89,7 @@ func DeleteProxyContext(path, contextName string) ([]string, error) {
 	if !changed {
 		return statePaths, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
 	if err := clientcmd.WriteToFile(*config, path); err != nil {

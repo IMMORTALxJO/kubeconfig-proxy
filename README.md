@@ -228,14 +228,20 @@ intentionally want to expose it to a trusted network.
 Run tests:
 
 ```bash
-GOTOOLCHAIN=auto go test ./...
-GOTOOLCHAIN=auto go test -race ./internal/proxy
+make test
+make race
 ```
 
 Build the binary:
 
 ```bash
-GOTOOLCHAIN=auto go build -trimpath -o kubeconfig-proxy ./cmd/kubeconfig-proxy
+make build
+```
+
+Run the full local check suite used by CI:
+
+```bash
+make check
 ```
 
 Release builds are produced by GitHub Actions when a `v*` tag is pushed. The

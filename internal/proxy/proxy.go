@@ -248,7 +248,7 @@ func (p *Proxy) openWatchStream(ctx context.Context, original *http.Request, tar
 
 	upstreamURL := buildUpstreamURL(target.Host, original.URL)
 	applyAggregateResourceVersion(upstreamURL, target.Name)
-	request, err := http.NewRequestWithContext(requestCtx, original.Method, upstreamURL.String(), nil)
+	request, err := http.NewRequestWithContext(requestCtx, original.Method, upstreamURL.String(), nil) // #nosec G704 -- upstream URL is built from a selected kubeconfig target by design.
 	if err != nil {
 		cancel()
 		if timer != nil {
@@ -261,7 +261,7 @@ func (p *Proxy) openWatchStream(ctx context.Context, original *http.Request, tar
 	request.Header.Del("Accept-Encoding")
 	request.Host = target.Host.Host
 
-	response, err := target.Client.Do(request)
+	response, err := target.Client.Do(request) // #nosec G704 -- proxying requests to selected kubeconfig targets is the purpose of this package.
 	if err != nil {
 		if requestCtx.Err() != nil && ctx.Err() == nil {
 			err = context.DeadlineExceeded
@@ -441,7 +441,7 @@ func (p *Proxy) aggregateList(w http.ResponseWriter, r *http.Request) {
 	copyHeaders(w.Header(), okResponses[0].header)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(merged)
+	_, _ = w.Write(merged) // #nosec G705 -- response body is Kubernetes API JSON, not browser-rendered HTML.
 }
 
 func (p *Proxy) fanOut(w http.ResponseWriter, r *http.Request) {
@@ -550,7 +550,7 @@ func (p *Proxy) doOnce(ctx context.Context, target Target, original *http.Reques
 		requestBody = bytes.NewReader(body)
 	}
 
-	request, err := http.NewRequestWithContext(requestCtx, original.Method, upstreamURL.String(), requestBody)
+	request, err := http.NewRequestWithContext(requestCtx, original.Method, upstreamURL.String(), requestBody) // #nosec G704 -- upstream URL is built from a selected kubeconfig target by design.
 	if err != nil {
 		return upstreamResponse{target: target, err: err}
 	}
@@ -559,7 +559,7 @@ func (p *Proxy) doOnce(ctx context.Context, target Target, original *http.Reques
 	request.Header.Del("Accept-Encoding")
 	request.Host = target.Host.Host
 
-	response, err := target.Client.Do(request)
+	response, err := target.Client.Do(request) // #nosec G704 -- proxying requests to selected kubeconfig targets is the purpose of this package.
 	if err != nil {
 		return upstreamResponse{target: target, err: err}
 	}
@@ -1079,10 +1079,14 @@ func writeUpstreamResponse(w http.ResponseWriter, response upstreamResponse) {
 }
 
 func writeStatusError(w http.ResponseWriter, code int, message string) {
+	statusCode := int32(http.StatusInternalServerError)
+	if code >= 100 && code <= 599 {
+		statusCode = int32(code)
+	}
 	status := metav1.Status{
 		TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"},
 		Status:   metav1.StatusFailure,
-		Code:     int32(code),
+		Code:     statusCode,
 		Message:  message,
 	}
 	w.Header().Set("Content-Type", "application/json")
