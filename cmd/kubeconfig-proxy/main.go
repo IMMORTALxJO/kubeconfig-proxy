@@ -181,7 +181,7 @@ func runAddContext(args []string) error {
 
 	log.Printf("updated kubeconfig: %s", absoluteKubeconfigPath)
 	log.Printf("state file:         %s", absoluteStatePath)
-	log.Printf("context:            %s", contextName)
+	log.Printf("context:            %q", contextName) // #nosec G706 -- %q escapes control characters in user-provided context names.
 	log.Printf("listen:             %s", serverURL)
 	log.Printf("targets:            %s", proxy.TargetNames(targets))
 	log.Printf("primary target:     %s", primary.Name)
@@ -234,9 +234,9 @@ func runDeleteContext(args []string) error {
 	}
 
 	log.Printf("updated kubeconfig: %s", absoluteKubeconfigPath)
-	log.Printf("deleted context:    %s", contextName)
+	log.Printf("deleted context:    %q", contextName) // #nosec G706 -- %q escapes control characters in user-provided context names.
 	for _, statePath := range statePaths {
-		log.Printf("deleted state:      %s", statePath)
+		log.Printf("deleted state:      %q", statePath) // #nosec G706 -- %q escapes control characters in local state paths.
 	}
 	return nil
 }
@@ -411,7 +411,11 @@ func serveRuntime(statePath string, runtime *serveRuntimeConfig, snapshot stateF
 
 func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.Certificate, proxyTTL time.Duration, bearerToken string, stop <-chan os.Signal, stateChanged <-chan error) error {
 	activityHandler := newActivityHandler(handler, bearerToken)
-	server := &http.Server{Addr: listener.Addr().String(), Handler: activityHandler}
+	server := &http.Server{
+		Addr:              listener.Addr().String(),
+		Handler:           activityHandler,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	errCh := make(chan error, 1)
 	go func() {
 		tlsListener := tls.NewListener(listener, &tls.Config{
@@ -834,7 +838,7 @@ func lockState(statePath string) (func(), error) {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600) // #nosec G304 -- lock path is derived from the explicit local state path.
 	if err != nil {
 		return nil, err
 	}
@@ -916,7 +920,7 @@ func startDetachedServe(statePath string, logsEnabled bool) error {
 	stderr := io.Writer(nullFile)
 	if logsEnabled {
 		logPath := statePath + ".log"
-		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) // #nosec G304 -- log path is derived from the explicit local state path.
 		if err != nil {
 			return err
 		}
@@ -925,7 +929,7 @@ func startDetachedServe(statePath string, logsEnabled bool) error {
 		stderr = logFile
 	}
 
-	cmd := exec.Command(executable, "serve", "--state", statePath)
+	cmd := exec.Command(executable, "serve", "--state", statePath) // #nosec G204 -- the CLI starts its own executable with an explicit local state path.
 	cmd.Stdin = nullFile
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -951,7 +955,7 @@ func discardLogs() func() {
 func removeStateArtifacts(statePaths []string) error {
 	for _, statePath := range statePaths {
 		for _, path := range []string{statePath, statePath + ".log"} {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) { // #nosec G703 -- delete-context removes only the managed state file paths recorded in kubeconfig.
 				return err
 			}
 		}
