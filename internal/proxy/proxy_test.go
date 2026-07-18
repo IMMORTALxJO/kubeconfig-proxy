@@ -348,6 +348,56 @@ func TestDeleteNamedResourceUsesExistingResourceAnnotations(t *testing.T) {
 	}
 }
 
+func TestPatchNamedResourceUsesExistingResourceAnnotations(t *testing.T) {
+	calls := &callRecorder{}
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				calls.add("one:get")
+				http.NotFound(w, r)
+			case http.MethodPatch:
+				t.Fatalf("patch should be routed only to the annotated target")
+			default:
+				t.Fatalf("unexpected method %s", r.Method)
+			}
+		},
+		"two": func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				calls.add("two:get")
+				_, _ = w.Write([]byte(`{"kind":"ConfigMap","metadata":{"name":"demo","annotations":{"kubeconfig-proxy.io/context-name":"two"}}}`))
+			case http.MethodPatch:
+				calls.add("two:patch")
+				_, _ = io.Copy(io.Discard, r.Body)
+				_, _ = w.Write([]byte(`{"kind":"ConfigMap","metadata":{"name":"demo"}}`))
+			default:
+				t.Fatalf("unexpected method %s", r.Method)
+			}
+		},
+	})
+	defer cleanup()
+
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := strings.NewReader(`{"data":{"key":"value"}}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/namespaces/default/configmaps/demo", body)
+	req.Header.Set("Content-Type", "application/merge-patch+json")
+	rec := httptest.NewRecorder()
+	serveTestHTTP(p, rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	gotCalls := calls.snapshot()
+	if !slices.Contains(gotCalls, "one:get") || !slices.Contains(gotCalls, "two:get") || !slices.Contains(gotCalls, "two:patch") {
+		t.Fatalf("calls = %v, want lookup on targets and patch on annotated target", gotCalls)
+	}
+}
+
 func TestContextNameAnnotationRejectsUnknownTarget(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
 		"one": func(w http.ResponseWriter, r *http.Request) {
