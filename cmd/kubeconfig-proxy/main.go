@@ -7,7 +7,7 @@ import (
 	"os"
 )
 
-var cliVersion = "unknown"
+var cliVersion = "dev"
 
 func main() {
 	if err := run(); err != nil {

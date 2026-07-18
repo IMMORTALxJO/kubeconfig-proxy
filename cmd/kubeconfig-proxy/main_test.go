@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,12 +34,12 @@ func TestRunWithArgsRequiresSubcommand(t *testing.T) {
 	}
 }
 
-func TestRunVersionWritesUnknownByDefault(t *testing.T) {
+func TestRunVersionWritesDevByDefault(t *testing.T) {
 	var buf bytes.Buffer
 	if err := runVersion(nil, &buf); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := buf.String(), "unknown\n"; got != want {
+	if got, want := buf.String(), "dev\n"; got != want {
 		t.Fatalf("version output = %q, want %q", got, want)
 	}
 }
@@ -513,6 +514,29 @@ func TestServeStateStopsWhenStateFileDisappears(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("serve did not stop after state file disappeared")
+	}
+}
+
+func TestReadinessRefreshesActivityTTL(t *testing.T) {
+	nextCalled := atomic.Bool{}
+	handler := newActivityHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled.Store(true)
+	}), "state-token")
+	handler.lastActivity.Store(time.Now().Add(-time.Minute).UnixNano())
+
+	req := httptest.NewRequest(http.MethodGet, readinessPath, http.NoBody)
+	req.Header.Set("Authorization", "Bearer state-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if nextCalled.Load() {
+		t.Fatal("readiness request should not be proxied to the upstream handler")
+	}
+	if handler.idleFor(time.Second) {
+		t.Fatal("readiness request did not refresh last activity")
 	}
 }
 
