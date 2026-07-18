@@ -195,7 +195,7 @@ werf example.
   auth info, state file, and log file.
 - `credential --state <path>` is the kubeconfig exec credential entrypoint.
 - `serve --state <path>` runs a state-backed proxy process.
-- `version` prints the CLI version. Local builds print `unknown`; release
+- `version` prints the CLI version. Local builds print `dev`; release
   builds print the release tag.
 
 Retries default to `5`. Set `--retries 0` to disable them. The proxy retries

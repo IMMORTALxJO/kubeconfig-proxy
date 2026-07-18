@@ -788,7 +788,7 @@ func applyAggregateResourceVersion(upstreamURL *url.URL, targetName string) {
 }
 
 func (p *Proxy) targetsForMutationRequest(ctx context.Context, original *http.Request, body []byte) ([]Target, error) {
-	if original.Method == http.MethodDelete && isNamedResourcePath(original.URL.Path) {
+	if (original.Method == http.MethodDelete || original.Method == http.MethodPatch) && isNamedResourcePath(original.URL.Path) {
 		if targets, ok, err := p.targetsForExistingResourceMutation(ctx, original); err != nil || ok {
 			return targets, err
 		}
