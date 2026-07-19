@@ -35,6 +35,7 @@ type ProxyOptions struct {
 	Retries          int    `json:"retries"`
 	RetryBackoff     string `json:"retryBackoff"`
 	HelmReleaseProxy bool   `json:"helmReleaseProxy"`
+	ReadOnly         bool   `json:"readOnly"`
 }
 
 func Load(path string) (*Profile, error) {

@@ -63,6 +63,7 @@ type Options struct {
 	RetryBackoff     time.Duration
 	BearerToken      string
 	HelmReleaseProxy bool
+	ReadOnly         bool
 }
 
 func New(targets []Target, primary Target) (*Proxy, error) {
@@ -95,6 +96,10 @@ func NewWithOptions(targets []Target, primary Target, options Options) (*Proxy, 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !p.authorized(r) {
 		writeStatusError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if p.options.ReadOnly && isMutating(r.Method) {
+		writeStatusError(w, http.StatusForbidden, "read-only proxy rejects mutating requests")
 		return
 	}
 

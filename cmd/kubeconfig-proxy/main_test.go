@@ -125,6 +125,9 @@ func TestAddContextWritesStateAndKubeconfigExecContext(t *testing.T) {
 	if profile.LogsEnabled {
 		t.Fatal("profile logsEnabled = true, want false by default")
 	}
+	if profile.Options.ReadOnly {
+		t.Fatal("profile readOnly = true, want false by default")
+	}
 	if profile.BearerToken == "" || profile.TLS.CertPEM == "" || profile.TLS.KeyPEM == "" {
 		t.Fatal("profile should contain proxy token and TLS material")
 	}
@@ -195,6 +198,35 @@ func TestAddContextWritesLogsEnabledState(t *testing.T) {
 	}
 	if !profile.LogsEnabled {
 		t.Fatal("profile logsEnabled = false, want true")
+	}
+}
+
+func TestAddContextWritesReadOnlyState(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	kubeconfigPath := writeMainTestKubeconfig(t, upstream.URL, mainTestServerCAData(upstream))
+	statePath := filepath.Join(t.TempDir(), "readonly-proxy.yaml")
+	if err := runWithArgs([]string{
+		"add-context", "readonly-proxy",
+		"--kubeconfig", kubeconfigPath,
+		"--state", statePath,
+		"--listen", "127.0.0.1:27446",
+		"--contexts", "alpha",
+		"--primary-context", "alpha",
+		"--read-only",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	profile, err := proxystate.Load(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !profile.Options.ReadOnly {
+		t.Fatal("profile readOnly = false, want true")
 	}
 }
 
