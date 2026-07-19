@@ -35,6 +35,7 @@ func runAddContext(args []string) error {
 		retries        = flags.Int("retries", proxy.DefaultRetries, "number of retries for failed upstream requests")
 		retryBackoff   = flags.Duration("retry-backoff", 200*time.Millisecond, "delay between upstream request retries")
 		helmRelease    = flags.Bool("helm-release-proxy", false, "proxy Helm release storage list/watch requests only through the primary context")
+		readOnly       = flags.Bool("read-only", false, "reject mutating Kubernetes API requests with 403")
 		logsEnabled    = flags.Bool("logs-enabled", false, "write serve logs to the state log file")
 		execCommand    = flags.String("exec-command", defaultExecCommand(), "command written to kubeconfig exec auth")
 	)
@@ -101,6 +102,7 @@ func runAddContext(args []string) error {
 			Retries:          *retries,
 			RetryBackoff:     retryBackoff.String(),
 			HelmReleaseProxy: *helmRelease,
+			ReadOnly:         *readOnly,
 		},
 	}
 	if err := proxystate.Save(absoluteStatePath, profile); err != nil {
@@ -119,6 +121,7 @@ func runAddContext(args []string) error {
 	log.Printf("targets:            %s", proxy.TargetNames(targets))
 	log.Printf("primary target:     %s", primary.Name)
 	log.Printf("proxy ttl:          %s", durationLogValue(*proxyTTL))
+	log.Printf("read only:          %t", *readOnly)
 	log.Printf("serve logs:         %t", *logsEnabled)
 	return nil
 }

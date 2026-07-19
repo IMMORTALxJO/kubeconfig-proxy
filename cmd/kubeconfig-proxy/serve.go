@@ -101,6 +101,7 @@ func loadServeRuntime(statePath string) (*serveRuntimeConfig, stateFileSnapshot,
 		RetryBackoff:     retryBackoff,
 		BearerToken:      profile.BearerToken,
 		HelmReleaseProxy: profile.Options.HelmReleaseProxy,
+		ReadOnly:         profile.Options.ReadOnly,
 	})
 	if err != nil {
 		return nil, stateFileSnapshot{}, err
@@ -138,6 +139,7 @@ func serveRuntime(statePath string, runtime *serveRuntimeConfig, snapshot stateF
 	log.Printf("request timeout: %s", durationLogValue(runtime.requestTimeout))
 	log.Printf("retries:         %d", runtime.profile.Options.Retries)
 	log.Printf("retry backoff:   %s", runtime.retryBackoff)
+	log.Printf("read only:       %t", runtime.profile.Options.ReadOnly)
 
 	watchCtx, cancelWatch := context.WithCancel(context.Background())
 	defer cancelWatch()

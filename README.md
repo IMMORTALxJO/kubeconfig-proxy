@@ -42,7 +42,8 @@ made through the proxy context are routed according to request type:
 - discovery requests use the primary context;
 - named pod subresources such as `logs`, `exec`, `attach`, and `port-forward`
   are routed to the context that contains the pod;
-- resources can opt into single-context mutation with annotations.
+- resources can opt into single-context mutation with annotations;
+- read-only proxy contexts reject mutating requests with `403 Forbidden`.
 
 Aggregated objects are marked with:
 
@@ -190,6 +191,7 @@ werf example.
 - `--retries 5` retries temporary upstream failures.
 - `--retry-backoff 500ms` sets the delay between retry attempts.
 - `--helm-release-proxy` enables Helm/werf release-history compatibility mode.
+- `--read-only` rejects create, update, patch, and delete requests with `403`.
 - `--logs-enabled` writes auto-started `serve` output to `<state>.log`.
 - `delete-context <name>` removes the generated kubeconfig context, cluster,
   auth info, state file, and log file.

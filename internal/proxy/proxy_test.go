@@ -814,6 +814,49 @@ func TestHelmStorageListAggregatesByDefault(t *testing.T) {
 	}
 }
 
+func TestReadOnlyRejectsMutations(t *testing.T) {
+	calls := &callRecorder{}
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
+			calls.add("one:" + r.Method)
+			_, _ = w.Write([]byte(`{"gitVersion":"v1.32.0"}`))
+		},
+		"two": func(w http.ResponseWriter, r *http.Request) {
+			calls.add("two:" + r.Method)
+			_, _ = w.Write([]byte(`{"gitVersion":"v1.32.0"}`))
+		},
+	})
+	defer cleanup()
+
+	p, err := newTestProxyWithOptions(targets, targets[0], Options{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			req := httptest.NewRequest(method, "/api/v1/namespaces/default/configmaps/demo", strings.NewReader(`{"data":{"key":"value"}}`))
+			rec := httptest.NewRecorder()
+			serveTestHTTP(p, rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+			}
+		})
+	}
+
+	if gotCalls := calls.snapshot(); len(gotCalls) != 0 {
+		t.Fatalf("upstream calls = %v, want no upstream calls for read-only mutations", gotCalls)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/version", http.NoBody)
+	rec := httptest.NewRecorder()
+	serveTestHTTP(p, rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("read status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
 func TestNamedResourceGetRoutesToTargetContainingObject(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
 		"one": func(w http.ResponseWriter, r *http.Request) {
