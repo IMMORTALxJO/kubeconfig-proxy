@@ -348,6 +348,55 @@ func TestDeleteNamedResourceUsesExistingResourceAnnotations(t *testing.T) {
 	}
 }
 
+func TestDeleteNamedResourceRoutesOnlyToTargetsContainingObject(t *testing.T) {
+	calls := &callRecorder{}
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				calls.add("one:get")
+				_, _ = w.Write([]byte(`{"kind":"Pod","metadata":{"name":"demo"}}`))
+			case http.MethodDelete:
+				calls.add("one:delete")
+				_, _ = w.Write([]byte(`{"kind":"Status","status":"Success"}`))
+			default:
+				t.Fatalf("unexpected method %s", r.Method)
+			}
+		},
+		"two": func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				calls.add("two:get")
+				http.NotFound(w, r)
+			case http.MethodDelete:
+				t.Fatalf("delete should not be routed to a target where the object is missing")
+			default:
+				t.Fatalf("unexpected method %s", r.Method)
+			}
+		},
+	})
+	defer cleanup()
+
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/namespaces/default/pods/demo", http.NoBody)
+	rec := httptest.NewRecorder()
+	serveTestHTTP(p, rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	gotCalls := calls.snapshot()
+	for _, want := range []string{"one:get", "two:get", "one:delete"} {
+		if !slices.Contains(gotCalls, want) {
+			t.Fatalf("calls = %v, want %s", gotCalls, want)
+		}
+	}
+}
+
 func TestPatchNamedResourceUsesExistingResourceAnnotations(t *testing.T) {
 	calls := &callRecorder{}
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
