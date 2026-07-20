@@ -802,6 +802,7 @@ func (p *Proxy) targetsForMutationRequest(ctx context.Context, original *http.Re
 }
 
 func (p *Proxy) targetsForExistingResourceMutation(ctx context.Context, original *http.Request) ([]Target, bool, error) {
+	foundTargets := make([]Target, 0, len(p.targets))
 	for _, target := range p.targets {
 		objectURL := *original.URL
 		objectURL.RawQuery = ""
@@ -830,7 +831,10 @@ func (p *Proxy) targetsForExistingResourceMutation(ctx context.Context, original
 		if len(targets) != len(p.targets) {
 			return targets, true, nil
 		}
-		return p.targets, false, nil
+		foundTargets = append(foundTargets, target)
+	}
+	if len(foundTargets) > 0 && len(foundTargets) != len(p.targets) {
+		return foundTargets, true, nil
 	}
 	return nil, false, nil
 }
