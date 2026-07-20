@@ -15,6 +15,8 @@ clusters as if they were one logical target:
 The proxy context is backed by a local state file and a Kubernetes exec
 credential plugin. The local proxy uses HTTPS and bearer-token authentication.
 
+![kubeconfig-proxy request flow](assets/kubeconfig-proxy-flow.svg)
+
 ## Installation
 
 Install the latest released CLI:
