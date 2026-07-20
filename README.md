@@ -1,5 +1,7 @@
 # kubeconfig-proxy
 
+![kubeconfig-proxy request flow](assets/kubeconfig-proxy-flow.svg)
+
 `kubeconfig-proxy` is a local Kubernetes API proxy that adds an auto-started
 proxy context to your kubeconfig. That context can work with several source
 kubeconfig contexts at the same time.
@@ -15,7 +17,6 @@ clusters as if they were one logical target:
 The proxy context is backed by a local state file and a Kubernetes exec
 credential plugin. The local proxy uses HTTPS and bearer-token authentication.
 
-![kubeconfig-proxy request flow](assets/kubeconfig-proxy-flow.svg)
 
 ## Installation
 
