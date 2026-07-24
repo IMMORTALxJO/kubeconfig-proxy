@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/IMMORTALxJO/kubeconfig-proxy/internal/proxy"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 func splitCSV(value string) []string {
@@ -34,18 +36,9 @@ func targetNames(targets []proxy.Target) []string {
 	return names
 }
 
-func contains(values []string, needle string) bool {
-	for _, value := range values {
-		if value == needle {
-			return true
-		}
-	}
-	return false
-}
-
 func appendUniqueStrings(values []string, more ...string) []string {
 	for _, value := range more {
-		if value == "" || contains(values, value) {
+		if value == "" || slices.Contains(values, value) {
 			continue
 		}
 		values = append(values, value)
@@ -54,10 +47,7 @@ func appendUniqueStrings(values []string, more ...string) []string {
 }
 
 func defaultKubeconfigPath() string {
-	if value := os.Getenv("KUBECONFIG"); value != "" {
-		return filepath.SplitList(value)[0]
-	}
-	return filepath.Join(mustHomeDir(), ".kube", "config")
+	return clientcmd.NewDefaultClientConfigLoadingRules().GetDefaultFilename()
 }
 
 func defaultStatePath(contextName string) string {

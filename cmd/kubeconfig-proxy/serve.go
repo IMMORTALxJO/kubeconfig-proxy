@@ -65,18 +65,12 @@ type serveRuntimeConfig struct {
 func loadServeRuntime(statePath string) (*serveRuntimeConfig, stateFileSnapshot, error) {
 	snapshot, err := readStateFileSnapshot(statePath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, stateFileSnapshot{}, stateFileRemovedError(statePath)
-		}
-		return nil, stateFileSnapshot{}, err
+		return nil, stateFileSnapshot{}, wrapMissingStateErr(err, statePath)
 	}
 
 	profile, err := proxystate.Load(statePath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, stateFileSnapshot{}, stateFileRemovedError(statePath)
-		}
-		return nil, stateFileSnapshot{}, err
+		return nil, stateFileSnapshot{}, wrapMissingStateErr(err, statePath)
 	}
 	requestTimeout, err := profile.RequestTimeoutDuration()
 	if err != nil {
@@ -125,7 +119,7 @@ func loadServeRuntime(statePath string) (*serveRuntimeConfig, stateFileSnapshot,
 }
 
 func serveRuntime(statePath string, runtime *serveRuntimeConfig, snapshot stateFileSnapshot, stop <-chan os.Signal) (bool, error) {
-	listener, err := proxy.Listen(runtime.profile.Listen)
+	listener, err := net.Listen("tcp", runtime.profile.Listen)
 	if err != nil {
 		return false, err
 	}
@@ -169,8 +163,8 @@ func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.C
 		errCh <- server.Serve(tlsListener)
 	}()
 
-	ttlCh := (<-chan time.Time)(nil)
-	ticker := (*time.Ticker)(nil)
+	var ttlCh <-chan time.Time
+	var ticker *time.Ticker
 	if proxyTTL > 0 {
 		ticker = time.NewTicker(ttlCheckInterval(proxyTTL))
 		defer ticker.Stop()
@@ -216,6 +210,13 @@ func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.C
 			return nil
 		}
 	}
+}
+
+func wrapMissingStateErr(err error, statePath string) error {
+	if os.IsNotExist(err) {
+		return stateFileRemovedError(statePath)
+	}
+	return err
 }
 
 func shutdownServer(server *http.Server) error {

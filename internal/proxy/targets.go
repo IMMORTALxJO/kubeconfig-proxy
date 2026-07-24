@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 
@@ -41,7 +42,7 @@ func LoadTargets(kubeconfigPath string, selectedContexts []string, primaryContex
 	if primaryContext == "" {
 		primaryContext = rawConfig.CurrentContext
 	}
-	if primaryContext != "" && !contains(contextNames, primaryContext) {
+	if primaryContext != "" && !slices.Contains(contextNames, primaryContext) {
 		return nil, Target{}, fmt.Errorf("primary context %q is not included in selected proxy contexts", primaryContext)
 	}
 	if primaryContext == "" {
@@ -115,13 +116,4 @@ func targetFromRESTConfig(name string, kubeContext *clientcmdapi.Context, config
 		Namespace: kubeContext.Namespace,
 		Client:    &http.Client{Transport: transport},
 	}, nil
-}
-
-func contains(values []string, needle string) bool {
-	for _, value := range values {
-		if value == needle {
-			return true
-		}
-	}
-	return false
 }

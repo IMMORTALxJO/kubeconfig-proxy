@@ -66,14 +66,6 @@ type Options struct {
 	ReadOnly         bool
 }
 
-func New(targets []Target, primary Target) (*Proxy, error) {
-	return NewWithOptions(targets, primary, Options{
-		RequestTimeout: 30 * time.Second,
-		Retries:        DefaultRetries,
-		RetryBackoff:   200 * time.Millisecond,
-	})
-}
-
 func NewWithOptions(targets []Target, primary Target, options Options) (*Proxy, error) {
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("at least one target is required")
@@ -343,6 +335,11 @@ func copyWatchStream(ctx context.Context, stream watchStream, w io.Writer, flush
 }
 
 func (p *Proxy) authorized(r *http.Request) bool {
+	return AuthorizedWithToken(r, p.options.BearerToken)
+}
+
+// AuthorizedWithToken reports whether r carries a matching "Bearer <token>" Authorization header.
+func AuthorizedWithToken(r *http.Request, token string) bool {
 	const prefix = "Bearer "
 
 	header := r.Header.Get("Authorization")
@@ -351,7 +348,7 @@ func (p *Proxy) authorized(r *http.Request) bool {
 	}
 
 	got := strings.TrimPrefix(header, prefix)
-	return subtle.ConstantTimeCompare([]byte(got), []byte(p.options.BearerToken)) == 1
+	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
 }
 
 func (p *Proxy) forwardLongRunning(w http.ResponseWriter, r *http.Request) {
@@ -634,9 +631,9 @@ func mergeLists(responses []upstreamResponse) ([]byte, error) {
 
 		switch {
 		case hasArray(payload, "items"):
-			mergeListItems(payload, &merged, response.target.Name)
+			mergeArrayField(payload, &merged, "items", response.target.Name, entryMetadata)
 		case hasArray(payload, "rows"):
-			mergeTableRows(payload, &merged, response.target.Name)
+			mergeArrayField(payload, &merged, "rows", response.target.Name, tableRowMetadata)
 		default:
 			return response.body, nil
 		}
@@ -649,48 +646,40 @@ func mergeLists(responses []upstreamResponse) ([]byte, error) {
 	return json.Marshal(merged)
 }
 
-func mergeListItems(payload map[string]any, merged *map[string]any, contextName string) {
-	items, _ := payload["items"].([]any)
-	for i := range items {
-		item, ok := items[i].(map[string]any)
-		if !ok {
-			continue
-		}
-		metadata := ensureMap(item, "metadata")
-		markSourceContext(metadata, contextName)
-	}
-
-	if *merged == nil {
-		*merged = payload
-		(*merged)["items"] = items
-		return
-	}
-
-	mergedItems, _ := (*merged)["items"].([]any)
-	(*merged)["items"] = append(mergedItems, items...)
+// entryMetadata returns the metadata map of a list item.
+func entryMetadata(entry map[string]any) map[string]any {
+	return ensureMap(entry, "metadata")
 }
 
-func mergeTableRows(payload map[string]any, merged *map[string]any, contextName string) {
-	rows, _ := payload["rows"].([]any)
-	for i := range rows {
-		row, ok := rows[i].(map[string]any)
+// tableRowMetadata returns the metadata map of a table row's embedded object, if any.
+func tableRowMetadata(row map[string]any) map[string]any {
+	object, ok := row["object"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return ensureMap(object, "metadata")
+}
+
+func mergeArrayField(payload map[string]any, merged *map[string]any, key, contextName string, metadataOf func(map[string]any) map[string]any) {
+	entries, _ := payload[key].([]any)
+	for i := range entries {
+		entry, ok := entries[i].(map[string]any)
 		if !ok {
 			continue
 		}
-		if object, ok := row["object"].(map[string]any); ok {
-			metadata := ensureMap(object, "metadata")
+		if metadata := metadataOf(entry); metadata != nil {
 			markSourceContext(metadata, contextName)
 		}
 	}
 
 	if *merged == nil {
 		*merged = payload
-		(*merged)["rows"] = rows
+		(*merged)[key] = entries
 		return
 	}
 
-	mergedRows, _ := (*merged)["rows"].([]any)
-	(*merged)["rows"] = append(mergedRows, rows...)
+	mergedEntries, _ := (*merged)[key].([]any)
+	(*merged)[key] = append(mergedEntries, entries...)
 }
 
 func markSourceContext(metadata map[string]any, contextName string) {
@@ -878,15 +867,9 @@ func resourceAnnotations(body []byte) map[string]string {
 		return nil
 	}
 
-	var resource map[string]any
-	if err := json.Unmarshal(body, &resource); err != nil {
-		jsonBody, yamlErr := yaml.YAMLToJSON(body)
-		if yamlErr != nil {
-			return nil
-		}
-		if err := json.Unmarshal(jsonBody, &resource); err != nil {
-			return nil
-		}
+	resource, err := decodeObject(body)
+	if err != nil {
+		return nil
 	}
 	metadata, ok := resource["metadata"].(map[string]any)
 	if !ok {
@@ -967,8 +950,12 @@ func isLongRunningRequest(r *http.Request) bool {
 	return ok
 }
 
+func splitPath(path string) []string {
+	return strings.Split(strings.Trim(path, "/"), "/")
+}
+
 func podObjectPathForSubresource(path string) (string, bool) {
-	parts := strings.Split(strings.Trim(path, "/"), "/")
+	parts := splitPath(path)
 	if len(parts) != 7 {
 		return "", false
 	}
@@ -1002,7 +989,7 @@ func isHelmStorageListRequest(r *http.Request) bool {
 }
 
 func isCoreResourceListPath(path string, resources ...string) bool {
-	parts := strings.Split(strings.Trim(path, "/"), "/")
+	parts := splitPath(path)
 	resource := ""
 	switch {
 	case len(parts) == 3 && parts[0] == "api" && parts[1] == "v1":
@@ -1046,7 +1033,7 @@ func isNamedResourceGetRequest(r *http.Request) bool {
 }
 
 func isNamedResourcePath(path string) bool {
-	parts := strings.Split(strings.Trim(path, "/"), "/")
+	parts := splitPath(path)
 	if len(parts) == 4 && parts[0] == "api" {
 		return true
 	}

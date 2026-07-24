@@ -1,11 +1,11 @@
 package main
 
 import (
-	"crypto/subtle"
 	"net/http"
-	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/IMMORTALxJO/kubeconfig-proxy/internal/proxy"
 )
 
 type activityHandler struct {
@@ -23,7 +23,7 @@ func newActivityHandler(next http.Handler, bearerToken string) *activityHandler 
 
 func (h *activityHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == readinessPath {
-		if !authorizedWithToken(r, h.bearerToken) {
+		if !proxy.AuthorizedWithToken(r, h.bearerToken) {
 			writePlainStatus(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -48,16 +48,6 @@ func (h *activityHandler) idleFor(ttl time.Duration) bool {
 		return false
 	}
 	return time.Since(time.Unix(0, h.lastActivity.Load())) > ttl
-}
-
-func authorizedWithToken(r *http.Request, token string) bool {
-	const prefix = "Bearer "
-	header := r.Header.Get("Authorization")
-	if !strings.HasPrefix(header, prefix) {
-		return false
-	}
-	got := strings.TrimPrefix(header, prefix)
-	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
 }
 
 func writePlainStatus(w http.ResponseWriter, status int, message string) {

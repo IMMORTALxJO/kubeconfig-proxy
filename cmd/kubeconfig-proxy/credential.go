@@ -41,11 +41,15 @@ func runCredential(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !ready(profile) {
+	client, err := profileHTTPClient(profile)
+	if err != nil {
+		return err
+	}
+	if checkReady(client, profile) != nil {
 		if err := startDetachedServe(*statePath, profile.LogsEnabled); err != nil {
 			return err
 		}
-		if err := waitReady(profile, 10*time.Second); err != nil {
+		if err := waitReady(client, profile, 10*time.Second); err != nil {
 			return err
 		}
 	}
@@ -72,15 +76,11 @@ func lockState(statePath string) (func(), error) {
 	}, nil
 }
 
-func ready(profile *proxystate.Profile) bool {
-	return checkReady(profile) == nil
-}
-
-func waitReady(profile *proxystate.Profile, timeout time.Duration) error {
+func waitReady(client *http.Client, profile *proxystate.Profile, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		if err := checkReady(profile); err == nil {
+		if err := checkReady(client, profile); err == nil {
 			return nil
 		} else {
 			lastErr = err
@@ -90,11 +90,7 @@ func waitReady(profile *proxystate.Profile, timeout time.Duration) error {
 	return fmt.Errorf("proxy did not become ready at https://%s: %w", profile.Listen, lastErr)
 }
 
-func checkReady(profile *proxystate.Profile) error {
-	client, err := profileHTTPClient(profile)
-	if err != nil {
-		return err
-	}
+func checkReady(client *http.Client, profile *proxystate.Profile) error {
 	req, err := http.NewRequest(http.MethodGet, "https://"+profile.Listen+readinessPath, http.NoBody)
 	if err != nil {
 		return err

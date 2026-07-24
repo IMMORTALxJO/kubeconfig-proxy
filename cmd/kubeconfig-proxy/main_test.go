@@ -392,7 +392,11 @@ func TestServeStateStopsAfterTTLWithoutRequests(t *testing.T) {
 	go func() {
 		errCh <- runWithArgs([]string{"serve", "--state", statePath}, nil)
 	}()
-	if err := waitReady(profile, 2*time.Second); err != nil {
+	readyClient, err := profileHTTPClient(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := waitReady(readyClient, profile, 2*time.Second); err != nil {
 		t.Fatal(err)
 	}
 
@@ -459,7 +463,11 @@ func TestServeStateRestartsWhenStateFileChanges(t *testing.T) {
 	}()
 	defer stopServeAndWait(t, stop, errCh)
 
-	if err := waitReady(profile, 2*time.Second); err != nil {
+	readyClient, err := profileHTTPClient(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := waitReady(readyClient, profile, 2*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	if body := getProxyBody(t, profile, "/version"); !strings.Contains(body, `"target":"alpha"`) {
@@ -532,7 +540,11 @@ func TestServeStateStopsWhenStateFileDisappears(t *testing.T) {
 	go func() {
 		errCh <- runWithArgs([]string{"serve", "--state", statePath}, nil)
 	}()
-	if err := waitReady(profile, 2*time.Second); err != nil {
+	readyClient, err := profileHTTPClient(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := waitReady(readyClient, profile, 2*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(statePath); err != nil {
