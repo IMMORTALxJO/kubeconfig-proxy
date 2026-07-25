@@ -6,6 +6,7 @@ import (
 	"log"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -172,13 +173,13 @@ func resolveAddContextTargets(kubeconfigPath, proxyContextName string, selectedC
 	}
 
 	if primaryContext == "" {
-		if contains(contextNames, rawConfig.CurrentContext) {
+		if slices.Contains(contextNames, rawConfig.CurrentContext) {
 			primaryContext = rawConfig.CurrentContext
 		} else {
 			primaryContext = contextNames[0]
 		}
 	}
-	if !contains(contextNames, primaryContext) {
+	if !slices.Contains(contextNames, primaryContext) {
 		return nil, "", fmt.Errorf("primary context %q is not included in selected proxy contexts", primaryContext)
 	}
 	return contextNames, primaryContext, nil

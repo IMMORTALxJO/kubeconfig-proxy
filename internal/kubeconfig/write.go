@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"k8s.io/client-go/tools/clientcmd"
@@ -42,13 +43,7 @@ func AddProxyContext(path, contextName, serverURL, namespace, command, statePath
 		Namespace: namespace,
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	if err := clientcmd.WriteToFile(*config, path); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0o600)
+	return writeKubeconfigFile(path, config)
 }
 
 func DeleteProxyContext(path, contextName string) ([]string, error) {
@@ -89,13 +84,17 @@ func DeleteProxyContext(path, contextName string) ([]string, error) {
 	if !changed {
 		return statePaths, nil
 	}
+	return statePaths, writeKubeconfigFile(path, config)
+}
+
+func writeKubeconfigFile(path string, config *clientcmdapi.Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
+		return err
 	}
 	if err := clientcmd.WriteToFile(*config, path); err != nil {
-		return nil, err
+		return err
 	}
-	return statePaths, os.Chmod(path, 0o600)
+	return os.Chmod(path, 0o600)
 }
 
 func proxyEntryName(contextName string) string {
@@ -122,19 +121,10 @@ func authInfoStatePaths(authInfo *clientcmdapi.AuthInfo) []string {
 
 func appendStatePaths(paths []string, values ...string) []string {
 	for _, value := range values {
-		if value == "" {
+		if value == "" || slices.Contains(paths, value) {
 			continue
 		}
-		seen := false
-		for _, path := range paths {
-			if path == value {
-				seen = true
-				break
-			}
-		}
-		if !seen {
-			paths = append(paths, value)
-		}
+		paths = append(paths, value)
 	}
 	return paths
 }

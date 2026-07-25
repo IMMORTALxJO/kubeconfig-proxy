@@ -10,7 +10,7 @@ BINARY_NAME ?= kubeconfig-proxy
 
 STATICCHECK_VERSION ?= v0.7.0
 GOSEC_VERSION ?= v2.28.0
-GOVULNCHECK_VERSION ?= v1.5.0
+GOVULNCHECK_VERSION ?= v1.6.0
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
 GOTOOLCHAIN_ENV := GOTOOLCHAIN=$(GO_TOOLCHAIN)
