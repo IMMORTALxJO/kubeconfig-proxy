@@ -59,18 +59,19 @@ For real-cluster integration coverage, use the repository skill:
 
 When adding new user-visible proxy behavior, add or update checks in
 `.codex/skills/test-kubeconfig-proxy` so `/test-kubeconfig-proxy` verifies the
-feature against real `proxy-a` and `proxy-b` kind clusters. Unit tests are still
-required; the skill is the integration safety net for Kubernetes API behavior.
+feature against real `kubeconfig-proxy-a` and `kubeconfig-proxy-b` kind
+clusters. Unit tests are still required; the skill is the integration safety net
+for Kubernetes API behavior.
 
 Useful options:
 
 - `KCP_SKIP_MAKE_CHECK=1` reuses `bin/kubeconfig-proxy` for faster integration reruns.
 - `KCP_KEEP_KIND=1` keeps temporary files and kind clusters for debugging.
-- `KCP_RECREATE_KIND=1` recreates `proxy-a` and `proxy-b`.
+- `KCP_RECREATE_KIND=1` recreates `kubeconfig-proxy-a` and `kubeconfig-proxy-b`.
 
 ## Local Environment Safety
 
-- Integration tests use local kind clusters named `proxy-a` and `proxy-b`.
+- Integration tests use local kind clusters named `kubeconfig-proxy-a` and `kubeconfig-proxy-b`.
 - Do not run destructive Kubernetes commands outside the temporary kubeconfig or those explicit kind contexts.
 - Clean up test resources when adding new integration checks.
 - Avoid changing the user's default kubeconfig unless the task explicitly requires it. Prefer temporary kubeconfig files for tests and examples.

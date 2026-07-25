@@ -11,8 +11,8 @@ STATE_FILE="$TMP_DIR/kind-proxy.yaml"
 RO_STATE_FILE="$TMP_DIR/kind-proxy-readonly.yaml"
 PROXY_CONTEXT="kind-proxy"
 RO_PROXY_CONTEXT="kind-proxy-readonly"
-CTX_A="kind-proxy-a"
-CTX_B="kind-proxy-b"
+CTX_A="kind-kubeconfig-proxy-a"
+CTX_B="kind-kubeconfig-proxy-b"
 NS="default"
 WERF_NS="${KCP_WERF_NAMESPACE:-kcp-werf-$$}"
 TIMEOUT="${KCP_TEST_TIMEOUT:-30s}"
@@ -269,13 +269,13 @@ else
   add_result "PASS" "binary from make check" "$BINARY"
 fi
 
-ensure_cluster proxy-a
-ensure_cluster proxy-b
-
 if [[ "$HAD_FAILURE" -ne 0 ]]; then
   add_result "SKIP" "integration checks" "previous setup check failed"
   exit 1
 fi
+
+ensure_cluster kubeconfig-proxy-a
+ensure_cluster kubeconfig-proxy-b
 
 cleanup_test_resources
 
@@ -318,15 +318,15 @@ else
 fi
 
 run_cmd "fan-out create mutation" kubectl_ctx "$PROXY_CONTEXT" -n "$NS" create configmap kcp-fanout --from-literal=value=shared
-expect_exists "fan-out object exists in proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-fanout
-expect_exists "fan-out object exists in proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap kcp-fanout
+expect_exists "fan-out object exists in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-fanout
+expect_exists "fan-out object exists in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap kcp-fanout
 
 target_b_manifest="$TMP_DIR/context-name.yaml"
 write_configmap_manifest "$target_b_manifest" "kcp-target-b" "  annotations:
     kubeconfig-proxy.io/context-name: $CTX_B"
-run_cmd "context-name routes create to proxy-b" apply_manifest "$PROXY_CONTEXT" "$target_b_manifest"
-expect_not_found "context-name object absent from proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-target-b
-expect_exists "context-name object exists in proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap kcp-target-b
+run_cmd "context-name routes create to kubeconfig-proxy-b" apply_manifest "$PROXY_CONTEXT" "$target_b_manifest"
+expect_not_found "context-name object absent from kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-target-b
+expect_exists "context-name object exists in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap kcp-target-b
 
 named_get_value="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmap kcp-target-b -o jsonpath='{.metadata.name}' 2>&1)"
 if [[ "$named_get_value" == "kcp-target-b" ]]; then
@@ -339,25 +339,25 @@ single_manifest="$TMP_DIR/single-context.yaml"
 write_configmap_manifest "$single_manifest" "kcp-single" "  annotations:
     kubeconfig-proxy.io/single-context: \"true\""
 run_cmd "single-context routes create to first context" apply_manifest "$PROXY_CONTEXT" "$single_manifest"
-expect_exists "single-context object exists in proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-single
-expect_not_found "single-context object absent from proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap kcp-single
+expect_exists "single-context object exists in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-single
+expect_not_found "single-context object absent from kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap kcp-single
 
-run_cmd "seed pod for logs and exec in proxy-b" kubectl_ctx "$CTX_B" -n "$NS" run kcp-subresource-pod \
+run_cmd "seed pod for logs and exec in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" run kcp-subresource-pod \
   --image=busybox:1.37 \
   --restart=Never \
-  --command -- sh -c 'echo kcp-log-from-proxy-b; sleep 300'
+  --command -- sh -c 'echo kcp-log-from-kubeconfig-proxy-b; sleep 300'
 run_cmd "wait for logs and exec pod readiness" kubectl_ctx "$CTX_B" -n "$NS" wait --for=condition=Ready pod/kcp-subresource-pod --timeout=90s
 
 logs_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" logs kcp-subresource-pod 2>&1)"
-if [[ "$logs_output" == *"kcp-log-from-proxy-b"* ]]; then
-  add_result "PASS" "kubectl logs routes to cluster containing pod" "read proxy-b pod logs"
+if [[ "$logs_output" == *"kcp-log-from-kubeconfig-proxy-b"* ]]; then
+  add_result "PASS" "kubectl logs routes to cluster containing pod" "read kubeconfig-proxy-b pod logs"
 else
   add_result "FAIL" "kubectl logs routes to cluster containing pod" "$logs_output"
 fi
 
-exec_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" exec kcp-subresource-pod -- sh -c 'echo kcp-exec-from-proxy-b' 2>&1)"
-if [[ "$exec_output" == *"kcp-exec-from-proxy-b"* ]]; then
-  add_result "PASS" "kubectl exec routes to cluster containing pod" "executed command in proxy-b pod"
+exec_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" exec kcp-subresource-pod -- sh -c 'echo kcp-exec-from-kubeconfig-proxy-b' 2>&1)"
+if [[ "$exec_output" == *"kcp-exec-from-kubeconfig-proxy-b"* ]]; then
+  add_result "PASS" "kubectl exec routes to cluster containing pod" "executed command in kubeconfig-proxy-b pod"
 else
   add_result "FAIL" "kubectl exec routes to cluster containing pod" "$exec_output"
 fi
@@ -365,15 +365,15 @@ fi
 run_cmd "PATCH uses existing object routing" kubectl_ctx "$PROXY_CONTEXT" -n "$NS" patch configmap kcp-target-b --type merge -p '{"data":{"patched":"yes"}}'
 patch_value="$(kubectl_ctx "$CTX_B" -n "$NS" get configmap kcp-target-b -o jsonpath='{.data.patched}' 2>&1)"
 if [[ "$patch_value" == "yes" ]]; then
-  add_result "PASS" "PATCH changed only annotated target" "proxy-b patched"
+  add_result "PASS" "PATCH changed only annotated target" "kubeconfig-proxy-b patched"
 else
   add_result "FAIL" "PATCH changed only annotated target" "$patch_value"
 fi
-expect_not_found "PATCH did not create object in proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-target-b
+expect_not_found "PATCH did not create object in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-target-b
 
-run_cmd "seed delete-only resource in proxy-a" kubectl_ctx "$CTX_A" -n "$NS" create configmap kcp-delete-a --from-literal=value=a
+run_cmd "seed delete-only resource in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" create configmap kcp-delete-a --from-literal=value=a
 run_cmd "DELETE routes only where named object exists" kubectl_ctx "$PROXY_CONTEXT" -n "$NS" delete configmap kcp-delete-a
-expect_not_found "DELETE removed object from proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-delete-a
+expect_not_found "DELETE removed object from kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-delete-a
 
 readonly_output="$(kubectl_ctx "$RO_PROXY_CONTEXT" -n "$NS" create configmap kcp-readonly --from-literal=value=blocked 2>&1)"
 if [[ "$readonly_output" == *"Forbidden"* || "$readonly_output" == *"read-only proxy rejects"* ]]; then
@@ -381,8 +381,8 @@ if [[ "$readonly_output" == *"Forbidden"* || "$readonly_output" == *"read-only p
 else
   add_result "FAIL" "read-only proxy rejects mutation" "$readonly_output"
 fi
-expect_not_found "read-only did not create object in proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-readonly
-expect_not_found "read-only did not create object in proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap kcp-readonly
+expect_not_found "read-only did not create object in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-readonly
+expect_not_found "read-only did not create object in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap kcp-readonly
 
 run_cmd "seed helm release storage in both clusters" bash -c "
   set -euo pipefail
@@ -408,18 +408,18 @@ else
     KUBECONFIG='$KUBECONFIG_FILE' werf converge --env kind --dev --namespace '$WERF_NS' --kube-context '$PROXY_CONTEXT'
   "
 
-  expect_exists "werf nginx deployment exists in proxy-a" kubectl_ctx "$CTX_A" -n "$WERF_NS" get deployment kubeconfig-proxy-werf-nginx
-  expect_exists "werf nginx deployment exists in proxy-b" kubectl_ctx "$CTX_B" -n "$WERF_NS" get deployment kubeconfig-proxy-werf-nginx
-  expect_exists "werf single-context job exists in proxy-a" kubectl_ctx "$CTX_A" -n "$WERF_NS" get job kubeconfig-proxy-werf-smoke
-  expect_not_found "werf single-context job absent from proxy-b" kubectl_ctx "$CTX_B" -n "$WERF_NS" get job kubeconfig-proxy-werf-smoke
+  expect_exists "werf nginx deployment exists in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$WERF_NS" get deployment kubeconfig-proxy-werf-nginx
+  expect_exists "werf nginx deployment exists in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$WERF_NS" get deployment kubeconfig-proxy-werf-nginx
+  expect_exists "werf single-context job exists in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$WERF_NS" get job kubeconfig-proxy-werf-smoke
+  expect_not_found "werf single-context job absent from kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$WERF_NS" get job kubeconfig-proxy-werf-smoke
 
   run_cmd "werf example dismiss" bash -c "
     set -euo pipefail
     cd '$ROOT/examples/werf'
     KUBECONFIG='$KUBECONFIG_FILE' werf dismiss --env kind --with-namespace --namespace '$WERF_NS' --kube-context '$PROXY_CONTEXT'
   "
-  expect_namespace_deleted_or_terminating "werf namespace removed from proxy-a" "$CTX_A"
-  expect_namespace_deleted_or_terminating "werf namespace removed from proxy-b" "$CTX_B"
+  expect_namespace_deleted_or_terminating "werf namespace removed from kubeconfig-proxy-a" "$CTX_A"
+  expect_namespace_deleted_or_terminating "werf namespace removed from kubeconfig-proxy-b" "$CTX_B"
 fi
 
 cleanup_test_resources

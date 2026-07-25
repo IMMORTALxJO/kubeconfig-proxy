@@ -22,14 +22,14 @@ GOTOOLCHAIN=auto go test ./...
 ## Create local clusters
 
 ```bash
-kind create cluster --name proxy-a
-kind create cluster --name proxy-b
+kind create cluster --name kubeconfig-proxy-a
+kind create cluster --name kubeconfig-proxy-b
 ```
 
 Check that both contexts exist:
 
 ```bash
-kubectl config get-contexts kind-proxy-a kind-proxy-b
+kubectl config get-contexts kind-kubeconfig-proxy-a kind-kubeconfig-proxy-b
 ```
 
 ## Add the proxy context
@@ -44,8 +44,8 @@ Add an auto-started proxy context to your kubeconfig:
 
 ```bash
 ./kubeconfig-proxy add-context kind-proxy \
-  --contexts kind-proxy-a,kind-proxy-b \
-  --primary-context kind-proxy-a \
+  --contexts kind-kubeconfig-proxy-a,kind-kubeconfig-proxy-b \
+  --primary-context kind-kubeconfig-proxy-a \
   --request-timeout 30s \
   --retries 1 \
   --retry-backoff 200ms
@@ -58,15 +58,15 @@ kubectl --context kind-proxy cluster-info
 ```
 
 `cluster-info` is a discovery-style command, so it is proxied only to
-`kind-proxy-a`.
+`kind-kubeconfig-proxy-a`.
 
 ## Test list aggregation
 
 Create different ConfigMaps directly in each original kind cluster:
 
 ```bash
-kubectl --context kind-proxy-a create configmap only-a --from-literal=value=a
-kubectl --context kind-proxy-b create configmap only-b --from-literal=value=b
+kubectl --context kind-kubeconfig-proxy-a create configmap only-a --from-literal=value=a
+kubectl --context kind-kubeconfig-proxy-b create configmap only-b --from-literal=value=b
 ```
 
 List through the proxy context:
@@ -86,13 +86,13 @@ kubectl --context kind-proxy get configmaps -o yaml
 Each aggregated item has this annotation:
 
 ```yaml
-kubeconfig-proxy.io/context: kind-proxy-a
+kubeconfig-proxy.io/context: kind-kubeconfig-proxy-a
 ```
 
 or:
 
 ```yaml
-kubeconfig-proxy.io/context: kind-proxy-b
+kubeconfig-proxy.io/context: kind-kubeconfig-proxy-b
 ```
 
 The proxy also injects a virtual `context` label into aggregated responses, so
@@ -113,8 +113,8 @@ kubectl --context kind-proxy create configmap fanout-demo --from-literal=value=s
 Check both original clusters:
 
 ```bash
-kubectl --context kind-proxy-a get configmap fanout-demo
-kubectl --context kind-proxy-b get configmap fanout-demo
+kubectl --context kind-kubeconfig-proxy-a get configmap fanout-demo
+kubectl --context kind-kubeconfig-proxy-b get configmap fanout-demo
 ```
 
 Expected result: `fanout-demo` exists in both clusters.
@@ -130,7 +130,7 @@ kind: ConfigMap
 metadata:
   name: context-name-demo
   annotations:
-    kubeconfig-proxy.io/context-name: kind-proxy-b
+    kubeconfig-proxy.io/context-name: kind-kubeconfig-proxy-b
 data:
   value: only-b
 EOF
@@ -139,11 +139,11 @@ EOF
 Check both original clusters:
 
 ```bash
-kubectl --context kind-proxy-a get configmap context-name-demo
-kubectl --context kind-proxy-b get configmap context-name-demo
+kubectl --context kind-kubeconfig-proxy-a get configmap context-name-demo
+kubectl --context kind-kubeconfig-proxy-b get configmap context-name-demo
 ```
 
-Expected result: `context-name-demo` exists only in `kind-proxy-b`.
+Expected result: `context-name-demo` exists only in `kind-kubeconfig-proxy-b`.
 
 Create another ConfigMap that can be placed in any single context:
 
@@ -163,18 +163,18 @@ EOF
 Check both original clusters:
 
 ```bash
-kubectl --context kind-proxy-a get configmap single-context-demo
-kubectl --context kind-proxy-b get configmap single-context-demo
+kubectl --context kind-kubeconfig-proxy-a get configmap single-context-demo
+kubectl --context kind-kubeconfig-proxy-b get configmap single-context-demo
 ```
 
-Expected result: `single-context-demo` exists only in `kind-proxy-a`, because
-`kind-proxy-a` is the first selected context by alphabetical context name.
+Expected result: `single-context-demo` exists only in `kind-kubeconfig-proxy-a`, because
+`kind-kubeconfig-proxy-a` is the first selected context by alphabetical context name.
 
 ## Cleanup
 
 Remove the kind clusters:
 
 ```bash
-kind delete cluster --name proxy-a
-kind delete cluster --name proxy-b
+kind delete cluster --name kubeconfig-proxy-a
+kind delete cluster --name kubeconfig-proxy-b
 ```
