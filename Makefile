@@ -4,6 +4,8 @@ GO_TOOLCHAIN ?= go$(shell awk '$$1 == "go" { print $$2; exit }' go.mod)
 MAIN_PACKAGE ?= ./cmd/kubeconfig-proxy
 PKGS ?= ./...
 RACE_PKGS ?= ./internal/proxy
+COVER_PROFILE ?= coverage.out
+COVER_HTML ?= coverage.html
 
 BUILD_DIR ?= bin
 BINARY_NAME ?= kubeconfig-proxy
@@ -50,7 +52,8 @@ vuln:
 	$(GOTOOLCHAIN_ENV) $(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) $(PKGS)
 
 test:
-	$(GOTOOLCHAIN_ENV) $(GO) test $(PKGS)
+	$(GOTOOLCHAIN_ENV) $(GO) test -cover -coverprofile=$(COVER_PROFILE) $(PKGS)
+	$(GOTOOLCHAIN_ENV) $(GO) tool cover -html=$(COVER_PROFILE) -o $(COVER_HTML)
 
 race:
 	$(GOTOOLCHAIN_ENV) $(GO) test -race $(RACE_PKGS)

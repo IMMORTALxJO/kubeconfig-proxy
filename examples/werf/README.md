@@ -3,8 +3,8 @@
 This example shows how to deploy a simple werf project through
 `kubeconfig-proxy` into two local kind clusters:
 
-- `kind-proxy-a`
-- `kind-proxy-b`
+- `kind-kubeconfig-proxy-a`
+- `kind-kubeconfig-proxy-b`
 
 The chart contains:
 
@@ -23,8 +23,8 @@ proxy context with Helm/werf release-history compatibility enabled:
 
 ```bash
 ./kubeconfig-proxy add-context kind-proxy \
-  --contexts kind-proxy-a,kind-proxy-b \
-  --primary-context kind-proxy-a \
+  --contexts kind-kubeconfig-proxy-a,kind-kubeconfig-proxy-b \
+  --primary-context kind-kubeconfig-proxy-a \
   --request-timeout 30s \
   --retries 1 \
   --retry-backoff 200ms \
@@ -76,23 +76,23 @@ kubectl --context kind-proxy \
   -n kubeconfig-proxy-werf-kind get deploy,svc -L context
 ```
 
-Expected result: nginx resources are visible twice, once from `kind-proxy-a`
-and once from `kind-proxy-b`.
+Expected result: nginx resources are visible twice, once from
+`kind-kubeconfig-proxy-a` and once from `kind-kubeconfig-proxy-b`.
 
 You can also check the original clusters directly:
 
 ```bash
-kubectl --context kind-proxy-a \
+kubectl --context kind-kubeconfig-proxy-a \
   -n kubeconfig-proxy-werf-kind get deploy,svc
 
-kubectl --context kind-proxy-b \
+kubectl --context kind-kubeconfig-proxy-b \
   -n kubeconfig-proxy-werf-kind get deploy,svc
 ```
 
 ## Validate single-context Job
 
-The Job should exist only in `kind-proxy-a`, because `kind-proxy-a` is the first
-selected context by alphabetical name:
+The Job should exist only in `kind-kubeconfig-proxy-a`, because
+`kind-kubeconfig-proxy-a` is the first selected context by alphabetical name:
 
 ```bash
 kubectl --context kind-proxy \
@@ -102,23 +102,23 @@ kubectl --context kind-proxy \
 Direct cluster checks:
 
 ```bash
-kubectl --context kind-proxy-a \
+kubectl --context kind-kubeconfig-proxy-a \
   -n kubeconfig-proxy-werf-kind get job kubeconfig-proxy-werf-smoke
 
-kubectl --context kind-proxy-b \
+kubectl --context kind-kubeconfig-proxy-b \
   -n kubeconfig-proxy-werf-kind get job kubeconfig-proxy-werf-smoke
 ```
 
 Expected result:
 
-- `kind-proxy-a`: Job exists;
-- `kind-proxy-b`: Job is not found.
+- `kind-kubeconfig-proxy-a`: Job exists;
+- `kind-kubeconfig-proxy-b`: Job is not found.
 
 To force the Job into a specific context instead, replace the Job annotation in
 [.helm/templates/job.yaml](.helm/templates/job.yaml):
 
 ```yaml
-kubeconfig-proxy.io/context-name: kind-proxy-b
+kubeconfig-proxy.io/context-name: kind-kubeconfig-proxy-b
 ```
 
 ## Cleanup
@@ -133,7 +133,7 @@ If you need a hard cleanup, remove the namespace from both original kind
 clusters:
 
 ```bash
-for ctx in kind-proxy-a kind-proxy-b; do
+for ctx in kind-kubeconfig-proxy-a kind-kubeconfig-proxy-b; do
   kubectl --context "$ctx" \
     delete namespace kubeconfig-proxy-werf-kind --ignore-not-found
 done

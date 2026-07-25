@@ -1,0 +1,4 @@
+interface:
+  display_name: "Test kubeconfig-proxy"
+  short_description: "Run kubeconfig-proxy make check and kind integration tests."
+  default_prompt: "Run /test-kubeconfig-proxy for this repository and report the check status table."
