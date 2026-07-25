@@ -71,7 +71,8 @@ Useful options:
 
 ## Local Environment Safety
 
-- Integration tests use local kind clusters named `kubeconfig-proxy-a` and `kubeconfig-proxy-b`.
+- Integration tests use local kind clusters named `kubeconfig-proxy-a` and
+  `kubeconfig-proxy-b`, pinned to Kubernetes `v1.36.1`.
 - Do not run destructive Kubernetes commands outside the temporary kubeconfig or those explicit kind contexts.
 - Clean up test resources when adding new integration checks.
 - Avoid changing the user's default kubeconfig unless the task explicitly requires it. Prefer temporary kubeconfig files for tests and examples.
