@@ -1,9 +1,140 @@
 package state
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestSaveAndLoadRoundTripWithPrivatePermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "proxy.yaml")
+	profile := validTestProfile()
+	profile.LogsEnabled = true
+	profile.Options.HelmReleaseProxy = true
+	profile.Options.ReadOnly = true
+
+	if err := Save(path, profile); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("state file mode = %v, want 0600", got)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Name != profile.Name {
+		t.Fatalf("loaded name = %q, want %q", loaded.Name, profile.Name)
+	}
+	if loaded.TLS.CertPEM != profile.TLS.CertPEM || loaded.TLS.KeyPEM != profile.TLS.KeyPEM {
+		t.Fatalf("loaded TLS = %#v, want %#v", loaded.TLS, profile.TLS)
+	}
+	if !loaded.LogsEnabled || !loaded.Options.HelmReleaseProxy || !loaded.Options.ReadOnly {
+		t.Fatalf("loaded options = %#v logs=%t, want enabled flags", loaded.Options, loaded.LogsEnabled)
+	}
+}
+
+func TestLoadRejectsInvalidStateFiles(t *testing.T) {
+	tests := []struct {
+		name            string
+		data            string
+		wantErrContains string
+	}{
+		{
+			name:            "invalid yaml",
+			data:            "version: [",
+			wantErrContains: "parse state file",
+		},
+		{
+			name: "invalid version",
+			data: `version: 2
+name: test
+sourceKubeconfig: /tmp/kubeconfig
+listen: 127.0.0.1:9443
+contexts: [alpha]
+primaryContext: alpha
+bearerToken: token
+proxyTTL: 10m
+tls:
+  certPEM: cert
+  keyPEM: key
+options:
+  requestTimeout: 30s
+  retries: 1
+  retryBackoff: 100ms
+`,
+			wantErrContains: "unsupported state version 2",
+		},
+		{
+			name: "invalid duration",
+			data: `version: 1
+name: test
+sourceKubeconfig: /tmp/kubeconfig
+listen: 127.0.0.1:9443
+contexts: [alpha]
+primaryContext: alpha
+bearerToken: token
+proxyTTL: nope
+tls:
+  certPEM: cert
+  keyPEM: key
+options:
+  requestTimeout: 30s
+  retries: 1
+  retryBackoff: 100ms
+`,
+			wantErrContains: "parse proxyTTL",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "proxy.yaml")
+			if err := os.WriteFile(path, []byte(tt.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := Load(path)
+			if err == nil {
+				t.Fatal("Load returned nil error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrContains) {
+				t.Fatalf("error = %q, want to contain %q", err.Error(), tt.wantErrContains)
+			}
+		})
+	}
+}
+
+func TestLoadReturnsReadError(t *testing.T) {
+	_, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
+	if err == nil {
+		t.Fatal("Load returned nil error")
+	}
+	if !os.IsNotExist(err) {
+		t.Fatalf("Load error = %v, want not-exist error", err)
+	}
+}
+
+func TestSaveRejectsInvalidProfile(t *testing.T) {
+	profile := validTestProfile()
+	profile.Name = ""
+
+	err := Save(filepath.Join(t.TempDir(), "proxy.yaml"), profile)
+	if err == nil {
+		t.Fatal("Save returned nil error")
+	}
+	if !strings.Contains(err.Error(), "state name is required") {
+		t.Fatalf("error = %q, want missing name validation", err.Error())
+	}
+}
 
 func TestValidateRejectsNegativeRuntimeOptions(t *testing.T) {
 	tests := []struct {
@@ -56,6 +187,85 @@ func TestValidateRejectsNegativeRuntimeOptions(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsMissingRequiredFields(t *testing.T) {
+	tests := []struct {
+		name            string
+		mutate          func(*Profile)
+		wantErrContains string
+	}{
+		{
+			name: "name",
+			mutate: func(profile *Profile) {
+				profile.Name = ""
+			},
+			wantErrContains: "state name is required",
+		},
+		{
+			name: "source kubeconfig",
+			mutate: func(profile *Profile) {
+				profile.SourceKubeconfig = ""
+			},
+			wantErrContains: "state sourceKubeconfig is required",
+		},
+		{
+			name: "listen",
+			mutate: func(profile *Profile) {
+				profile.Listen = ""
+			},
+			wantErrContains: "state listen is required",
+		},
+		{
+			name: "contexts",
+			mutate: func(profile *Profile) {
+				profile.Contexts = nil
+			},
+			wantErrContains: "state contexts are required",
+		},
+		{
+			name: "primary context",
+			mutate: func(profile *Profile) {
+				profile.PrimaryContext = ""
+			},
+			wantErrContains: "state primaryContext is required",
+		},
+		{
+			name: "bearer token",
+			mutate: func(profile *Profile) {
+				profile.BearerToken = ""
+			},
+			wantErrContains: "state bearerToken is required",
+		},
+		{
+			name: "cert pem",
+			mutate: func(profile *Profile) {
+				profile.TLS.CertPEM = ""
+			},
+			wantErrContains: "state tls.certPEM is required",
+		},
+		{
+			name: "key pem",
+			mutate: func(profile *Profile) {
+				profile.TLS.KeyPEM = ""
+			},
+			wantErrContains: "state tls.keyPEM is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile := validTestProfile()
+			tt.mutate(profile)
+			err := profile.Validate()
+			if err == nil {
+				t.Fatal("Validate returned nil error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrContains) {
+				t.Fatalf("error = %q, want to contain %q", err.Error(), tt.wantErrContains)
+			}
+		})
+	}
+}
+
 func TestValidateAcceptsZeroRuntimeOptions(t *testing.T) {
 	profile := validTestProfile()
 	profile.ProxyTTL = "0"
@@ -65,6 +275,28 @@ func TestValidateAcceptsZeroRuntimeOptions(t *testing.T) {
 
 	if err := profile.Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDurationAccessors(t *testing.T) {
+	profile := validTestProfile()
+	profile.ProxyTTL = "2m"
+	profile.Options.RequestTimeout = "3s"
+	profile.Options.RetryBackoff = "150ms"
+
+	if got, err := profile.ProxyTTLDuration(); err != nil || got != 2*time.Minute {
+		t.Fatalf("ProxyTTLDuration = %s, %v; want 2m, nil", got, err)
+	}
+	if got, err := profile.RequestTimeoutDuration(); err != nil || got != 3*time.Second {
+		t.Fatalf("RequestTimeoutDuration = %s, %v; want 3s, nil", got, err)
+	}
+	if got, err := profile.RetryBackoffDuration(); err != nil || got != 150*time.Millisecond {
+		t.Fatalf("RetryBackoffDuration = %s, %v; want 150ms, nil", got, err)
+	}
+
+	profile.ProxyTTL = ""
+	if got, err := profile.ProxyTTLDuration(); err != nil || got != 0 {
+		t.Fatalf("blank ProxyTTLDuration = %s, %v; want 0, nil", got, err)
 	}
 }
 

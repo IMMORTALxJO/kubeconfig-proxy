@@ -25,10 +25,14 @@ func runDeleteContext(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if contextName == "" && flags.NArg() == 1 {
-		contextName = flags.Arg(0)
+	if contextName == "" {
+		if flags.NArg() == 1 {
+			contextName = flags.Arg(0)
+		}
+	} else if flags.NArg() > 0 {
+		return fmt.Errorf("usage: kubeconfig-proxy delete-context <context-name> [flags]")
 	}
-	if contextName == "" || flags.NArg() > 1 {
+	if contextName == "" {
 		return fmt.Errorf("usage: kubeconfig-proxy delete-context <context-name> [flags]")
 	}
 

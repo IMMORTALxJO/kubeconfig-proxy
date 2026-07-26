@@ -17,6 +17,10 @@ import (
 	proxystate "github.com/IMMORTALxJO/kubeconfig-proxy/internal/state"
 )
 
+var newDetachedServeCommand = func(executable, statePath string) *exec.Cmd {
+	return exec.Command(executable, "serve", "--state", statePath) // #nosec G204 -- the CLI starts its own executable with an explicit local state path.
+}
+
 func runCredential(args []string) error {
 	flags := flag.NewFlagSet("kubeconfig-proxy credential", flag.ContinueOnError)
 	statePath := flags.String("state", "", "state file path")
@@ -145,7 +149,7 @@ func startDetachedServe(statePath string, logsEnabled bool) error {
 		stderr = logFile
 	}
 
-	cmd := exec.Command(executable, "serve", "--state", statePath) // #nosec G204 -- the CLI starts its own executable with an explicit local state path.
+	cmd := newDetachedServeCommand(executable, statePath)
 	cmd.Stdin = nullFile
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
