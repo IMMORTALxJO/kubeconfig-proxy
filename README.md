@@ -1,5 +1,7 @@
 # kubeconfig-proxy
 
+[![codecov](https://codecov.io/gh/IMMORTALxJO/kubeconfig-proxy/branch/master/graph/badge.svg)](https://codecov.io/gh/IMMORTALxJO/kubeconfig-proxy)
+
 ![kubeconfig-proxy request flow](assets/kubeconfig-proxy-flow.svg)
 
 `kubeconfig-proxy` is a local Kubernetes API proxy that adds an auto-started
