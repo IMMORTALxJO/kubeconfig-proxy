@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   test:
@@ -46,7 +45,8 @@ jobs:
         with:
           files: coverage.out
           fail_ci_if_error: true
-          use_oidc: true
+          slug: IMMORTALxJO/kubeconfig-proxy
+          token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Vulnerability scan
         run: make vuln
