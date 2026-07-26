@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"k8s.io/client-go/tools/clientcmd"
@@ -82,6 +83,52 @@ func TestAddProxyContextWritesExecContext(t *testing.T) {
 	}
 }
 
+func TestAddProxyContextCreatesMissingKubeconfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "config")
+
+	err := AddProxyContext(path, "prod-proxy", "https://127.0.0.1:9443", "", "kubeconfig-proxy", "/tmp/prod.yaml", []byte("ca"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	config, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Contexts["prod-proxy"] == nil {
+		t.Fatal("proxy context is missing")
+	}
+}
+
+func TestAddProxyContextReturnsLoadAndWriteErrors(t *testing.T) {
+	t.Run("invalid existing kubeconfig", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config")
+		if err := os.WriteFile(path, []byte("contexts: ["), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		err := AddProxyContext(path, "prod-proxy", "https://127.0.0.1:9443", "", "kubeconfig-proxy", "/tmp/prod.yaml", []byte("ca"))
+		if err == nil {
+			t.Fatal("AddProxyContext returned nil error")
+		}
+	})
+
+	t.Run("parent path is file", func(t *testing.T) {
+		parent := filepath.Join(t.TempDir(), "not-dir")
+		if err := os.WriteFile(parent, []byte("file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		err := AddProxyContext(filepath.Join(parent, "config"), "prod-proxy", "https://127.0.0.1:9443", "", "kubeconfig-proxy", "/tmp/prod.yaml", []byte("ca"))
+		if err == nil {
+			t.Fatal("AddProxyContext returned nil error")
+		}
+		if !strings.Contains(err.Error(), "not a directory") {
+			t.Fatalf("error = %q, want not a directory", err.Error())
+		}
+	})
+}
+
 func TestDeleteProxyContextRemovesManagedEntriesAndReturnsStatePath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config")
 	config := clientcmdapi.NewConfig()
@@ -124,6 +171,68 @@ func TestDeleteProxyContextRemovesManagedEntriesAndReturnsStatePath(t *testing.T
 	}
 }
 
+func TestDeleteProxyContextHandlesMissingAndUnchangedKubeconfigs(t *testing.T) {
+	t.Run("missing kubeconfig", func(t *testing.T) {
+		statePaths, err := DeleteProxyContext(filepath.Join(t.TempDir(), "missing"), "prod-proxy")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if statePaths != nil {
+			t.Fatalf("state paths = %v, want nil", statePaths)
+		}
+	})
+
+	t.Run("no managed entries", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config")
+		config := clientcmdapi.NewConfig()
+		config.Clusters["source-cluster"] = &clientcmdapi.Cluster{Server: "https://source.example.test"}
+		config.AuthInfos["source-user"] = &clientcmdapi.AuthInfo{Token: "source-token"}
+		config.Contexts["source"] = &clientcmdapi.Context{Cluster: "source-cluster", AuthInfo: "source-user"}
+		if err := clientcmd.WriteToFile(*config, path); err != nil {
+			t.Fatal(err)
+		}
+
+		statePaths, err := DeleteProxyContext(path, "prod-proxy")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(statePaths) != 0 {
+			t.Fatalf("state paths = %v, want empty", statePaths)
+		}
+	})
+}
+
+func TestDeleteProxyContextClearsCurrentContextAndParsesStateEqualsArg(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	config := clientcmdapi.NewConfig()
+	entryName := proxyEntryName("prod-proxy")
+	config.Clusters[entryName] = &clientcmdapi.Cluster{Server: "https://127.0.0.1:9443"}
+	config.AuthInfos[entryName] = &clientcmdapi.AuthInfo{Exec: &clientcmdapi.ExecConfig{
+		Args: []string{"credential", "--state=/tmp/prod-proxy.yaml", "--state", "/tmp/prod-proxy.yaml"},
+	}}
+	config.Contexts["prod-proxy"] = &clientcmdapi.Context{Cluster: entryName, AuthInfo: entryName}
+	config.CurrentContext = "prod-proxy"
+	if err := clientcmd.WriteToFile(*config, path); err != nil {
+		t.Fatal(err)
+	}
+
+	statePaths, err := DeleteProxyContext(path, "prod-proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(statePaths, []string{"/tmp/prod-proxy.yaml"}) {
+		t.Fatalf("state paths = %v, want deduplicated state path", statePaths)
+	}
+
+	got, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CurrentContext != "" {
+		t.Fatalf("current context = %q, want cleared", got.CurrentContext)
+	}
+}
+
 func TestDeleteProxyContextRejectsUnmanagedContext(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config")
 	config := clientcmdapi.NewConfig()
@@ -136,5 +245,14 @@ func TestDeleteProxyContextRejectsUnmanagedContext(t *testing.T) {
 
 	if _, err := DeleteProxyContext(path, "prod-proxy"); err == nil {
 		t.Fatal("DeleteProxyContext returned nil error, want unmanaged context error")
+	}
+}
+
+func TestAuthInfoStatePathsHandlesMissingExec(t *testing.T) {
+	if got := authInfoStatePaths(nil); got != nil {
+		t.Fatalf("nil auth info paths = %v, want nil", got)
+	}
+	if got := authInfoStatePaths(&clientcmdapi.AuthInfo{}); got != nil {
+		t.Fatalf("auth info without exec paths = %v, want nil", got)
 	}
 }

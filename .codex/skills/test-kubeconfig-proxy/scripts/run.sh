@@ -26,6 +26,8 @@ KUBECTL_BIN=""
 KCP_CACHE_DIR="${KCP_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/kubeconfig-proxy}"
 TOUCHED_TEST_RESOURCES=0
 
+echo "KUBECONFIG_FILE: ${KUBECONFIG_FILE}"
+
 declare -a RESULT_STATUS=()
 declare -a RESULT_NAME=()
 declare -a RESULT_DETAILS=()
