@@ -23,21 +23,21 @@ func generateBearerToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(token), nil
 }
 
-func generateTLSCertificate(addr string) (tls.Certificate, []byte, []byte, error) {
+func generateTLSCertificate(addr string) ([]byte, []byte, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return tls.Certificate{}, nil, nil, fmt.Errorf("parse listen address for TLS certificate: %w", err)
+		return nil, nil, fmt.Errorf("parse listen address for TLS certificate: %w", err)
 	}
 
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return tls.Certificate{}, nil, nil, fmt.Errorf("generate TLS private key: %w", err)
+		return nil, nil, fmt.Errorf("generate TLS private key: %w", err)
 	}
 
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
 	if err != nil {
-		return tls.Certificate{}, nil, nil, fmt.Errorf("generate TLS serial number: %w", err)
+		return nil, nil, fmt.Errorf("generate TLS serial number: %w", err)
 	}
 
 	template := x509.Certificate{
@@ -64,19 +64,18 @@ func generateTLSCertificate(addr string) (tls.Certificate, []byte, []byte, error
 
 	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
 	if err != nil {
-		return tls.Certificate{}, nil, nil, fmt.Errorf("create TLS certificate: %w", err)
+		return nil, nil, fmt.Errorf("create TLS certificate: %w", err)
 	}
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 	keyBytes, err := x509.MarshalECPrivateKey(privateKey)
 	if err != nil {
-		return tls.Certificate{}, nil, nil, fmt.Errorf("marshal TLS private key: %w", err)
+		return nil, nil, fmt.Errorf("marshal TLS private key: %w", err)
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
 
-	certificate, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		return tls.Certificate{}, nil, nil, fmt.Errorf("load TLS key pair: %w", err)
+	if _, err := tls.X509KeyPair(certPEM, keyPEM); err != nil {
+		return nil, nil, fmt.Errorf("load TLS key pair: %w", err)
 	}
-	return certificate, certPEM, keyPEM, nil
+	return certPEM, keyPEM, nil
 }

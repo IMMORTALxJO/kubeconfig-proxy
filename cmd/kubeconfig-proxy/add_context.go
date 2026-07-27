@@ -159,7 +159,7 @@ func newAddContextProfile(options addContextOptions, kubeconfigPath, listenAddr 
 	if err != nil {
 		return nil, nil, err
 	}
-	_, certPEM, keyPEM, err := generateTLSCertificate(listenAddr)
+	certPEM, keyPEM, err := generateTLSCertificate(listenAddr)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -169,7 +169,7 @@ func newAddContextProfile(options addContextOptions, kubeconfigPath, listenAddr 
 		Name:             options.contextName,
 		SourceKubeconfig: kubeconfigPath,
 		Listen:           listenAddr,
-		Contexts:         targetNames(targets),
+		Contexts:         proxy.TargetNameList(targets),
 		PrimaryContext:   primary.Name,
 		BearerToken:      bearerToken,
 		ProxyTTL:         options.proxyTTL.String(),

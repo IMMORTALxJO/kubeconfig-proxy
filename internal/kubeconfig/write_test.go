@@ -277,3 +277,10 @@ func TestAuthInfoStatePathsHandlesMissingExec(t *testing.T) {
 		t.Fatalf("auth info without exec paths = %v, want nil", got)
 	}
 }
+
+func TestAppendUniquePaths(t *testing.T) {
+	got := AppendUniquePaths([]string{"alpha"}, "", "alpha", "beta")
+	if !slices.Equal(got, []string{"alpha", "beta"}) {
+		t.Fatalf("AppendUniquePaths = %v, want [alpha beta]", got)
+	}
+}

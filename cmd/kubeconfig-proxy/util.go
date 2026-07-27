@@ -4,11 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
-	"github.com/IMMORTALxJO/kubeconfig-proxy/internal/proxy"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -26,24 +24,6 @@ func splitCSV(value string) []string {
 		}
 	}
 	return out
-}
-
-func targetNames(targets []proxy.Target) []string {
-	names := make([]string, 0, len(targets))
-	for _, target := range targets {
-		names = append(names, target.Name)
-	}
-	return names
-}
-
-func appendUniqueStrings(values []string, more ...string) []string {
-	for _, value := range more {
-		if value == "" || slices.Contains(values, value) {
-			continue
-		}
-		values = append(values, value)
-	}
-	return values
 }
 
 func defaultKubeconfigPath() string {

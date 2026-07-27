@@ -76,11 +76,15 @@ func LoadTargets(kubeconfigPath string, selectedContexts []string, primaryContex
 }
 
 func TargetNames(targets []Target) string {
+	return strings.Join(TargetNameList(targets), ", ")
+}
+
+func TargetNameList(targets []Target) []string {
 	names := make([]string, 0, len(targets))
 	for _, target := range targets {
 		names = append(names, target.Name)
 	}
-	return strings.Join(names, ", ")
+	return names
 }
 
 func resolveContextNames(rawConfig *clientcmdapi.Config, selectedContexts []string) ([]string, error) {
