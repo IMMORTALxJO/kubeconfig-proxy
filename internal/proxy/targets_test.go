@@ -123,7 +123,7 @@ func TestLoadTargetsSupportsOIDCAuthProvider(t *testing.T) {
 }
 
 func TestLoadTargetsDefaultsToSortedContextsWhenCurrentContextIsEmpty(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer server.Close()
@@ -147,7 +147,7 @@ func TestLoadTargetsDefaultsToSortedContextsWhenCurrentContextIsEmpty(t *testing
 }
 
 func TestLoadTargetsRejectsInvalidKubeconfigSelections(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer server.Close()

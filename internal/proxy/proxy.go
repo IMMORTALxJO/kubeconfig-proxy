@@ -413,7 +413,7 @@ func (p *Proxy) streamSingle(w http.ResponseWriter, r *http.Request, target Targ
 			proxyRequest.Out.Host = target.Host.Host
 			proxyRequest.Out.Header.Del("Authorization")
 		},
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			writeStatusError(w, http.StatusBadGateway, err.Error())
 		},
 	}

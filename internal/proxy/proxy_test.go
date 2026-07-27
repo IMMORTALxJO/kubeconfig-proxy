@@ -140,11 +140,11 @@ func TestFanOutMutationsToAllTargets(t *testing.T) {
 func TestJobMutationsFanOutWithoutAnnotations(t *testing.T) {
 	calls := &callRecorder{}
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			calls.add("one")
 			_, _ = w.Write([]byte(`{"kind":"Job","metadata":{"name":"demo"}}`))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(w http.ResponseWriter, _ *http.Request) {
 			calls.add("two")
 			_, _ = w.Write([]byte(`{"kind":"Job","metadata":{"name":"demo"}}`))
 		},
@@ -241,11 +241,11 @@ func TestPutFanOutRewritesObjectIdentityPerTarget(t *testing.T) {
 func TestContextNameAnnotationRoutesMutationToNamedTarget(t *testing.T) {
 	calls := &callRecorder{}
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			calls.add("one")
 			_, _ = w.Write([]byte(`{"kind":"ConfigMap","metadata":{"name":"demo"}}`))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(w http.ResponseWriter, _ *http.Request) {
 			calls.add("two")
 			_, _ = w.Write([]byte(`{"kind":"ConfigMap","metadata":{"name":"demo"}}`))
 		},
@@ -280,11 +280,11 @@ func TestContextNameAnnotationRoutesMutationToNamedTarget(t *testing.T) {
 func TestSingleContextAnnotationRoutesMutationToAlphabeticallyFirstTarget(t *testing.T) {
 	calls := &callRecorder{}
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			calls.add("one")
 			_, _ = w.Write([]byte(`{"kind":"ConfigMap","metadata":{"name":"demo"}}`))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(w http.ResponseWriter, _ *http.Request) {
 			calls.add("two")
 			_, _ = w.Write([]byte(`{"kind":"ConfigMap","metadata":{"name":"demo"}}`))
 		},
@@ -319,11 +319,11 @@ func TestSingleContextAnnotationRoutesMutationToAlphabeticallyFirstTarget(t *tes
 func TestSingleContextAnnotationRoutesYAMLMutationBody(t *testing.T) {
 	calls := &callRecorder{}
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			calls.add("one")
 			_, _ = w.Write([]byte(`{"kind":"ConfigMap","metadata":{"name":"demo"}}`))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(w http.ResponseWriter, _ *http.Request) {
 			calls.add("two")
 			_, _ = w.Write([]byte(`{"kind":"ConfigMap","metadata":{"name":"demo"}}`))
 		},
@@ -503,10 +503,10 @@ func TestPatchNamedResourceUsesExistingResourceAnnotations(t *testing.T) {
 
 func TestContextNameAnnotationRejectsUnknownTarget(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(_ http.ResponseWriter, _ *http.Request) {
 			t.Fatalf("upstream should not be called")
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(_ http.ResponseWriter, _ *http.Request) {
 			t.Fatalf("upstream should not be called")
 		},
 	})
@@ -535,10 +535,10 @@ func TestContextNameAnnotationRejectsUnknownTarget(t *testing.T) {
 
 func TestAggregatesListResponses(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"10"},"items":[{"metadata":{"name":"a"}}]}`))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"11"},"items":[{"metadata":{"name":"b"}}]}`))
 		},
 	})
@@ -734,10 +734,10 @@ func TestAggregateWatchForMissingNamedResourceClosesImmediately(t *testing.T) {
 
 func TestAggregateWatchPropagatesOpenFailure(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "watch rejected", http.StatusForbidden)
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"type":"BOOKMARK"}` + "\n"))
 		},
 	})
@@ -762,7 +762,7 @@ func TestAggregateWatchPropagatesOpenFailure(t *testing.T) {
 
 func TestAggregatesTableResponses(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{
 				"apiVersion":"meta.k8s.io/v1",
 				"kind":"Table",
@@ -771,7 +771,7 @@ func TestAggregatesTableResponses(t *testing.T) {
 				"rows":[{"cells":["a"],"object":{"metadata":{"name":"a"}}}]
 			}`))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{
 				"apiVersion":"meta.k8s.io/v1",
 				"kind":"Table",
@@ -834,10 +834,10 @@ func TestAggregatesTableResponses(t *testing.T) {
 
 func TestAggregateListPropagatesUpstreamError(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "temporary outage", http.StatusServiceUnavailable)
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"items":[]}`))
 		},
 	})
@@ -859,10 +859,10 @@ func TestAggregateListPropagatesUpstreamError(t *testing.T) {
 
 func TestAggregateListRejectsInvalidJSON(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`not-json`))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"items":[]}`))
 		},
 	})
@@ -887,10 +887,10 @@ func TestAggregateListRejectsInvalidJSON(t *testing.T) {
 
 func TestResourcePathContainingLogSegmentIsNotLongRunning(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"apiVersion":"observability.example.com/v1","kind":"LoggingConfigList","items":[{"metadata":{"name":"a"}}]}`))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"apiVersion":"observability.example.com/v1","kind":"LoggingConfigList","items":[{"metadata":{"name":"b"}}]}`))
 		},
 	})
@@ -927,11 +927,11 @@ func TestResourcePathContainingLogSegmentIsNotLongRunning(t *testing.T) {
 func TestHelmStorageListUsesPrimaryOnly(t *testing.T) {
 	calls := &callRecorder{}
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			calls.add("one")
 			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"SecretList","items":[{"metadata":{"name":"sh.helm.release.v1.demo.v1"}}]}`))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(w http.ResponseWriter, _ *http.Request) {
 			calls.add("two")
 			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"SecretList","items":[{"metadata":{"name":"sh.helm.release.v1.demo.v1"}}]}`))
 		},
@@ -959,11 +959,11 @@ func TestHelmStorageListUsesPrimaryOnly(t *testing.T) {
 func TestHelmStorageWatchUsesPrimaryOnly(t *testing.T) {
 	calls := &callRecorder{}
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			calls.add("one")
 			_, _ = w.Write([]byte(`{"type":"ADDED","object":{"metadata":{"name":"release"}}}` + "\n"))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(w http.ResponseWriter, _ *http.Request) {
 			calls.add("two")
 			_, _ = w.Write([]byte(`{"type":"ADDED","object":{"metadata":{"name":"release"}}}` + "\n"))
 		},
@@ -990,10 +990,10 @@ func TestHelmStorageWatchUsesPrimaryOnly(t *testing.T) {
 
 func TestHelmStorageListAggregatesByDefault(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"SecretList","items":[{"metadata":{"name":"sh.helm.release.v1.demo.v1"}}]}`))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"SecretList","items":[{"metadata":{"name":"sh.helm.release.v1.demo.v1"}}]}`))
 		},
 	})
@@ -1114,10 +1114,10 @@ func TestReadOnlyRejectsMutations(t *testing.T) {
 
 func TestFanOutPropagatesUpstreamFailure(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "nope", http.StatusConflict)
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		},
 	})
@@ -1162,7 +1162,7 @@ func TestNamedResourceGetRoutesToTargetContainingObject(t *testing.T) {
 		"one": func(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"metadata":{"name":"demo","labels":{"real":"two"}}}`))
 		},
 	})
@@ -1228,14 +1228,14 @@ func TestNamedResourceGetFallsBackToPrimaryWhenNoTargetContainsObject(t *testing
 func TestRetriesTemporaryUpstreamFailures(t *testing.T) {
 	var attempts int32
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			if atomic.AddInt32(&attempts, 1) == 1 {
 				http.Error(w, "try again", http.StatusServiceUnavailable)
 				return
 			}
 			_, _ = w.Write([]byte(`{"gitVersion":"v1.32.0"}`))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(_ http.ResponseWriter, _ *http.Request) {
 			t.Fatalf("secondary target should not be called for discovery requests")
 		},
 	})
@@ -1260,11 +1260,11 @@ func TestRetriesTemporaryUpstreamFailures(t *testing.T) {
 
 func TestRequestTimeout(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			time.Sleep(50 * time.Millisecond)
 			_, _ = w.Write([]byte(`{"gitVersion":"v1.32.0"}`))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(_ http.ResponseWriter, _ *http.Request) {
 			t.Fatalf("secondary target should not be called for discovery requests")
 		},
 	})
@@ -1306,7 +1306,7 @@ func decodeUpdate(t *testing.T, target string, r *http.Request) seenUpdate {
 func TestRequestTimeoutDoesNotCloseOpenedWatch(t *testing.T) {
 	calls := &callRecorder{}
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			calls.add("one")
 			w.WriteHeader(http.StatusOK)
 			if flusher, ok := w.(http.Flusher); ok {
@@ -1315,7 +1315,7 @@ func TestRequestTimeoutDoesNotCloseOpenedWatch(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 			_, _ = w.Write([]byte(`{"type":"MODIFIED","object":{"metadata":{"name":"demo"}}}` + "\n"))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(w http.ResponseWriter, _ *http.Request) {
 			calls.add("two")
 			_, _ = w.Write([]byte(`{"type":"MODIFIED","object":{"metadata":{"name":"demo"}}}` + "\n"))
 		},
@@ -1347,10 +1347,10 @@ func TestRequestTimeoutDoesNotCloseOpenedWatch(t *testing.T) {
 
 func TestOpenWatchStreamReturnsUpstreamStatusFailure(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "missing", http.StatusNotFound)
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(_ http.ResponseWriter, _ *http.Request) {
 			t.Fatal("second target should not be used")
 		},
 	})
@@ -1376,11 +1376,11 @@ func TestOpenWatchStreamReturnsUpstreamStatusFailure(t *testing.T) {
 
 func TestOpenWatchStreamUsesRequestTimeout(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			time.Sleep(100 * time.Millisecond)
 			_, _ = w.Write([]byte(`{"type":"BOOKMARK"}` + "\n"))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(_ http.ResponseWriter, _ *http.Request) {
 			t.Fatal("second target should not be used")
 		},
 	})
@@ -1404,11 +1404,11 @@ func TestOpenWatchStreamUsesRequestTimeout(t *testing.T) {
 func TestWatchOpenUsesTimeoutAndStartsTargetsInParallel(t *testing.T) {
 	var calls int32
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(_ http.ResponseWriter, r *http.Request) {
 			atomic.AddInt32(&calls, 1)
 			<-r.Context().Done()
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(_ http.ResponseWriter, r *http.Request) {
 			atomic.AddInt32(&calls, 1)
 			<-r.Context().Done()
 		},
@@ -1554,10 +1554,10 @@ func TestPodExecUpgradeIsProxiedBidirectionally(t *testing.T) {
 
 func TestRejectsMissingBearerToken(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(_ http.ResponseWriter, _ *http.Request) {
 			t.Fatalf("upstream should not be called without bearer token")
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(_ http.ResponseWriter, _ *http.Request) {
 			t.Fatalf("upstream should not be called without bearer token")
 		},
 	})
@@ -1579,10 +1579,10 @@ func TestRejectsMissingBearerToken(t *testing.T) {
 
 func TestAcceptsBearerToken(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
+		"one": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"gitVersion":"v1.32.0"}`))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
+		"two": func(_ http.ResponseWriter, _ *http.Request) {
 			t.Fatalf("secondary target should not be called for discovery requests")
 		},
 	})
