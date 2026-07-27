@@ -65,6 +65,8 @@ add_result() {
   printf '\n'
 }
 
+# Called from cleanup, which is invoked through trap.
+# shellcheck disable=SC2329
 print_results() {
   printf '\n| Status | Check | Details |\n'
   printf '| --- | --- | --- |\n'
@@ -74,6 +76,8 @@ print_results() {
   done
 }
 
+# Invoked by the EXIT trap.
+# shellcheck disable=SC2329
 cleanup() {
   local code=$?
   if [[ "${KCP_KEEP_KIND:-0}" == "1" ]]; then
@@ -134,18 +138,6 @@ kubectl_ctx() {
   local ctx="$1"
   shift
   kubectl_cmd --context "$ctx" "$@"
-}
-
-expect_contains() {
-  local name="$1"
-  local haystack="$2"
-  local needle="$3"
-  if [[ "$haystack" == *"$needle"* ]]; then
-    add_result "PASS" "$name" "found $needle"
-    return 0
-  fi
-  add_result "FAIL" "$name" "missing $needle in: $haystack"
-  return 1
 }
 
 expect_not_found() {
@@ -405,6 +397,8 @@ cleanup_test_resources() {
   done
 }
 
+# Invoked indirectly via run_cmd.
+# shellcheck disable=SC2329
 apply_manifest() {
   local ctx="$1"
   local file="$2"

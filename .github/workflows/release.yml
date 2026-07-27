@@ -63,7 +63,7 @@ jobs:
             rm -rf "dist/${name}"
           done
 
-          (cd dist && sha256sum * > checksums.txt)
+          (cd dist && sha256sum -- *.tar.gz > checksums.txt)
 
       - name: Install cosign
         uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
@@ -74,7 +74,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          for artifact in dist/*.tar.gz dist/checksums.txt; do
+          for artifact in ./dist/*.tar.gz ./dist/checksums.txt; do
             cosign sign-blob --yes --bundle "${artifact}.bundle" "$artifact"
           done
 

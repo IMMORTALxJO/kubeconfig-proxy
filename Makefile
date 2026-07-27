@@ -1,4 +1,5 @@
 GO ?= go
+SHELLCHECK ?= shellcheck
 GO_TOOLCHAIN ?= go$(shell awk '$$1 == "go" { print $$2; exit }' go.mod)
 
 MAIN_PACKAGE ?= ./cmd/kubeconfig-proxy
@@ -13,11 +14,13 @@ BINARY_NAME ?= kubeconfig-proxy
 STATICCHECK_VERSION ?= v0.7.0
 GOSEC_VERSION ?= v2.28.0
 GOVULNCHECK_VERSION ?= v1.6.0
+ACTIONLINT_VERSION ?= v1.7.12
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
+SHELL_FILES := install.sh .codex/skills/test-kubeconfig-proxy/scripts/run.sh
 GOTOOLCHAIN_ENV := GOTOOLCHAIN=$(GO_TOOLCHAIN)
 
-.PHONY: help fmt fmt-check vet staticcheck gosec vuln test race build check clean
+.PHONY: help fmt fmt-check vet staticcheck actionlint shellcheck gosec vuln test race build check clean
 
 help:
 	@echo "Available targets:"
@@ -25,6 +28,8 @@ help:
 	@echo "  fmt-check    Verify Go formatting"
 	@echo "  vet          Run go vet"
 	@echo "  staticcheck  Run Staticcheck"
+	@echo "  actionlint   Run GitHub Actions workflow linting"
+	@echo "  shellcheck   Run ShellCheck"
 	@echo "  gosec        Run gosec"
 	@echo "  vuln         Run govulncheck"
 	@echo "  test         Run tests"
@@ -45,6 +50,12 @@ vet:
 staticcheck:
 	$(GOTOOLCHAIN_ENV) $(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) $(PKGS)
 
+actionlint:
+	$(GOTOOLCHAIN_ENV) $(GO) run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION) -verbose
+
+shellcheck:
+	$(SHELLCHECK) $(SHELL_FILES)
+
 gosec:
 	$(GOTOOLCHAIN_ENV) $(GO) run github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION) $(PKGS)
 
@@ -62,7 +73,7 @@ build:
 	mkdir -p $(BUILD_DIR)
 	$(GOTOOLCHAIN_ENV) $(GO) build -trimpath -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PACKAGE)
 
-check: fmt-check vet staticcheck gosec vuln test race build
+check: fmt-check vet staticcheck actionlint shellcheck gosec vuln test race build
 
 clean:
 	rm -rf $(BUILD_DIR)
