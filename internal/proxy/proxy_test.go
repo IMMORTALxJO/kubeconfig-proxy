@@ -1715,7 +1715,7 @@ func (r errReadCloser) Read([]byte) (int, error) {
 	return 0, r.err
 }
 
-func (r errReadCloser) Close() error {
+func (errReadCloser) Close() error {
 	return nil
 }
 
