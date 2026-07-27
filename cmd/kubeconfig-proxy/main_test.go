@@ -252,10 +252,26 @@ func TestAddContextWritesStateAndKubeconfigExecContext(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	profile := assertMainTestProxyState(t, statePath)
+	assertMainTestProxyKubeconfig(t, kubeconfigPath, statePath, profile)
+}
+
+func assertMainTestProxyState(t *testing.T, statePath string) *proxystate.Profile {
+	t.Helper()
+
 	profile, err := proxystate.Load(statePath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertMainTestProxyStateCore(t, profile)
+	assertMainTestProxyStateDefaults(t, profile)
+	assertFileMode(t, statePath, 0o600)
+	return profile
+}
+
+func assertMainTestProxyStateCore(t *testing.T, profile *proxystate.Profile) {
+	t.Helper()
+
 	if profile.Name != "prod-proxy" {
 		t.Fatalf("profile name = %q, want prod-proxy", profile.Name)
 	}
@@ -268,35 +284,62 @@ func TestAddContextWritesStateAndKubeconfigExecContext(t *testing.T) {
 	if profile.ProxyTTL != "3m0s" {
 		t.Fatalf("profile proxyTTL = %q, want 3m0s", profile.ProxyTTL)
 	}
+	if profile.BearerToken == "" || profile.TLS.CertPEM == "" || profile.TLS.KeyPEM == "" {
+		t.Fatal("profile should contain proxy token and TLS material")
+	}
+}
+
+func assertMainTestProxyStateDefaults(t *testing.T, profile *proxystate.Profile) {
+	t.Helper()
+
 	if profile.LogsEnabled {
 		t.Fatal("profile logsEnabled = true, want false by default")
 	}
 	if profile.Options.ReadOnly {
 		t.Fatal("profile readOnly = true, want false by default")
 	}
-	if profile.BearerToken == "" || profile.TLS.CertPEM == "" || profile.TLS.KeyPEM == "" {
-		t.Fatal("profile should contain proxy token and TLS material")
-	}
-	info, err := os.Stat(statePath)
+}
+
+func assertFileMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+
+	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("state mode = %v, want 0600", info.Mode().Perm())
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("mode = %v, want %v", got, want)
 	}
+}
+
+func assertMainTestProxyKubeconfig(t *testing.T, kubeconfigPath, statePath string, profile *proxystate.Profile) {
+	t.Helper()
 
 	config, err := clientcmd.LoadFromFile(kubeconfigPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	context := config.Contexts["prod-proxy"]
+	assertMainTestProxyContext(t, context)
+	assertMainTestProxyCluster(t, config, context.Cluster, profile)
+	assertMainTestProxyAuth(t, config, context.AuthInfo, statePath)
+}
+
+func assertMainTestProxyContext(t *testing.T, context *clientcmdapi.Context) {
+	t.Helper()
+
 	if context == nil {
 		t.Fatal("prod-proxy context is missing")
 	}
 	if context.Namespace != "test-ns" {
 		t.Fatalf("proxy namespace = %q, want primary namespace", context.Namespace)
 	}
-	cluster := config.Clusters[context.Cluster]
+}
+
+func assertMainTestProxyCluster(t *testing.T, config *clientcmdapi.Config, clusterName string, profile *proxystate.Profile) {
+	t.Helper()
+
+	cluster := config.Clusters[clusterName]
 	if cluster == nil {
 		t.Fatal("proxy cluster is missing")
 	}
@@ -306,7 +349,12 @@ func TestAddContextWritesStateAndKubeconfigExecContext(t *testing.T) {
 	if string(cluster.CertificateAuthorityData) != profile.TLS.CertPEM {
 		t.Fatal("kubeconfig CA data should match state certificate")
 	}
-	auth := config.AuthInfos[context.AuthInfo]
+}
+
+func assertMainTestProxyAuth(t *testing.T, config *clientcmdapi.Config, authInfoName, statePath string) {
+	t.Helper()
+
+	auth := config.AuthInfos[authInfoName]
 	if auth == nil || auth.Exec == nil {
 		t.Fatal("proxy auth exec config is missing")
 	}
@@ -1037,10 +1085,6 @@ func TestRunCredentialWritesExecCredentialWhenProxyIsReady(t *testing.T) {
 }
 
 func TestRunCredentialStartsDetachedServeWhenProxyIsNotReady(t *testing.T) {
-	if os.Getenv("KCP_TEST_CREDENTIAL_DETACHED_HELPER") == "1" {
-		os.Exit(0)
-	}
-
 	token := "state-token"
 	var readinessChecks atomic.Int32
 	ready := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1056,8 +1100,8 @@ func TestRunCredentialStartsDetachedServeWhenProxyIsNotReady(t *testing.T) {
 	var startedStatePath atomic.Value
 	newDetachedServeCommand = func(executable, statePath string) *exec.Cmd {
 		startedStatePath.Store(statePath)
-		cmd := exec.Command(executable, "-test.run=TestRunCredentialStartsDetachedServeWhenProxyIsNotReady")
-		cmd.Env = append(os.Environ(), "KCP_TEST_CREDENTIAL_DETACHED_HELPER=1")
+		cmd := exec.Command(executable, "-test.run=TestDetachedServeHelperProcess")
+		cmd.Env = append(os.Environ(), "KCP_TEST_DETACHED_HELPER=1")
 		return cmd
 	}
 	t.Cleanup(func() {
@@ -1162,14 +1206,10 @@ func TestRunCredentialRequiresStateFlag(t *testing.T) {
 }
 
 func TestStartDetachedServeStartsHelperProcessAndWritesLogs(t *testing.T) {
-	if os.Getenv("KCP_TEST_DETACHED_SERVE_HELPER") == "1" {
-		os.Exit(0)
-	}
-
 	oldCommand := newDetachedServeCommand
 	newDetachedServeCommand = func(executable, statePath string) *exec.Cmd {
-		cmd := exec.Command(executable, "-test.run=TestStartDetachedServeStartsHelperProcessAndWritesLogs")
-		cmd.Env = append(os.Environ(), "KCP_TEST_DETACHED_SERVE_HELPER=1", "KCP_TEST_DETACHED_STATE="+statePath)
+		cmd := exec.Command(executable, "-test.run=TestDetachedServeHelperProcess")
+		cmd.Env = append(os.Environ(), "KCP_TEST_DETACHED_HELPER=1", "KCP_TEST_DETACHED_STATE="+statePath)
 		return cmd
 	}
 	t.Cleanup(func() {
@@ -1184,6 +1224,12 @@ func TestStartDetachedServeStartsHelperProcessAndWritesLogs(t *testing.T) {
 		t.Fatal(err)
 	} else if info.Mode().Perm() != 0o600 {
 		t.Fatalf("log mode = %v, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestDetachedServeHelperProcess(t *testing.T) {
+	if os.Getenv("KCP_TEST_DETACHED_HELPER") != "1" {
+		t.Skip("helper process")
 	}
 }
 

@@ -35,7 +35,16 @@ func TestAddProxyContextWritesExecContext(t *testing.T) {
 		t.Fatal("source context should be preserved")
 	}
 
-	context := got.Contexts["prod-proxy"]
+	assertProxyContext(t, got)
+	assertProxyCluster(t, got)
+	assertProxyAuthInfo(t, got)
+	assertKubeconfigFileMode(t, path)
+}
+
+func assertProxyContext(t *testing.T, config *clientcmdapi.Config) {
+	t.Helper()
+
+	context := config.Contexts["prod-proxy"]
 	if context == nil {
 		t.Fatal("proxy context is missing")
 	}
@@ -48,8 +57,12 @@ func TestAddProxyContextWritesExecContext(t *testing.T) {
 	if context.Namespace != "default" {
 		t.Fatalf("context namespace = %q, want default", context.Namespace)
 	}
+}
 
-	cluster := got.Clusters["kubeconfig-proxy/prod-proxy"]
+func assertProxyCluster(t *testing.T, config *clientcmdapi.Config) {
+	t.Helper()
+
+	cluster := config.Clusters["kubeconfig-proxy/prod-proxy"]
 	if cluster == nil {
 		t.Fatal("proxy cluster is missing")
 	}
@@ -59,8 +72,12 @@ func TestAddProxyContextWritesExecContext(t *testing.T) {
 	if string(cluster.CertificateAuthorityData) != "test-ca" {
 		t.Fatalf("certificate authority data = %q, want test-ca", string(cluster.CertificateAuthorityData))
 	}
+}
 
-	authInfo := got.AuthInfos["kubeconfig-proxy/prod-proxy"]
+func assertProxyAuthInfo(t *testing.T, config *clientcmdapi.Config) {
+	t.Helper()
+
+	authInfo := config.AuthInfos["kubeconfig-proxy/prod-proxy"]
 	if authInfo == nil || authInfo.Exec == nil {
 		t.Fatal("proxy exec auth info is missing")
 	}
@@ -73,6 +90,10 @@ func TestAddProxyContextWritesExecContext(t *testing.T) {
 	if !slices.Equal(authInfo.Exec.Args, []string{"credential", "--state", "/tmp/prod-proxy.yaml"}) {
 		t.Fatalf("exec args = %v, want credential state args", authInfo.Exec.Args)
 	}
+}
+
+func assertKubeconfigFileMode(t *testing.T, path string) {
+	t.Helper()
 
 	info, err := os.Stat(path)
 	if err != nil {

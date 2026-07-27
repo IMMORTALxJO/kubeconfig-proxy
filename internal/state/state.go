@@ -90,53 +90,64 @@ func (p *Profile) Validate() error {
 	if p.Version != Version {
 		return fmt.Errorf("unsupported state version %d", p.Version)
 	}
-	if p.Name == "" {
-		return fmt.Errorf("state name is required")
+	if err := p.validateRequiredFields(); err != nil {
+		return err
 	}
-	if p.SourceKubeconfig == "" {
-		return fmt.Errorf("state sourceKubeconfig is required")
+	return p.validateOptions()
+}
+
+func (p *Profile) validateRequiredFields() error {
+	required := []struct {
+		value string
+		name  string
+	}{
+		{p.Name, "state name"},
+		{p.SourceKubeconfig, "state sourceKubeconfig"},
+		{p.Listen, "state listen"},
+		{p.PrimaryContext, "state primaryContext"},
+		{p.BearerToken, "state bearerToken"},
+		{p.TLS.CertPEM, "state tls.certPEM"},
+		{p.TLS.KeyPEM, "state tls.keyPEM"},
 	}
-	if p.Listen == "" {
-		return fmt.Errorf("state listen is required")
+	for _, field := range required {
+		if field.value == "" {
+			return fmt.Errorf("%s is required", field.name)
+		}
 	}
 	if len(p.Contexts) == 0 {
 		return fmt.Errorf("state contexts are required")
 	}
-	if p.PrimaryContext == "" {
-		return fmt.Errorf("state primaryContext is required")
-	}
-	if p.BearerToken == "" {
-		return fmt.Errorf("state bearerToken is required")
-	}
-	if p.TLS.CertPEM == "" {
-		return fmt.Errorf("state tls.certPEM is required")
-	}
-	if p.TLS.KeyPEM == "" {
-		return fmt.Errorf("state tls.keyPEM is required")
-	}
+	return nil
+}
+
+func (p *Profile) validateOptions() error {
 	proxyTTL, err := p.ProxyTTLDuration()
 	if err != nil {
 		return err
-	}
-	if proxyTTL < 0 {
-		return fmt.Errorf("proxyTTL must be greater than or equal to 0")
 	}
 	requestTimeout, err := p.RequestTimeoutDuration()
 	if err != nil {
 		return err
 	}
-	if requestTimeout < 0 {
-		return fmt.Errorf("options.requestTimeout must be greater than or equal to 0")
-	}
-	if p.Options.Retries < 0 {
-		return fmt.Errorf("options.retries must be greater than or equal to 0")
-	}
 	retryBackoff, err := p.RetryBackoffDuration()
 	if err != nil {
 		return err
 	}
-	if retryBackoff < 0 {
-		return fmt.Errorf("options.retryBackoff must be greater than or equal to 0")
+	if err := validateNonNegativeDuration("proxyTTL", proxyTTL); err != nil {
+		return err
+	}
+	if err := validateNonNegativeDuration("options.requestTimeout", requestTimeout); err != nil {
+		return err
+	}
+	if p.Options.Retries < 0 {
+		return fmt.Errorf("options.retries must be greater than or equal to 0")
+	}
+	return validateNonNegativeDuration("options.retryBackoff", retryBackoff)
+}
+
+func validateNonNegativeDuration(name string, duration time.Duration) error {
+	if duration < 0 {
+		return fmt.Errorf("%s must be greater than or equal to 0", name)
 	}
 	return nil
 }

@@ -1477,43 +1477,7 @@ func TestPodLogsRouteToTargetContainingPod(t *testing.T) {
 }
 
 func TestPodExecUpgradeIsProxiedBidirectionally(t *testing.T) {
-	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/api/v1/namespaces/default/pods/demo" {
-				http.NotFound(w, r)
-				return
-			}
-			t.Fatalf("primary target should not receive exec stream, got %s", r.URL.Path)
-		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
-			switch r.URL.Path {
-			case "/api/v1/namespaces/default/pods/demo":
-				_, _ = w.Write([]byte(`{"metadata":{"name":"demo"}}`))
-			case "/api/v1/namespaces/default/pods/demo/exec":
-				if r.Header.Get("Authorization") != "" {
-					t.Fatalf("proxy Authorization header leaked upstream: %q", r.Header.Get("Authorization"))
-				}
-				if !strings.EqualFold(r.Header.Get("Upgrade"), "spdy/3.1") {
-					t.Fatalf("upgrade = %q, want spdy/3.1", r.Header.Get("Upgrade"))
-				}
-
-				hijacker, ok := w.(http.Hijacker)
-				if !ok {
-					t.Fatalf("response writer does not support hijacking")
-				}
-				conn, rw, err := hijacker.Hijack()
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer conn.Close()
-
-				_, _ = fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: spdy/3.1\r\n\r\nupgraded\n")
-				_ = rw.Flush()
-			default:
-				t.Fatalf("unexpected path %s", r.URL.Path)
-			}
-		},
-	})
+	targets, cleanup := testTargets(t, podExecUpgradeHandlers(t))
 	defer cleanup()
 
 	p, err := newTestProxy(targets, targets[0])
@@ -1523,19 +1487,91 @@ func TestPodExecUpgradeIsProxiedBidirectionally(t *testing.T) {
 	server := httptest.NewServer(p)
 	defer server.Close()
 
-	req, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/namespaces/default/pods/demo/exec", http.NoBody)
+	resp, err := server.Client().Do(newPodExecUpgradeRequest(t, server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	assertPodExecUpgradeResponse(t, resp)
+}
+
+func podExecUpgradeHandlers(t *testing.T) map[string]http.HandlerFunc {
+	t.Helper()
+
+	return map[string]http.HandlerFunc{
+		"one": rejectPrimaryPodExecHandler(t),
+		"two": podExecTargetHandler(t),
+	}
+}
+
+func rejectPrimaryPodExecHandler(t *testing.T) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/namespaces/default/pods/demo" {
+			http.NotFound(w, r)
+			return
+		}
+		t.Fatalf("primary target should not receive exec stream, got %s", r.URL.Path)
+	}
+}
+
+func podExecTargetHandler(t *testing.T) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/namespaces/default/pods/demo":
+			_, _ = w.Write([]byte(`{"metadata":{"name":"demo"}}`))
+		case "/api/v1/namespaces/default/pods/demo/exec":
+			assertPodExecUpgradeRequest(t, r)
+			writePodExecUpgradeResponse(t, w)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}
+}
+
+func assertPodExecUpgradeRequest(t *testing.T, r *http.Request) {
+	t.Helper()
+
+	if r.Header.Get("Authorization") != "" {
+		t.Fatalf("proxy Authorization header leaked upstream: %q", r.Header.Get("Authorization"))
+	}
+	if !strings.EqualFold(r.Header.Get("Upgrade"), "spdy/3.1") {
+		t.Fatalf("upgrade = %q, want spdy/3.1", r.Header.Get("Upgrade"))
+	}
+}
+
+func writePodExecUpgradeResponse(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		t.Fatalf("response writer does not support hijacking")
+	}
+	conn, rw, err := hijacker.Hijack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	_, _ = fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: spdy/3.1\r\n\r\nupgraded\n")
+	_ = rw.Flush()
+}
+
+func newPodExecUpgradeRequest(t *testing.T, serverURL string) *http.Request {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodGet, serverURL+"/api/v1/namespaces/default/pods/demo/exec", http.NoBody)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+testBearerToken)
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", "spdy/3.1")
+	return req
+}
 
-	resp, err := server.Client().Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+func assertPodExecUpgradeResponse(t *testing.T, resp *http.Response) {
+	t.Helper()
 
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusSwitchingProtocols)
@@ -1602,7 +1638,7 @@ func TestAcceptsBearerToken(t *testing.T) {
 	}
 }
 
-func TestProxySmallHelpers(t *testing.T) {
+func TestSleepWithContext(t *testing.T) {
 	if !sleepWithContext(context.Background(), 0) {
 		t.Fatal("sleepWithContext(0) = false, want true")
 	}
@@ -1614,7 +1650,9 @@ func TestProxySmallHelpers(t *testing.T) {
 	if sleepWithContext(ctx, time.Second) {
 		t.Fatal("sleepWithContext(canceled) = true, want false")
 	}
+}
 
+func TestSingleJoiningSlash(t *testing.T) {
 	if got := singleJoiningSlash("/api/", "/v1"); got != "/api/v1" {
 		t.Fatalf("singleJoiningSlash double slash = %q, want /api/v1", got)
 	}
@@ -1624,7 +1662,9 @@ func TestProxySmallHelpers(t *testing.T) {
 	if got := singleJoiningSlash("/api", "/v1"); got != "/api/v1" {
 		t.Fatalf("singleJoiningSlash existing slash = %q, want /api/v1", got)
 	}
+}
 
+func TestMarkWatchEventSourceEdgeCases(t *testing.T) {
 	line := []byte(`{"type":"ADDED"}` + "\n")
 	if got := string(markWatchEventSource(line, "one")); got != string(line) {
 		t.Fatalf("watch event without object = %q, want original", got)
@@ -1639,7 +1679,9 @@ func TestProxySmallHelpers(t *testing.T) {
 	if got := string(markWatchEventSource([]byte("\n"), "one")); got != "\n" {
 		t.Fatalf("blank watch event = %q, want original newline", got)
 	}
+}
 
+func TestSmallRequestPathHelpers(t *testing.T) {
 	if !isLongRunningRequest(httptest.NewRequest(http.MethodGet, "/api/v1/pods?watch=true", http.NoBody)) {
 		t.Fatal("watch request should be long-running")
 	}
@@ -1649,7 +1691,9 @@ func TestProxySmallHelpers(t *testing.T) {
 	if !isNamedResourcePath("/apis/apps/v1/deployments/demo") {
 		t.Fatal("apis cluster-scoped named resource path was not detected")
 	}
+}
 
+func TestAggregateResourceVersionEdgeCases(t *testing.T) {
 	if _, ok := decodeAggregateResourceVersion("plain-resource-version"); ok {
 		t.Fatal("plain resourceVersion decoded as aggregate")
 	}
@@ -1664,7 +1708,9 @@ func TestProxySmallHelpers(t *testing.T) {
 	if got := upstreamURL.Query().Get("resourceVersion"); got != "" {
 		t.Fatalf("resourceVersion = %q, want removed for missing target", got)
 	}
+}
 
+func TestObjectDecodeAndRewriteEdgeCases(t *testing.T) {
 	if _, err := decodeObject([]byte(":\n:")); err == nil {
 		t.Fatal("decodeObject returned nil error for invalid YAML")
 	}
