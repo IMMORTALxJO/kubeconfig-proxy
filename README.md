@@ -1,6 +1,7 @@
 # kubeconfig-proxy
 
 [![codecov](https://codecov.io/gh/IMMORTALxJO/kubeconfig-proxy/branch/master/graph/badge.svg)](https://codecov.io/gh/IMMORTALxJO/kubeconfig-proxy)
+[![DeepSource](https://app.deepsource.com/gh/IMMORTALxJO/kubeconfig-proxy.svg/?label=active+issues&show_trend=true&token=2ECRVPtIrh_osePv7GJ4OOhA)](https://app.deepsource.com/gh/IMMORTALxJO/kubeconfig-proxy/)
 
 ![kubeconfig-proxy request flow](assets/kubeconfig-proxy-flow.svg)
 
