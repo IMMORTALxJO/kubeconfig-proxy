@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -1717,6 +1718,161 @@ func TestObjectDecodeAndRewriteEdgeCases(t *testing.T) {
 	if got, err := rewriteObjectIdentity([]byte("not-json"), []byte(`{"metadata":{"uid":"1"}}`)); err != nil || string(got) != "not-json" {
 		t.Fatalf("rewriteObjectIdentity invalid desired = %q, %v; want original body", string(got), err)
 	}
+	if got, err := rewriteObjectIdentity([]byte(`{"metadata":{"name":"demo"}}`), []byte(`{"kind":"ConfigMap"}`)); err != nil || string(got) != `{"metadata":{"name":"demo"}}` {
+		t.Fatalf("rewriteObjectIdentity without current metadata = %q, %v; want original body", string(got), err)
+	}
+}
+
+func TestForwardSingleReturnsBadGatewayOnTransportError(t *testing.T) {
+	upstreamErr := errors.New("upstream unavailable")
+	target := Target{
+		Name: "one",
+		Host: mustParseURL(t, "https://one.example.test"),
+		Client: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return nil, upstreamErr
+		})},
+	}
+	p, err := newTestProxy([]Target{target}, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/version", http.NoBody)
+	rec := httptest.NewRecorder()
+	serveTestHTTP(p, rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), upstreamErr.Error()) {
+		t.Fatalf("body = %s, want transport error", rec.Body.String())
+	}
+}
+
+func TestBodyForTargetKeepsOriginalBodyWhenObjectIsMissing(t *testing.T) {
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				t.Fatalf("method = %s, want GET", r.Method)
+			}
+			http.NotFound(w, r)
+		},
+		"two": func(http.ResponseWriter, *http.Request) {},
+	})
+	defer cleanup()
+
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"metadata":{"name":"demo","uid":"old"}}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/namespaces/default/configmaps/demo", http.NoBody)
+
+	got, err := p.bodyForTarget(context.Background(), targets[0], req, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("body = %s, want original %s", got, body)
+	}
+}
+
+func TestTargetsForExistingResourceMutationRejectsUnexpectedLookupStatus(t *testing.T) {
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+		},
+		"two": func(http.ResponseWriter, *http.Request) {},
+	})
+	defer cleanup()
+
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/namespaces/default/configmaps/demo", http.NoBody)
+
+	_, _, err = p.targetsForExistingResourceMutation(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "one: get existing resource before mutation returned HTTP 403") {
+		t.Fatalf("error = %v, want lookup status error", err)
+	}
+}
+
+func TestSelectedWatchIsEmptyRejectsInvalidListPayload(t *testing.T) {
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("not-json"))
+		},
+		"two": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"items":[]}`))
+		},
+	})
+	defer cleanup()
+
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/pods?watch=true&fieldSelector=metadata.name=demo", http.NoBody)
+
+	empty, failed := p.selectedWatchIsEmpty(req)
+	if empty || failed == nil || failed.err == nil {
+		t.Fatalf("result = empty:%t failed:%#v, want invalid payload failure", empty, failed)
+	}
+}
+
+func TestOpenWatchStreamReturnsTransportError(t *testing.T) {
+	upstreamErr := errors.New("watch transport failed")
+	target := Target{
+		Name: "one",
+		Host: mustParseURL(t, "https://one.example.test"),
+		Client: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return nil, upstreamErr
+		})},
+	}
+	p, err := newTestProxy([]Target{target}, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/pods?watch=true", http.NoBody)
+
+	result := p.openWatchStream(context.Background(), req, target)
+	if !result.failed || !errors.Is(result.response.err, upstreamErr) {
+		t.Fatalf("result = %#v, want failed transport error", result)
+	}
+}
+
+func TestMergeTableRowsWithoutEmbeddedObject(t *testing.T) {
+	merged, err := mergeLists([]upstreamResponse{{
+		target: Target{Name: "one"},
+		body:   []byte(`{"kind":"Table","rows":[{"cells":["demo"]}]}`),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(merged), `"rows":[{"cells":["demo"]}]`) {
+		t.Fatalf("merged = %s, want original row", merged)
+	}
+}
+
+func TestFirstTargetByNameIgnoresTargetOrder(t *testing.T) {
+	targets := []Target{{Name: "beta"}, {Name: "alpha"}}
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.firstTargetByName(); got.Name != "alpha" {
+		t.Fatalf("first target = %q, want alpha", got.Name)
+	}
+}
+
+func TestResourceAnnotationsHandlesMissingMetadata(t *testing.T) {
+	if got := resourceAnnotations([]byte(`{"kind":"ConfigMap"}`)); got != nil {
+		t.Fatalf("annotations = %v, want nil", got)
+	}
+	if got := resourceAnnotations([]byte(`{"metadata":{"annotations":{"answer":42}}}`)); len(got) != 0 {
+		t.Fatalf("annotations = %v, want no non-string values", got)
+	}
 }
 
 func newTestProxy(targets []Target, primary Target) (*Proxy, error) {
@@ -1755,6 +1911,12 @@ func gzipListHandler(t *testing.T, body string) http.HandlerFunc {
 
 type errReadCloser struct {
 	err error
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }
 
 func (r errReadCloser) Read([]byte) (int, error) {
