@@ -107,9 +107,6 @@ func TestCLIHelpers(t *testing.T) {
 	if got := durationLogValue(2 * time.Second); got != "2s" {
 		t.Fatalf("durationLogValue(2s) = %q, want 2s", got)
 	}
-	if got := appendUniqueStrings([]string{"alpha"}, "", "alpha", "beta"); !slices.Equal(got, []string{"alpha", "beta"}) {
-		t.Fatalf("appendUniqueStrings = %v, want [alpha beta]", got)
-	}
 	if got := safeFileName("prod/blue:west_1"); got != "prod_blue_west_1" {
 		t.Fatalf("safeFileName = %q, want prod_blue_west_1", got)
 	}
@@ -745,7 +742,7 @@ func TestServeStateStopsAfterTTLWithoutRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, certPEM, keyPEM, err := generateTLSCertificate(listenAddr)
+	certPEM, keyPEM, err := generateTLSCertificate(listenAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -814,7 +811,7 @@ func TestServeStateRestartsWhenStateFileChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, certPEM, keyPEM, err := generateTLSCertificate(listenAddr)
+	certPEM, keyPEM, err := generateTLSCertificate(listenAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -894,7 +891,7 @@ func TestServeStateStopsWhenStateFileDisappears(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, certPEM, keyPEM, err := generateTLSCertificate(listenAddr)
+	certPEM, keyPEM, err := generateTLSCertificate(listenAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1339,7 +1336,7 @@ func TestProfileHTTPClientRejectsInvalidCertificate(t *testing.T) {
 }
 
 func TestProfileHTTPClientRequiresTLS12(t *testing.T) {
-	_, certPEM, _, err := generateTLSCertificate("127.0.0.1:9443")
+	certPEM, _, err := generateTLSCertificate("127.0.0.1:9443")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1544,7 +1541,11 @@ func TestGenerateBearerToken(t *testing.T) {
 }
 
 func TestGenerateTLSCertificateIncludesListenHost(t *testing.T) {
-	certificate, caData, keyData, err := generateTLSCertificate("127.0.0.1:9443")
+	caData, keyData, err := generateTLSCertificate("127.0.0.1:9443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := tls.X509KeyPair(caData, keyData)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1569,11 +1570,15 @@ func TestGenerateTLSCertificateIncludesListenHost(t *testing.T) {
 }
 
 func TestGenerateTLSCertificateIncludesDNSAndLoopbackFallbackSANs(t *testing.T) {
-	_, _, _, err := generateTLSCertificate("localhost:9443")
+	_, _, err := generateTLSCertificate("localhost:9443")
 	if err != nil {
 		t.Fatal(err)
 	}
-	certificate, _, _, err := generateTLSCertificate(":9443")
+	certificatePEM, keyPEM, err := generateTLSCertificate(":9443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := tls.X509KeyPair(certificatePEM, keyPEM)
 	if err != nil {
 		t.Fatal(err)
 	}

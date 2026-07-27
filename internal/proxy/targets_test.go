@@ -44,6 +44,9 @@ func TestLoadTargetsUsesSelectedContextsAndCurrentPrimary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got, want := TargetNameList(targets), []string{"alpha", "beta"}; !slices.Equal(got, want) {
+		t.Fatalf("target name list = %v, want %v", got, want)
+	}
 	if got, want := TargetNames(targets), "alpha, beta"; got != want {
 		t.Fatalf("target names = %q, want %q", got, want)
 	}

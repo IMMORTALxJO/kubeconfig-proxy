@@ -63,7 +63,7 @@ func DeleteProxyContext(path, contextName string) ([]string, error) {
 		if context.Cluster != entryName || context.AuthInfo != entryName {
 			return nil, fmt.Errorf("context %q is not managed by kubeconfig-proxy", contextName)
 		}
-		statePaths = appendStatePaths(statePaths, authInfoStatePaths(config.AuthInfos[context.AuthInfo])...)
+		statePaths = AppendUniquePaths(statePaths, authInfoStatePaths(config.AuthInfos[context.AuthInfo])...)
 		delete(config.Contexts, contextName)
 		if config.CurrentContext == contextName {
 			config.CurrentContext = ""
@@ -72,7 +72,7 @@ func DeleteProxyContext(path, contextName string) ([]string, error) {
 	}
 
 	if authInfo := config.AuthInfos[entryName]; authInfo != nil {
-		statePaths = appendStatePaths(statePaths, authInfoStatePaths(authInfo)...)
+		statePaths = AppendUniquePaths(statePaths, authInfoStatePaths(authInfo)...)
 		delete(config.AuthInfos, entryName)
 		changed = true
 	}
@@ -119,7 +119,8 @@ func authInfoStatePaths(authInfo *clientcmdapi.AuthInfo) []string {
 	return paths
 }
 
-func appendStatePaths(paths []string, values ...string) []string {
+// AppendUniquePaths appends non-empty paths that do not already appear in paths.
+func AppendUniquePaths(paths []string, values ...string) []string {
 	for _, value := range values {
 		if value == "" || slices.Contains(paths, value) {
 			continue
