@@ -15,17 +15,22 @@ STATICCHECK_VERSION ?= v0.7.0
 GOSEC_VERSION ?= v2.28.0
 GOVULNCHECK_VERSION ?= v1.6.0
 ACTIONLINT_VERSION ?= v1.7.12
+YAMLFMT_VERSION ?= v0.21.0
+YAMLFMT_FLAGS ?= -formatter retain_line_breaks=true
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
+YAML_FILES := $(shell find . \( -path './.git' -o -path './vendor' -o -path './examples/werf/.helm/templates' \) -prune -o \( -name '*.yaml' -o -name '*.yml' \) -print | sort)
 SHELL_FILES := install.sh .codex/skills/test-kubeconfig-proxy/scripts/run.sh
 GOTOOLCHAIN_ENV := GOTOOLCHAIN=$(GO_TOOLCHAIN)
 
-.PHONY: help fmt fmt-check vet staticcheck actionlint shellcheck gosec vuln test race build check clean
+.PHONY: help fmt fmt-check yamlfmt yamlfmt-check vet staticcheck actionlint shellcheck gosec vuln test race build check clean
 
 help:
 	@echo "Available targets:"
-	@echo "  fmt          Format Go files"
-	@echo "  fmt-check    Verify Go formatting"
+	@echo "  fmt          Format Go and YAML files"
+	@echo "  fmt-check    Verify Go and YAML formatting"
+	@echo "  yamlfmt      Format YAML files"
+	@echo "  yamlfmt-check Verify YAML formatting"
 	@echo "  vet          Run go vet"
 	@echo "  staticcheck  Run Staticcheck"
 	@echo "  actionlint   Run GitHub Actions workflow linting"
@@ -40,9 +45,17 @@ help:
 
 fmt:
 	gofmt -w $(GO_FILES)
+	$(MAKE) yamlfmt
 
 fmt-check:
 	test -z "$$(gofmt -l $(GO_FILES))"
+	$(MAKE) yamlfmt-check
+
+yamlfmt:
+	$(GOTOOLCHAIN_ENV) $(GO) run github.com/google/yamlfmt/cmd/yamlfmt@$(YAMLFMT_VERSION) $(YAMLFMT_FLAGS) $(YAML_FILES)
+
+yamlfmt-check:
+	$(GOTOOLCHAIN_ENV) $(GO) run github.com/google/yamlfmt/cmd/yamlfmt@$(YAMLFMT_VERSION) $(YAMLFMT_FLAGS) -lint $(YAML_FILES)
 
 vet:
 	$(GOTOOLCHAIN_ENV) $(GO) vet $(PKGS)
