@@ -40,6 +40,9 @@ The runner covers the first integration ring for this project:
   `kind-kubeconfig-proxy-a` and `kind-kubeconfig-proxy-b`.
 - Proxy context creation and exec-credential auto-start.
 - Aggregated list responses with the virtual `context` label.
+- Aggregated list pagination with a global limit and cross-context continuation.
+- Duplicate source-context rejection before proxy state is written.
+- Collision-resistant default state paths for context names that sanitize alike.
 - Fan-out create mutations.
 - `kubeconfig-proxy.io/context-name` single-target routing.
 - `kubeconfig-proxy.io/single-context` routing to the alphabetically first target.

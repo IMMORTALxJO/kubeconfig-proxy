@@ -11,6 +11,9 @@ STATE_FILE="$TMP_DIR/kind-proxy.yaml"
 RO_STATE_FILE="$TMP_DIR/kind-proxy-readonly.yaml"
 PROXY_CONTEXT="kind-proxy"
 RO_PROXY_CONTEXT="kind-proxy-readonly"
+HASHED_PROXY_CONTEXT="kind/proxy-state"
+SAFE_PROXY_CONTEXT="kind_proxy-state"
+DUPLICATE_PROXY_CONTEXT="kind-proxy-duplicate"
 CTX_A="kind-kubeconfig-proxy-a"
 CTX_B="kind-kubeconfig-proxy-b"
 NS="default"
@@ -89,6 +92,9 @@ cleanup() {
   if [[ -x "$BINARY" && -f "$KUBECONFIG_FILE" ]]; then
     KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
     KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$RO_PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
+    HOME="$TMP_DIR/home" KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$HASHED_PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
+    HOME="$TMP_DIR/home" KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$SAFE_PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
+    KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$DUPLICATE_PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
   fi
 
   if [[ "$TOUCHED_TEST_RESOURCES" == "1" && -n "${KUBECTL_BIN:-}" && -f "$KUBECONFIG_FILE" ]]; then
@@ -484,12 +490,44 @@ run_cmd "add read-only proxy context" "$BINARY" add-context "$RO_PROXY_CONTEXT" 
   --read-only \
   --exec-command "$BINARY"
 
+duplicate_output="$("$BINARY" add-context "$DUPLICATE_PROXY_CONTEXT" \
+  --kubeconfig "$KUBECONFIG_FILE" \
+  --state "$TMP_DIR/duplicate.yaml" \
+  --contexts "$CTX_A,$CTX_A" \
+  --listen "127.0.0.1:0" \
+  --exec-command "$BINARY" 2>&1)"
+duplicate_status=$?
+if [[ "$duplicate_status" -ne 0 && "$duplicate_output" == *"selected more than once"* && ! -f "$TMP_DIR/duplicate.yaml" ]]; then
+  add_result "PASS" "duplicate source contexts are rejected" "state was not written"
+else
+  add_result "FAIL" "duplicate source contexts are rejected" "status=$duplicate_status output=$duplicate_output"
+fi
+
+run_cmd "add proxy context with hashed default state path" env HOME="$TMP_DIR/home" "$BINARY" add-context "$HASHED_PROXY_CONTEXT" \
+  --kubeconfig "$KUBECONFIG_FILE" \
+  --contexts "$CTX_A,$CTX_B" \
+  --listen "127.0.0.1:0" \
+  --exec-command "$BINARY"
+run_cmd "add proxy context with safe default state path" env HOME="$TMP_DIR/home" "$BINARY" add-context "$SAFE_PROXY_CONTEXT" \
+  --kubeconfig "$KUBECONFIG_FILE" \
+  --contexts "$CTX_A,$CTX_B" \
+  --listen "127.0.0.1:0" \
+  --exec-command "$BINARY"
+state_file_count="$(find "$TMP_DIR/home/.kube/kubeconfig-proxy" -type f -name '*.yaml' | wc -l | tr -d ' ')"
+if [[ "$state_file_count" == "2" ]]; then
+  add_result "PASS" "default state paths avoid sanitized-name collisions" "created two distinct state files"
+else
+  add_result "FAIL" "default state paths avoid sanitized-name collisions" "found $state_file_count state files"
+fi
+
 run_cmd "proxy discovery and exec credential auto-start" kubectl_ctx "$PROXY_CONTEXT" version
 
 run_cmd "seed aggregate resources in source clusters" bash -c "
   set -euo pipefail
   KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_A' -n '$NS' create configmap kcp-only-a --from-literal=value=a
+  KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_A' -n '$NS' label configmap kcp-only-a kcp-pagination=yes
   KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_B' -n '$NS' create configmap kcp-only-b --from-literal=value=b
+  KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_B' -n '$NS' label configmap kcp-only-b kcp-pagination=yes
 "
 
 aggregate_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmaps -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.labels.context}{"\n"}{end}' 2>&1)"
@@ -497,6 +535,14 @@ if [[ "$aggregate_output" == *"kcp-only-a=$CTX_A"* && "$aggregate_output" == *"k
   add_result "PASS" "aggregated list adds context labels" "saw kcp-only-a=$CTX_A and kcp-only-b=$CTX_B"
 else
   add_result "FAIL" "aggregated list adds context labels" "$aggregate_output"
+fi
+
+paginated_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmaps -l kcp-pagination=yes --chunk-size=1 -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.labels.context}{"\n"}{end}' 2>&1)"
+paginated_count="$(printf '%s\n' "$paginated_output" | sed '/^$/d' | wc -l | tr -d ' ')"
+if [[ "$paginated_count" == "2" && "$paginated_output" == *"kcp-only-a=$CTX_A"* && "$paginated_output" == *"kcp-only-b=$CTX_B"* ]]; then
+  add_result "PASS" "aggregated list pagination crosses target boundary" "chunk-size=1 returned both contexts exactly once"
+else
+  add_result "FAIL" "aggregated list pagination crosses target boundary" "$paginated_output"
 fi
 
 readonly_list_output="$(kubectl_ctx "$RO_PROXY_CONTEXT" -n "$NS" get configmaps -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.labels.context}{"\n"}{end}' 2>&1)"

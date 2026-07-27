@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,12 +31,18 @@ func defaultKubeconfigPath() string {
 	return clientcmd.NewDefaultClientConfigLoadingRules().GetDefaultFilename()
 }
 
-func defaultStatePath(contextName string) string {
-	return filepath.Join(mustHomeDir(), ".kube", "kubeconfig-proxy", safeFileName(contextName)+".yaml")
+func defaultStatePath(contextName string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("detect home dir: %w", err)
+	}
+	return filepath.Join(home, ".kube", "kubeconfig-proxy", safeFileName(contextName)+".yaml"), nil
 }
 
 func safeFileName(value string) string {
-	return strings.Map(func(r rune) rune {
+	const maxReadablePrefix = 80
+
+	safe := strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z':
 			return r
@@ -49,6 +56,19 @@ func safeFileName(value string) string {
 			return '_'
 		}
 	}, value)
+	changed := safe != value
+	if len(safe) > maxReadablePrefix {
+		safe = safe[:maxReadablePrefix]
+		changed = true
+	}
+	if !changed {
+		return safe
+	}
+	if safe == "" {
+		safe = "context"
+	}
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%s-%x", safe, sum[:6])
 }
 
 func defaultExecCommand() string {
@@ -57,14 +77,6 @@ func defaultExecCommand() string {
 		return "kubeconfig-proxy"
 	}
 	return path
-}
-
-func mustHomeDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		panic(fmt.Sprintf("detect home dir: %v", err))
-	}
-	return home
 }
 
 func durationLogValue(value time.Duration) string {

@@ -66,14 +66,10 @@ func (p *Proxy) doOnce(ctx context.Context, target Target, original *http.Reques
 		requestBody = bytes.NewReader(body)
 	}
 
-	request, err := http.NewRequestWithContext(requestCtx, original.Method, upstreamURL.String(), requestBody) // #nosec G704 -- upstream URL is built from a selected kubeconfig target by design.
+	request, err := newUpstreamRequest(requestCtx, target, original, upstreamURL, requestBody)
 	if err != nil {
 		return upstreamResponse{target: target, err: err}
 	}
-	copyHeaders(request.Header, original.Header)
-	request.Header.Del("Authorization")
-	request.Header.Del("Accept-Encoding")
-	request.Host = target.Host.Host
 
 	response, err := target.Client.Do(request) // #nosec G704 -- proxying requests to selected kubeconfig targets is the purpose of this package.
 	if err != nil {
@@ -81,7 +77,7 @@ func (p *Proxy) doOnce(ctx context.Context, target Target, original *http.Reques
 	}
 	defer response.Body.Close()
 
-	responseBody, err := io.ReadAll(response.Body)
+	responseBody, err := readLimitedBody(response.Body, maxUpstreamResponseBodyBytes, "upstream response body")
 	if err != nil {
 		return upstreamResponse{target: target, err: err}
 	}
@@ -92,6 +88,18 @@ func (p *Proxy) doOnce(ctx context.Context, target Target, original *http.Reques
 		header: response.Header.Clone(),
 		body:   responseBody,
 	}
+}
+
+func newUpstreamRequest(ctx context.Context, target Target, original *http.Request, upstreamURL *url.URL, body io.Reader) (*http.Request, error) {
+	request, err := http.NewRequestWithContext(ctx, original.Method, upstreamURL.String(), body) // #nosec G704 -- upstream URL is built from a selected kubeconfig target by design.
+	if err != nil {
+		return nil, err
+	}
+	copyHeaders(request.Header, original.Header)
+	request.Header.Del("Authorization")
+	request.Header.Del("Accept-Encoding")
+	request.Host = target.Host.Host
+	return request, nil
 }
 
 func shouldRetry(response upstreamResponse) bool {

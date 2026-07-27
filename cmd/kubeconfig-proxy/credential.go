@@ -17,11 +17,17 @@ import (
 	proxystate "github.com/IMMORTALxJO/kubeconfig-proxy/internal/state"
 )
 
-var newDetachedServeCommand = func(executable, statePath string) *exec.Cmd {
+type detachedServeCommandFactory func(executable, statePath string) *exec.Cmd
+
+func newDetachedServeCommand(executable, statePath string) *exec.Cmd {
 	return exec.Command(executable, "serve", "--state", statePath) // #nosec G204 -- the CLI starts its own executable with an explicit local state path.
 }
 
 func runCredential(args []string) error {
+	return runCredentialWithCommandFactory(args, newDetachedServeCommand)
+}
+
+func runCredentialWithCommandFactory(args []string, commandFactory detachedServeCommandFactory) error {
 	flags := flag.NewFlagSet("kubeconfig-proxy credential", flag.ContinueOnError)
 	statePath := flags.String("state", "", "state file path")
 	if err := flags.Parse(args); err != nil {
@@ -37,20 +43,17 @@ func runCredential(args []string) error {
 	}
 	defer unlock()
 
-	profile, err := proxystate.Load(*statePath)
+	runtime, err := proxystate.LoadRuntime(*statePath)
 	if err != nil {
 		return err
 	}
-	proxyTTL, err := profile.ProxyTTLDuration()
-	if err != nil {
-		return err
-	}
+	profile := runtime.Profile
 	client, err := profileHTTPClient(profile)
 	if err != nil {
 		return err
 	}
 	if checkReady(client, profile) != nil {
-		if err := startDetachedServe(*statePath, profile.LogsEnabled); err != nil {
+		if err := startDetachedServe(*statePath, profile.LogsEnabled, commandFactory); err != nil {
 			return err
 		}
 		if err := waitReady(client, profile, 10*time.Second); err != nil {
@@ -58,7 +61,7 @@ func runCredential(args []string) error {
 		}
 	}
 
-	return writeExecCredential(os.Stdout, profile.BearerToken, execCredentialExpiration(time.Now(), proxyTTL))
+	return writeExecCredential(os.Stdout, profile.BearerToken, execCredentialExpiration(time.Now(), runtime.ProxyTTL))
 }
 
 func lockState(statePath string) (func(), error) {
@@ -126,7 +129,7 @@ func profileHTTPClient(profile *proxystate.Profile) (*http.Client, error) {
 	}, nil
 }
 
-func startDetachedServe(statePath string, logsEnabled bool) error {
+func startDetachedServe(statePath string, logsEnabled bool, commandFactory detachedServeCommandFactory) error {
 	executable, err := os.Executable()
 	if err != nil {
 		return err
@@ -150,7 +153,7 @@ func startDetachedServe(statePath string, logsEnabled bool) error {
 		stderr = logFile
 	}
 
-	cmd := newDetachedServeCommand(executable, statePath)
+	cmd := commandFactory(executable, statePath)
 	cmd.Stdin = nullFile
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -158,7 +161,7 @@ func startDetachedServe(statePath string, logsEnabled bool) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	return nil
+	return cmd.Process.Release()
 }
 
 func writeExecCredential(w io.Writer, token string, expiration *time.Time) error {

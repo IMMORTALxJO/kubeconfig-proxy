@@ -38,7 +38,22 @@ type ProxyOptions struct {
 	ReadOnly         bool   `json:"readOnly"`
 }
 
+type RuntimeProfile struct {
+	Profile        *Profile
+	ProxyTTL       time.Duration
+	RequestTimeout time.Duration
+	RetryBackoff   time.Duration
+}
+
 func Load(path string) (*Profile, error) {
+	runtime, err := LoadRuntime(path)
+	if err != nil {
+		return nil, err
+	}
+	return runtime.Profile, nil
+}
+
+func LoadRuntime(path string) (*RuntimeProfile, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- state path is an explicit local CLI input or a path recorded in the generated kubeconfig.
 	if err != nil {
 		return nil, err
@@ -47,10 +62,11 @@ func Load(path string) (*Profile, error) {
 	if err := yaml.Unmarshal(data, &profile); err != nil {
 		return nil, fmt.Errorf("parse state file %s: %w", path, err)
 	}
-	if err := profile.Validate(); err != nil {
+	runtime, err := profile.validatedRuntime()
+	if err != nil {
 		return nil, err
 	}
-	return &profile, nil
+	return runtime, nil
 }
 
 func Save(path string, profile *Profile) error {
@@ -87,13 +103,47 @@ func Save(path string, profile *Profile) error {
 }
 
 func (p *Profile) Validate() error {
+	_, err := p.validatedRuntime()
+	return err
+}
+
+func (p *Profile) validatedRuntime() (*RuntimeProfile, error) {
 	if p.Version != Version {
-		return fmt.Errorf("unsupported state version %d", p.Version)
+		return nil, fmt.Errorf("unsupported state version %d", p.Version)
 	}
 	if err := p.validateRequiredFields(); err != nil {
-		return err
+		return nil, err
 	}
-	return p.validateOptions()
+	proxyTTL, err := parseDuration("proxyTTL", p.ProxyTTL)
+	if err != nil {
+		return nil, err
+	}
+	requestTimeout, err := parseDuration("options.requestTimeout", p.Options.RequestTimeout)
+	if err != nil {
+		return nil, err
+	}
+	retryBackoff, err := parseDuration("options.retryBackoff", p.Options.RetryBackoff)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateNonNegativeDuration("proxyTTL", proxyTTL); err != nil {
+		return nil, err
+	}
+	if err := validateNonNegativeDuration("options.requestTimeout", requestTimeout); err != nil {
+		return nil, err
+	}
+	if p.Options.Retries < 0 {
+		return nil, fmt.Errorf("options.retries must be greater than or equal to 0")
+	}
+	if err := validateNonNegativeDuration("options.retryBackoff", retryBackoff); err != nil {
+		return nil, err
+	}
+	return &RuntimeProfile{
+		Profile:        p,
+		ProxyTTL:       proxyTTL,
+		RequestTimeout: requestTimeout,
+		RetryBackoff:   retryBackoff,
+	}, nil
 }
 
 func (p *Profile) validateRequiredFields() error {
@@ -117,32 +167,21 @@ func (p *Profile) validateRequiredFields() error {
 	if len(p.Contexts) == 0 {
 		return fmt.Errorf("state contexts are required")
 	}
+	seenContexts := make(map[string]struct{}, len(p.Contexts))
+	primaryFound := false
+	for _, contextName := range p.Contexts {
+		if _, ok := seenContexts[contextName]; ok {
+			return fmt.Errorf("state context %q is configured more than once", contextName)
+		}
+		seenContexts[contextName] = struct{}{}
+		if contextName == p.PrimaryContext {
+			primaryFound = true
+		}
+	}
+	if !primaryFound {
+		return fmt.Errorf("state primaryContext %q is not included in contexts", p.PrimaryContext)
+	}
 	return nil
-}
-
-func (p *Profile) validateOptions() error {
-	proxyTTL, err := p.ProxyTTLDuration()
-	if err != nil {
-		return err
-	}
-	requestTimeout, err := p.RequestTimeoutDuration()
-	if err != nil {
-		return err
-	}
-	retryBackoff, err := p.RetryBackoffDuration()
-	if err != nil {
-		return err
-	}
-	if err := validateNonNegativeDuration("proxyTTL", proxyTTL); err != nil {
-		return err
-	}
-	if err := validateNonNegativeDuration("options.requestTimeout", requestTimeout); err != nil {
-		return err
-	}
-	if p.Options.Retries < 0 {
-		return fmt.Errorf("options.retries must be greater than or equal to 0")
-	}
-	return validateNonNegativeDuration("options.retryBackoff", retryBackoff)
 }
 
 func validateNonNegativeDuration(name string, duration time.Duration) error {
@@ -150,18 +189,6 @@ func validateNonNegativeDuration(name string, duration time.Duration) error {
 		return fmt.Errorf("%s must be greater than or equal to 0", name)
 	}
 	return nil
-}
-
-func (p *Profile) ProxyTTLDuration() (time.Duration, error) {
-	return parseDuration("proxyTTL", p.ProxyTTL)
-}
-
-func (p *Profile) RequestTimeoutDuration() (time.Duration, error) {
-	return parseDuration("options.requestTimeout", p.Options.RequestTimeout)
-}
-
-func (p *Profile) RetryBackoffDuration() (time.Duration, error) {
-	return parseDuration("options.retryBackoff", p.Options.RetryBackoff)
 }
 
 func parseDuration(name, value string) (time.Duration, error) {

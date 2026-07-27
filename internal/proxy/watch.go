@@ -153,7 +153,7 @@ func (p *Proxy) openWatchStream(ctx context.Context, original *http.Request, tar
 
 	upstreamURL := buildUpstreamURL(target.Host, original.URL)
 	applyAggregateResourceVersion(upstreamURL, target.Name)
-	request, err := http.NewRequestWithContext(requestCtx, original.Method, upstreamURL.String(), http.NoBody) // #nosec G704 -- upstream URL is built from a selected kubeconfig target by design.
+	request, err := newUpstreamRequest(requestCtx, target, original, upstreamURL, http.NoBody)
 	if err != nil {
 		cancel()
 		if timer != nil {
@@ -161,11 +161,6 @@ func (p *Proxy) openWatchStream(ctx context.Context, original *http.Request, tar
 		}
 		return failedWatchOpen(target, err)
 	}
-	copyHeaders(request.Header, original.Header)
-	request.Header.Del("Authorization")
-	request.Header.Del("Accept-Encoding")
-	request.Host = target.Host.Host
-
 	response, err := target.Client.Do(request) // #nosec G704 -- proxying requests to selected kubeconfig targets is the purpose of this package.
 	if err != nil {
 		if requestCtx.Err() != nil && ctx.Err() == nil {
@@ -184,7 +179,7 @@ func (p *Proxy) openWatchStream(ctx context.Context, original *http.Request, tar
 	}
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		body, readErr := io.ReadAll(response.Body)
+		body, readErr := readLimitedBody(response.Body, maxUpstreamResponseBodyBytes, "upstream watch error body")
 		_ = response.Body.Close()
 		cancel()
 		if readErr != nil {

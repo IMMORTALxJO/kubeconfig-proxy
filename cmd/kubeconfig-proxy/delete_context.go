@@ -52,7 +52,11 @@ func runDeleteContext(args []string) error {
 		statePaths = kubeconfig.AppendUniquePaths(statePaths, absoluteStatePath)
 	}
 	if len(statePaths) == 0 {
-		statePaths = append(statePaths, defaultStatePath(contextName))
+		defaultPath, err := defaultStatePath(contextName)
+		if err != nil {
+			return err
+		}
+		statePaths = append(statePaths, defaultPath)
 	}
 	if err := removeStateArtifacts(statePaths); err != nil {
 		return err

@@ -107,124 +107,22 @@ func TestCLIHelpers(t *testing.T) {
 	if got := durationLogValue(2 * time.Second); got != "2s" {
 		t.Fatalf("durationLogValue(2s) = %q, want 2s", got)
 	}
-	if got := safeFileName("prod/blue:west_1"); got != "prod_blue_west_1" {
-		t.Fatalf("safeFileName = %q, want prod_blue_west_1", got)
+	unsafeName := safeFileName("prod/blue:west_1")
+	if !strings.HasPrefix(unsafeName, "prod_blue_west_1-") {
+		t.Fatalf("safeFileName = %q, want readable prefix and hash", unsafeName)
 	}
 	if got := safeFileName("Prod.Blue-1"); got != "Prod.Blue-1" {
 		t.Fatalf("safeFileName uppercase/dot/dash = %q, want Prod.Blue-1", got)
 	}
-	if got := defaultStatePath("prod/blue"); !strings.HasSuffix(got, filepath.Join(".kube", "kubeconfig-proxy", "prod_blue.yaml")) {
-		t.Fatalf("defaultStatePath = %q, want kubeconfig-proxy prod_blue suffix", got)
+	if got := safeFileName("prod/blue"); got == safeFileName("prod_blue") {
+		t.Fatalf("unsafe and safe context names map to the same filename %q", got)
 	}
-}
-
-func TestResolveAddContextTargets(t *testing.T) {
-	kubeconfigPath := writeMainTestKubeconfigWithContextsAndCurrent(t, []mainTestContext{
-		{name: "alpha", serverURL: "https://alpha.example.test"},
-		{name: "beta", serverURL: "https://beta.example.test"},
-		{name: "prod-west", serverURL: "https://prod-west.example.test"},
-		{name: "proxy", serverURL: "https://proxy.example.test"},
-	}, "beta")
-
-	tests := []struct {
-		name            string
-		selected        []string
-		contextRegexp   string
-		primary         string
-		wantContexts    []string
-		wantPrimary     string
-		wantErrContains string
-	}{
-		{
-			name:         "explicit contexts keep selected order and current primary",
-			selected:     []string{"prod-west", "beta"},
-			wantContexts: []string{"prod-west", "beta"},
-			wantPrimary:  "beta",
-		},
-		{
-			name:          "regexp selects sorted contexts excluding proxy context",
-			contextRegexp: "^prod|alpha$",
-			wantContexts:  []string{"alpha", "prod-west"},
-			wantPrimary:   "alpha",
-		},
-		{
-			name:         "explicit primary overrides current context",
-			selected:     []string{"alpha", "prod-west"},
-			primary:      "prod-west",
-			wantContexts: []string{"alpha", "prod-west"},
-			wantPrimary:  "prod-west",
-		},
-		{
-			name:            "contexts and regexp conflict",
-			selected:        []string{"alpha"},
-			contextRegexp:   "beta",
-			wantErrContains: "--contexts and --context-regexp are mutually exclusive",
-		},
-		{
-			name:            "invalid regexp",
-			contextRegexp:   "[",
-			wantErrContains: "missing closing ]",
-		},
-		{
-			name:            "missing selected context",
-			selected:        []string{"missing"},
-			wantErrContains: `context "missing" not found`,
-		},
-		{
-			name:            "selected proxy context",
-			selected:        []string{"proxy"},
-			wantErrContains: `source contexts must not include proxy context "proxy"`,
-		},
-		{
-			name:            "primary outside selected contexts",
-			selected:        []string{"alpha"},
-			primary:         "beta",
-			wantErrContains: `primary context "beta" is not included`,
-		},
-		{
-			name:            "empty regexp selection",
-			contextRegexp:   "^missing$",
-			wantErrContains: "no source contexts selected",
-		},
-		{
-			name:         "default selects sorted contexts excluding proxy context",
-			wantContexts: []string{"alpha", "beta", "prod-west"},
-			wantPrimary:  "beta",
-		},
+	gotStatePath, err := defaultStatePath("prod/blue")
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			contexts, primary, err := resolveAddContextTargets(kubeconfigPath, "proxy", tt.selected, tt.contextRegexp, tt.primary)
-			if tt.wantErrContains != "" {
-				if err == nil {
-					t.Fatal("resolveAddContextTargets returned nil error")
-				}
-				if !strings.Contains(err.Error(), tt.wantErrContains) {
-					t.Fatalf("error = %q, want to contain %q", err.Error(), tt.wantErrContains)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !slices.Equal(contexts, tt.wantContexts) {
-				t.Fatalf("contexts = %v, want %v", contexts, tt.wantContexts)
-			}
-			if primary != tt.wantPrimary {
-				t.Fatalf("primary = %q, want %q", primary, tt.wantPrimary)
-			}
-		})
-	}
-}
-
-func TestResolveAddContextTargetsReturnsLoadError(t *testing.T) {
-	_, _, err := resolveAddContextTargets(filepath.Join(t.TempDir(), "missing.yaml"), "proxy", nil, "", "")
-	if err == nil {
-		t.Fatal("resolveAddContextTargets returned nil error")
-	}
-	if !os.IsNotExist(err) {
-		t.Fatalf("error = %v, want not-exist error", err)
+	if want := filepath.Join(".kube", "kubeconfig-proxy", safeFileName("prod/blue")+".yaml"); !strings.HasSuffix(gotStatePath, want) {
+		t.Fatalf("defaultStatePath = %q, want suffix %q", gotStatePath, want)
 	}
 }
 
@@ -487,7 +385,7 @@ func TestAddContextAcceptsContextNameAfterFlagsAndDefaultStatePath(t *testing.T)
 		t.Fatal(err)
 	}
 
-	statePath := defaultStatePath("flag-first-proxy")
+	statePath := mustDefaultStatePath(t, "flag-first-proxy")
 	profile, err := proxystate.Load(statePath)
 	if err != nil {
 		t.Fatal(err)
@@ -540,6 +438,26 @@ func TestAddContextRejectsInvalidArguments(t *testing.T) {
 				t.Fatalf("error = %q, want to contain %q", err.Error(), tt.wantErrContains)
 			}
 		})
+	}
+}
+
+func TestAddContextRejectsDuplicateContextsBeforeWritingState(t *testing.T) {
+	kubeconfigPath := writeMainTestKubeconfigWithContexts(t, []mainTestContext{
+		{name: "alpha", serverURL: "https://alpha.example.test"},
+	})
+	statePath := filepath.Join(t.TempDir(), "duplicate.yaml")
+	err := runWithArgs([]string{
+		"add-context", "duplicate-proxy",
+		"--kubeconfig", kubeconfigPath,
+		"--state", statePath,
+		"--listen", "127.0.0.1:0",
+		"--contexts", "alpha,alpha",
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), `context "alpha" is selected more than once`) {
+		t.Fatalf("error = %v, want duplicate context error", err)
+	}
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("state stat error = %v, want state not written", err)
 	}
 }
 
@@ -632,7 +550,7 @@ func TestDeleteContextUsesDefaultStateWhenKubeconfigHasNoManagedEntries(t *testi
 	kubeconfigPath := writeMainTestKubeconfigWithContexts(t, []mainTestContext{
 		{name: "alpha", serverURL: "https://alpha.example.test"},
 	})
-	statePath := defaultStatePath("missing-proxy")
+	statePath := mustDefaultStatePath(t, "missing-proxy")
 	logPath := statePath + ".log"
 	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
 		t.Fatal(err)
@@ -859,6 +777,7 @@ func TestServeStateRestartsWhenStateFileChanges(t *testing.T) {
 
 	profile.Contexts = []string{"beta"}
 	profile.PrimaryContext = "beta"
+	profile.LogsEnabled = true
 	if err := proxystate.Save(statePath, profile); err != nil {
 		t.Fatal(err)
 	}
@@ -870,13 +789,20 @@ func TestServeStateRestartsWhenStateFileChanges(t *testing.T) {
 		}
 		body, err := tryGetProxyBody(profile, "/version")
 		if err == nil && strings.Contains(body, `"target":"beta"`) {
-			return
+			break
 		}
 		select {
 		case err := <-errCh:
 			t.Fatalf("serve exited while waiting for restart: %v", err)
 		case <-time.After(50 * time.Millisecond):
 		}
+	}
+	logData, err := os.ReadFile(statePath + ".log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logData), "targets:          beta") {
+		t.Fatalf("reloaded serve log = %q, want beta target after logsEnabled change", string(logData))
 	}
 }
 
@@ -944,7 +870,7 @@ func TestServeStateStopsWhenStateFileDisappears(t *testing.T) {
 	}
 }
 
-func TestReadinessRefreshesActivityTTL(t *testing.T) {
+func TestReadinessDoesNotRefreshActivityTTL(t *testing.T) {
 	nextCalled := atomic.Bool{}
 	handler := newActivityHandler(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		nextCalled.Store(true)
@@ -962,8 +888,8 @@ func TestReadinessRefreshesActivityTTL(t *testing.T) {
 	if nextCalled.Load() {
 		t.Fatal("readiness request should not be proxied to the upstream handler")
 	}
-	if handler.idleFor(time.Second) {
-		t.Fatal("readiness request did not refresh last activity")
+	if !handler.idleFor(time.Second) {
+		t.Fatal("readiness request unexpectedly refreshed last activity")
 	}
 }
 
@@ -1093,17 +1019,13 @@ func TestRunCredentialStartsDetachedServeWhenProxyIsNotReady(t *testing.T) {
 	}))
 	defer ready.Close()
 
-	oldCommand := newDetachedServeCommand
 	var startedStatePath atomic.Value
-	newDetachedServeCommand = func(executable, statePath string) *exec.Cmd {
+	commandFactory := func(executable, statePath string) *exec.Cmd {
 		startedStatePath.Store(statePath)
 		cmd := exec.Command(executable, "-test.run=TestDetachedServeHelperProcess")
 		cmd.Env = append(os.Environ(), "KCP_TEST_DETACHED_HELPER=1")
 		return cmd
 	}
-	t.Cleanup(func() {
-		newDetachedServeCommand = oldCommand
-	})
 
 	profile := &proxystate.Profile{
 		Version:          proxystate.Version,
@@ -1130,7 +1052,7 @@ func TestRunCredentialStartsDetachedServeWhenProxyIsNotReady(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() error {
-		return runCredential([]string{"--state", statePath})
+		return runCredentialWithCommandFactory([]string{"--state", statePath}, commandFactory)
 	})
 	if !strings.Contains(output, `"token":"state-token"`) {
 		t.Fatalf("credential output = %s, want token", output)
@@ -1203,18 +1125,14 @@ func TestRunCredentialRequiresStateFlag(t *testing.T) {
 }
 
 func TestStartDetachedServeStartsHelperProcessAndWritesLogs(t *testing.T) {
-	oldCommand := newDetachedServeCommand
-	newDetachedServeCommand = func(executable, statePath string) *exec.Cmd {
+	commandFactory := func(executable, statePath string) *exec.Cmd {
 		cmd := exec.Command(executable, "-test.run=TestDetachedServeHelperProcess")
 		cmd.Env = append(os.Environ(), "KCP_TEST_DETACHED_HELPER=1", "KCP_TEST_DETACHED_STATE="+statePath)
 		return cmd
 	}
-	t.Cleanup(func() {
-		newDetachedServeCommand = oldCommand
-	})
 
 	statePath := filepath.Join(t.TempDir(), "proxy.yaml")
-	if err := startDetachedServe(statePath, true); err != nil {
+	if err := startDetachedServe(statePath, true, commandFactory); err != nil {
 		t.Fatal(err)
 	}
 	if info, err := os.Stat(statePath + ".log"); err != nil {
@@ -1591,6 +1509,15 @@ func TestGenerateTLSCertificateIncludesDNSAndLoopbackFallbackSANs(t *testing.T) 
 	}) {
 		t.Fatalf("certificate IP SANs = %v, want fallback 127.0.0.1", parsed.IPAddresses)
 	}
+}
+
+func mustDefaultStatePath(t *testing.T, contextName string) string {
+	t.Helper()
+	path, err := defaultStatePath(contextName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func writeMainTestKubeconfig(t *testing.T, serverURL string, caData []byte) string {

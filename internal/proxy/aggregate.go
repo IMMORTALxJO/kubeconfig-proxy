@@ -11,6 +11,11 @@ import (
 )
 
 func (p *Proxy) aggregateList(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("limit") != "" || r.URL.Query().Get(aggregateContinueQueryKey) != "" {
+		p.aggregatePaginatedList(w, r)
+		return
+	}
+
 	responses := p.doAll(r.Context(), r, nil)
 	okResponses := make([]upstreamResponse, 0, len(responses))
 	for _, response := range responses {
@@ -37,8 +42,12 @@ func (p *Proxy) aggregateList(w http.ResponseWriter, r *http.Request) {
 }
 
 func mergeLists(responses []upstreamResponse) ([]byte, error) {
+	return mergeListsWithResourceVersions(responses, nil)
+}
+
+func mergeListsWithResourceVersions(responses []upstreamResponse, initialResourceVersions map[string]string) ([]byte, error) {
 	var merged map[string]any
-	resourceVersions := map[string]string{}
+	resourceVersions := cloneStringMap(initialResourceVersions)
 	for _, response := range responses {
 		var payload map[string]any
 		if err := json.Unmarshal(response.body, &payload); err != nil {
@@ -63,6 +72,14 @@ func mergeLists(responses []upstreamResponse) ([]byte, error) {
 		metadata["resourceVersion"] = encodeAggregateResourceVersion(resourceVersions)
 	}
 	return json.Marshal(merged)
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	cloned := make(map[string]string, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 // entryMetadata returns the metadata map of a list item.
