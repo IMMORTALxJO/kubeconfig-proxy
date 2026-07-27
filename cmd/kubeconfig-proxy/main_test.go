@@ -231,7 +231,7 @@ func TestResolveAddContextTargetsReturnsLoadError(t *testing.T) {
 }
 
 func TestAddContextWritesStateAndKubeconfigExecContext(t *testing.T) {
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer upstream.Close()
@@ -318,7 +318,7 @@ func TestAddContextWritesStateAndKubeconfigExecContext(t *testing.T) {
 }
 
 func TestAddContextWritesLogsEnabledState(t *testing.T) {
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer upstream.Close()
@@ -347,7 +347,7 @@ func TestAddContextWritesLogsEnabledState(t *testing.T) {
 }
 
 func TestAddContextWritesReadOnlyState(t *testing.T) {
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer upstream.Close()
@@ -376,7 +376,7 @@ func TestAddContextWritesReadOnlyState(t *testing.T) {
 }
 
 func TestAddContextResolvesExplicitZeroListenPort(t *testing.T) {
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer upstream.Close()
@@ -424,7 +424,7 @@ func TestAddContextResolvesExplicitZeroListenPort(t *testing.T) {
 
 func TestAddContextAcceptsContextNameAfterFlagsAndDefaultStatePath(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer upstream.Close()
@@ -498,7 +498,7 @@ func TestAddContextRejectsInvalidArguments(t *testing.T) {
 }
 
 func TestDeleteContextRemovesKubeconfigAndStateArtifacts(t *testing.T) {
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer upstream.Close()
@@ -686,7 +686,7 @@ func TestResolveAddContextListenAddrRejectsInvalidAddress(t *testing.T) {
 }
 
 func TestServeStateStopsAfterTTLWithoutRequests(t *testing.T) {
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"gitVersion":"v1.test"}`))
 	}))
 	defer upstream.Close()
@@ -748,11 +748,11 @@ func TestServeStateStopsAfterTTLWithoutRequests(t *testing.T) {
 }
 
 func TestServeStateRestartsWhenStateFileChanges(t *testing.T) {
-	alpha := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	alpha := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"target":"alpha"}`))
 	}))
 	defer alpha.Close()
-	beta := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	beta := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"target":"beta"}`))
 	}))
 	defer beta.Close()
@@ -835,7 +835,7 @@ func TestServeStateRestartsWhenStateFileChanges(t *testing.T) {
 }
 
 func TestServeStateStopsWhenStateFileDisappears(t *testing.T) {
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"gitVersion":"v1.test"}`))
 	}))
 	defer upstream.Close()
@@ -900,7 +900,7 @@ func TestServeStateStopsWhenStateFileDisappears(t *testing.T) {
 
 func TestReadinessRefreshesActivityTTL(t *testing.T) {
 	nextCalled := atomic.Bool{}
-	handler := newActivityHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := newActivityHandler(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		nextCalled.Store(true)
 	}), "state-token")
 	handler.lastActivity.Store(time.Now().Add(-time.Minute).UnixNano())
@@ -923,7 +923,7 @@ func TestReadinessRefreshesActivityTTL(t *testing.T) {
 
 func TestReadinessRejectsMissingBearerToken(t *testing.T) {
 	nextCalled := atomic.Bool{}
-	handler := newActivityHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := newActivityHandler(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		nextCalled.Store(true)
 	}), "state-token")
 
@@ -948,7 +948,7 @@ func TestReadinessRejectsMissingBearerToken(t *testing.T) {
 func TestActivityHandlerIsBusyWhileRequestInFlight(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{})
-	handler := newActivityHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := newActivityHandler(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		close(started)
 		<-release
 	}), "state-token")
@@ -1042,7 +1042,7 @@ func TestRunCredentialStartsDetachedServeWhenProxyIsNotReady(t *testing.T) {
 
 	token := "state-token"
 	var readinessChecks atomic.Int32
-	ready := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ready := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if readinessChecks.Add(1) == 1 {
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
@@ -1103,7 +1103,7 @@ func TestRunCredentialStartsDetachedServeWhenProxyIsNotReady(t *testing.T) {
 
 func TestRunWithArgsDispatchesCredential(t *testing.T) {
 	token := "state-token"
-	ready := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ready := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
 	}))
 	defer ready.Close()
@@ -1243,7 +1243,7 @@ options:
 }
 
 func TestCheckReadyReturnsStatusError(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "not ready", http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
@@ -1263,7 +1263,7 @@ func TestCheckReadyReturnsStatusError(t *testing.T) {
 }
 
 func TestWaitReadyTimesOut(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "not ready", http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
@@ -1359,7 +1359,7 @@ func TestRunServeStateRejectsInvalidArgs(t *testing.T) {
 }
 
 func TestLoadServeRuntimeRejectsInvalidTLSKeyPair(t *testing.T) {
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"gitVersion":"v1.test"}`))
 	}))
 	defer upstream.Close()
