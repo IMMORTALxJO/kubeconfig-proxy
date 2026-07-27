@@ -403,7 +403,7 @@ func (p *Proxy) targetForExistingObject(ctx context.Context, original *http.Requ
 	return Target{}, false
 }
 
-func (p *Proxy) streamSingle(w http.ResponseWriter, r *http.Request, target Target) {
+func (*Proxy) streamSingle(w http.ResponseWriter, r *http.Request, target Target) {
 	reverseProxy := &httputil.ReverseProxy{
 		Transport:     target.Client.Transport,
 		FlushInterval: -1,
