@@ -29,8 +29,6 @@ help:
 	@echo "Available targets:"
 	@echo "  fmt          Format Go and YAML files"
 	@echo "  fmt-check    Verify Go and YAML formatting"
-	@echo "  yamlfmt      Format YAML files"
-	@echo "  yamlfmt-check Verify YAML formatting"
 	@echo "  vet          Run go vet"
 	@echo "  staticcheck  Run Staticcheck"
 	@echo "  actionlint   Run GitHub Actions workflow linting"
@@ -45,16 +43,10 @@ help:
 
 fmt:
 	gofmt -w $(GO_FILES)
-	$(MAKE) yamlfmt
+	$(GOTOOLCHAIN_ENV) $(GO) run github.com/google/yamlfmt/cmd/yamlfmt@$(YAMLFMT_VERSION) $(YAMLFMT_FLAGS) $(YAML_FILES)
 
 fmt-check:
 	test -z "$$(gofmt -l $(GO_FILES))"
-	$(MAKE) yamlfmt-check
-
-yamlfmt:
-	$(GOTOOLCHAIN_ENV) $(GO) run github.com/google/yamlfmt/cmd/yamlfmt@$(YAMLFMT_VERSION) $(YAMLFMT_FLAGS) $(YAML_FILES)
-
-yamlfmt-check:
 	$(GOTOOLCHAIN_ENV) $(GO) run github.com/google/yamlfmt/cmd/yamlfmt@$(YAMLFMT_VERSION) $(YAMLFMT_FLAGS) -lint $(YAML_FILES)
 
 vet:
