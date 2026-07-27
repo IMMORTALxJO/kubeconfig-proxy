@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -1288,6 +1289,28 @@ func TestProfileHTTPClientRejectsInvalidCertificate(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "state TLS certificate is not valid PEM") {
 		t.Fatalf("error = %q, want invalid PEM error", err.Error())
+	}
+}
+
+func TestProfileHTTPClientRequiresTLS12(t *testing.T) {
+	_, certPEM, _, err := generateTLSCertificate("127.0.0.1:9443")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client, err := profileHTTPClient(&proxystate.Profile{TLS: proxystate.TLS{CertPEM: string(certPEM)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", client.Transport)
+	}
+	if transport.TLSClientConfig == nil {
+		t.Fatal("TLSClientConfig is nil")
+	}
+	if got := transport.TLSClientConfig.MinVersion; got != tls.VersionTLS12 {
+		t.Fatalf("MinVersion = %d, want %d", got, tls.VersionTLS12)
 	}
 }
 
