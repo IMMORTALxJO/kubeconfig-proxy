@@ -120,7 +120,8 @@ func profileHTTPClient(profile *proxystate.Profile) (*http.Client, error) {
 	return &http.Client{
 		Timeout: 2 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{
-			RootCAs: roots,
+			RootCAs:    roots,
+			MinVersion: tls.VersionTLS12,
 		}},
 	}, nil
 }
