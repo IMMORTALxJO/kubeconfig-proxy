@@ -245,7 +245,7 @@ func (p *Proxy) openWatchStream(ctx context.Context, original *http.Request, tar
 
 	upstreamURL := buildUpstreamURL(target.Host, original.URL)
 	applyAggregateResourceVersion(upstreamURL, target.Name)
-	request, err := http.NewRequestWithContext(requestCtx, original.Method, upstreamURL.String(), nil) // #nosec G704 -- upstream URL is built from a selected kubeconfig target by design.
+	request, err := http.NewRequestWithContext(requestCtx, original.Method, upstreamURL.String(), http.NoBody) // #nosec G704 -- upstream URL is built from a selected kubeconfig target by design.
 	if err != nil {
 		cancel()
 		if timer != nil {
