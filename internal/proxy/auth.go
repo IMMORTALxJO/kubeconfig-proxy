@@ -6,10 +6,6 @@ import (
 	"strings"
 )
 
-func (p *Proxy) authorized(r *http.Request) bool {
-	return AuthorizedWithToken(r, p.options.BearerToken)
-}
-
 // AuthorizedWithToken reports whether r carries a matching "Bearer <token>" Authorization header.
 func AuthorizedWithToken(r *http.Request, token string) bool {
 	const prefix = "Bearer "

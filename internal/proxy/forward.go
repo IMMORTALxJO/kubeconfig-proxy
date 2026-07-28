@@ -39,23 +39,27 @@ func (p *Proxy) forwardSingle(w http.ResponseWriter, r *http.Request, target Tar
 }
 
 func (p *Proxy) targetForExistingObject(ctx context.Context, original *http.Request, objectPath string) (Target, bool) {
+	request := existingObjectRequest(ctx, original, objectPath)
 	for _, target := range p.targets {
-		objectURL := *original.URL
-		objectURL.Path = objectPath
-		objectURL.RawQuery = ""
-
-		request := original.Clone(ctx)
-		request.Method = http.MethodGet
-		request.URL = &objectURL
-		request.Body = nil
-		request.ContentLength = 0
-
 		response := p.do(ctx, target, request, nil)
 		if response.err == nil && response.status >= 200 && response.status < 300 {
-			return target, true
+			return response.target, true
 		}
 	}
 	return Target{}, false
+}
+
+func existingObjectRequest(ctx context.Context, original *http.Request, objectPath string) *http.Request {
+	objectURL := *original.URL
+	objectURL.Path = objectPath
+	objectURL.RawQuery = ""
+
+	request := original.Clone(ctx)
+	request.Method = http.MethodGet
+	request.URL = &objectURL
+	request.Body = nil
+	request.ContentLength = 0
+	return request
 }
 
 func (*Proxy) streamSingle(w http.ResponseWriter, r *http.Request, target Target) {

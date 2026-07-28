@@ -7,6 +7,7 @@ PKGS ?= ./...
 RACE_PKGS ?= ./internal/proxy
 COVER_PROFILE ?= coverage.out
 COVER_HTML ?= coverage.html
+COVER_PACKAGES ?= ./...
 
 BUILD_DIR ?= bin
 BINARY_NAME ?= kubeconfig-proxy
@@ -23,7 +24,7 @@ YAML_FILES := $(shell find . \( -path './.git' -o -path './vendor' -o -path './e
 SHELL_FILES := install.sh .codex/skills/test-kubeconfig-proxy/scripts/run.sh
 GOTOOLCHAIN_ENV := GOTOOLCHAIN=$(GO_TOOLCHAIN)
 
-.PHONY: help fmt fmt-check yamlfmt yamlfmt-check vet staticcheck actionlint shellcheck gosec vuln test race build check clean
+.PHONY: help fmt fmt-check yamlfmt yamlfmt-check vet staticcheck actionlint shellcheck gosec vuln test race build build-cover check clean
 
 help:
 	@echo "Available targets:"
@@ -38,6 +39,7 @@ help:
 	@echo "  test         Run tests"
 	@echo "  race         Run race tests"
 	@echo "  build        Build the CLI binary"
+	@echo "  build-cover  Build the CLI binary with coverage instrumentation"
 	@echo "  check        Run all CI checks"
 	@echo "  clean        Remove local build artifacts"
 
@@ -77,6 +79,10 @@ race:
 build:
 	mkdir -p $(BUILD_DIR)
 	$(GOTOOLCHAIN_ENV) $(GO) build -trimpath -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PACKAGE)
+
+build-cover:
+	mkdir -p $(BUILD_DIR)
+	$(GOTOOLCHAIN_ENV) $(GO) build -cover -covermode=atomic -coverpkg=$(COVER_PACKAGES) -trimpath -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PACKAGE)
 
 check: fmt-check vet staticcheck actionlint shellcheck gosec vuln test race build
 

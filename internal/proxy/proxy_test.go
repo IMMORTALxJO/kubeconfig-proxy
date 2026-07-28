@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -70,11 +71,27 @@ func TestNewWithOptionsValidatesInputs(t *testing.T) {
 			options:         Options{},
 			wantErrContains: "bearer token is required",
 		},
+		{
+			name:            "duplicate target",
+			targets:         []Target{target, target},
+			options:         Options{BearerToken: testBearerToken},
+			wantErrContains: `target "one" is configured more than once`,
+		},
+		{
+			name:            "primary target is not configured",
+			targets:         []Target{target},
+			options:         Options{BearerToken: testBearerToken},
+			wantErrContains: `primary target "missing" is not configured`,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewWithOptions(tt.targets, target, tt.options)
+			primary := target
+			if tt.name == "primary target is not configured" {
+				primary.Name = "missing"
+			}
+			_, err := NewWithOptions(tt.targets, primary, tt.options)
 			if err == nil {
 				t.Fatal("NewWithOptions returned nil error")
 			}
@@ -623,6 +640,155 @@ func TestAggregatesGzipListResponses(t *testing.T) {
 	}
 }
 
+func TestAggregatesPaginatedListAcrossTargets(t *testing.T) {
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": paginatedListHandler(t, "10", []string{"a1", "a2", "a3"}),
+		"two": paginatedListHandler(t, "20", []string{"b1", "b2"}),
+	})
+	defer cleanup()
+
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := collectPaginatedList(t, p, 2)
+	if result.pageCount != 3 {
+		t.Fatalf("page count = %d, want 3", result.pageCount)
+	}
+	if want := []string{"a1", "a2", "a3", "b1", "b2"}; !slices.Equal(result.names, want) {
+		t.Fatalf("names = %v, want %v", result.names, want)
+	}
+	if want := []string{"one", "one", "one", "two", "two"}; !slices.Equal(result.contexts, want) {
+		t.Fatalf("contexts = %v, want %v", result.contexts, want)
+	}
+	resourceVersions, ok := decodeAggregateResourceVersion(result.resourceVersion)
+	if !ok {
+		t.Fatalf("final resourceVersion = %q, want aggregate resource version", result.resourceVersion)
+	}
+	if want := map[string]string{"one": "10", "two": "20"}; !mapsEqual(resourceVersions, want) {
+		t.Fatalf("resourceVersions = %v, want %v", resourceVersions, want)
+	}
+}
+
+type paginatedListResult struct {
+	names           []string
+	contexts        []string
+	resourceVersion string
+	pageCount       int
+}
+
+func collectPaginatedList(t *testing.T, p *Proxy, limit int) paginatedListResult {
+	t.Helper()
+
+	var result paginatedListResult
+	var names []string
+	var contexts []string
+	continueToken := ""
+	for {
+		result.pageCount++
+		if result.pageCount > 4 {
+			t.Fatal("pagination did not terminate")
+		}
+		query := url.Values{"limit": []string{strconv.Itoa(limit)}}
+		if continueToken != "" {
+			query.Set("continue", continueToken)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/namespaces/default/pods?"+query.Encode(), http.NoBody)
+		rec := httptest.NewRecorder()
+		serveTestHTTP(p, rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("page %d status = %d, want %d; body=%s", result.pageCount, rec.Code, http.StatusOK, rec.Body.String())
+		}
+
+		var payload struct {
+			Metadata struct {
+				Continue        string `json:"continue"`
+				ResourceVersion string `json:"resourceVersion"`
+			} `json:"metadata"`
+			Items []struct {
+				Metadata struct {
+					Name   string            `json:"name"`
+					Labels map[string]string `json:"labels"`
+				} `json:"metadata"`
+			} `json:"items"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if len(payload.Items) > limit {
+			t.Fatalf("page %d returned %d items for global limit %d", result.pageCount, len(payload.Items), limit)
+		}
+		for _, item := range payload.Items {
+			names = append(names, item.Metadata.Name)
+			contexts = append(contexts, item.Metadata.Labels[sourceContextLabel])
+		}
+		continueToken = payload.Metadata.Continue
+		result.resourceVersion = payload.Metadata.ResourceVersion
+		if continueToken == "" {
+			break
+		}
+		if !strings.HasPrefix(continueToken, aggregateContinuePrefix) {
+			t.Fatalf("page %d continue token = %q, want aggregate token", result.pageCount, continueToken)
+		}
+	}
+	result.names = names
+	result.contexts = contexts
+	return result
+}
+
+func TestAggregatedListRejectsInvalidContinueTokens(t *testing.T) {
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": paginatedListHandler(t, "10", []string{"a1", "a2"}),
+	})
+	defer cleanup()
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mismatchedToken := encodeListCursor([]string{"other"}, "other", "", nil, "/api/v1/pods?")
+	for _, continueToken := range []string{"plain-upstream-token", mismatchedToken} {
+		query := url.Values{"limit": []string{"1"}, "continue": []string{continueToken}}
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/pods?"+query.Encode(), http.NoBody)
+		rec := httptest.NewRecorder()
+		serveTestHTTP(p, rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("continue %q status = %d, want %d; body=%s", continueToken, rec.Code, http.StatusBadRequest, rec.Body.String())
+		}
+	}
+
+	firstQuery := url.Values{"limit": []string{"1"}, "labelSelector": []string{"app=one"}}
+	firstReq := httptest.NewRequest(http.MethodGet, "/api/v1/pods?"+firstQuery.Encode(), http.NoBody)
+	firstRec := httptest.NewRecorder()
+	serveTestHTTP(p, firstRec, firstReq)
+	if firstRec.Code != http.StatusOK {
+		t.Fatalf("first page status = %d, want %d; body=%s", firstRec.Code, http.StatusOK, firstRec.Body.String())
+	}
+	var firstPage struct {
+		Metadata struct {
+			Continue string `json:"continue"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(firstRec.Body.Bytes(), &firstPage); err != nil {
+		t.Fatal(err)
+	}
+	if firstPage.Metadata.Continue == "" {
+		t.Fatal("first page continue token is empty")
+	}
+	changedQuery := url.Values{
+		"limit":         []string{"1"},
+		"labelSelector": []string{"app=two"},
+		"continue":      []string{firstPage.Metadata.Continue},
+	}
+	changedReq := httptest.NewRequest(http.MethodGet, "/api/v1/pods?"+changedQuery.Encode(), http.NoBody)
+	changedRec := httptest.NewRecorder()
+	serveTestHTTP(p, changedRec, changedReq)
+	if changedRec.Code != http.StatusBadRequest {
+		t.Fatalf("changed selector status = %d, want %d; body=%s", changedRec.Code, http.StatusBadRequest, changedRec.Body.String())
+	}
+}
+
 func TestAggregateWatchUsesPerTargetResourceVersions(t *testing.T) {
 	calls := &callRecorder{}
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
@@ -1155,6 +1321,27 @@ func TestFanOutRejectsUnreadableBody(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "read failed") {
 		t.Fatalf("body = %s, want read failed error", rec.Body.String())
+	}
+}
+
+func TestFanOutRejectsOversizedBodyBeforeUpstreamCalls(t *testing.T) {
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": func(http.ResponseWriter, *http.Request) {
+			t.Fatal("oversized mutation must not reach upstream")
+		},
+	})
+	defer cleanup()
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := bytes.NewReader(make([]byte, maxMutationRequestBodyBytes+1))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/namespaces/default/configmaps", body)
+	rec := httptest.NewRecorder()
+	serveTestHTTP(p, rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
 	}
 }
 
@@ -1857,10 +2044,7 @@ func TestMergeTableRowsWithoutEmbeddedObject(t *testing.T) {
 
 func TestFirstTargetByNameIgnoresTargetOrder(t *testing.T) {
 	targets := []Target{{Name: "beta"}, {Name: "alpha"}}
-	p, err := newTestProxy(targets, targets[0])
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := &Proxy{targets: targets}
 	if got := p.firstTargetByName(); got.Name != "alpha" {
 		t.Fatalf("first target = %q, want alpha", got.Name)
 	}
@@ -1909,6 +2093,59 @@ func gzipListHandler(t *testing.T, body string) http.HandlerFunc {
 	}
 }
 
+func paginatedListHandler(t *testing.T, resourceVersion string, names []string) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+		if err != nil || limit <= 0 {
+			t.Errorf("upstream limit = %q, want positive integer", r.URL.Query().Get("limit"))
+			http.Error(w, "invalid limit", http.StatusBadRequest)
+			return
+		}
+		start := 0
+		if continueToken := r.URL.Query().Get("continue"); continueToken != "" {
+			if !strings.HasPrefix(continueToken, "offset-") {
+				t.Errorf("upstream continue = %q, want target-local token", continueToken)
+				http.Error(w, "invalid continue", http.StatusBadRequest)
+				return
+			}
+			start, err = strconv.Atoi(strings.TrimPrefix(continueToken, "offset-"))
+			if err != nil || start < 0 || start > len(names) {
+				t.Errorf("upstream continue = %q, want valid offset", continueToken)
+				http.Error(w, "invalid continue", http.StatusBadRequest)
+				return
+			}
+		}
+		end := min(start+limit, len(names))
+		items := make([]map[string]any, 0, end-start)
+		for _, name := range names[start:end] {
+			items = append(items, map[string]any{"metadata": map[string]any{"name": name}})
+		}
+		metadata := map[string]any{"resourceVersion": resourceVersion}
+		if end < len(names) {
+			metadata["continue"] = fmt.Sprintf("offset-%d", end)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"apiVersion": "v1",
+			"kind":       "PodList",
+			"metadata":   metadata,
+			"items":      items,
+		})
+	}
+}
+
+func mapsEqual(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
 type errReadCloser struct {
 	err error
 }
@@ -1940,7 +2177,11 @@ func mustParseURL(t *testing.T, value string) *url.URL {
 func testTargets(t *testing.T, handlers map[string]http.HandlerFunc) ([]Target, func()) {
 	t.Helper()
 
-	names := []string{"one", "two"}
+	names := make([]string, 0, len(handlers))
+	for name := range handlers {
+		names = append(names, name)
+	}
+	slices.Sort(names)
 	targets := make([]Target, 0, len(names))
 	servers := make([]*httptest.Server, 0, len(names))
 	for _, name := range names {

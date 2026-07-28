@@ -249,6 +249,20 @@ func TestValidateRejectsMissingRequiredFields(t *testing.T) {
 			},
 			wantErrContains: "state tls.keyPEM is required",
 		},
+		{
+			name: "duplicate contexts",
+			mutate: func(profile *Profile) {
+				profile.Contexts = []string{"alpha", "alpha"}
+			},
+			wantErrContains: `state context "alpha" is configured more than once`,
+		},
+		{
+			name: "primary context outside contexts",
+			mutate: func(profile *Profile) {
+				profile.PrimaryContext = "beta"
+			},
+			wantErrContains: `state primaryContext "beta" is not included in contexts`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -278,25 +292,27 @@ func TestValidateAcceptsZeroRuntimeOptions(t *testing.T) {
 	}
 }
 
-func TestDurationAccessors(t *testing.T) {
+func TestLoadRuntimeParsesDurationsOnce(t *testing.T) {
 	profile := validTestProfile()
 	profile.ProxyTTL = "2m"
 	profile.Options.RequestTimeout = "3s"
 	profile.Options.RetryBackoff = "150ms"
-
-	if got, err := profile.ProxyTTLDuration(); err != nil || got != 2*time.Minute {
-		t.Fatalf("ProxyTTLDuration = %s, %v; want 2m, nil", got, err)
+	path := filepath.Join(t.TempDir(), "runtime.yaml")
+	if err := Save(path, profile); err != nil {
+		t.Fatal(err)
 	}
-	if got, err := profile.RequestTimeoutDuration(); err != nil || got != 3*time.Second {
-		t.Fatalf("RequestTimeoutDuration = %s, %v; want 3s, nil", got, err)
+	runtime, err := LoadRuntime(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got, err := profile.RetryBackoffDuration(); err != nil || got != 150*time.Millisecond {
-		t.Fatalf("RetryBackoffDuration = %s, %v; want 150ms, nil", got, err)
+	if runtime.ProxyTTL != 2*time.Minute {
+		t.Fatalf("ProxyTTL = %s, want 2m", runtime.ProxyTTL)
 	}
-
-	profile.ProxyTTL = ""
-	if got, err := profile.ProxyTTLDuration(); err != nil || got != 0 {
-		t.Fatalf("blank ProxyTTLDuration = %s, %v; want 0, nil", got, err)
+	if runtime.RequestTimeout != 3*time.Second {
+		t.Fatalf("RequestTimeout = %s, want 3s", runtime.RequestTimeout)
+	}
+	if runtime.RetryBackoff != 150*time.Millisecond {
+		t.Fatalf("RetryBackoff = %s, want 150ms", runtime.RetryBackoff)
 	}
 }
 

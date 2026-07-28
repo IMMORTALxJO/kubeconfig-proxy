@@ -3,8 +3,8 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
@@ -12,9 +12,14 @@ import (
 )
 
 func (p *Proxy) fanOut(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	body, err := readLimitedBody(r.Body, maxMutationRequestBodyBytes, "mutation request body")
 	if err != nil {
-		writeStatusError(w, http.StatusBadRequest, err.Error())
+		status := http.StatusBadRequest
+		var limitErr *bodyLimitError
+		if errors.As(err, &limitErr) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeStatusError(w, status, err.Error())
 		return
 	}
 
@@ -73,16 +78,8 @@ func (p *Proxy) targetsForMutationRequest(ctx context.Context, original *http.Re
 
 func (p *Proxy) targetsForExistingResourceMutation(ctx context.Context, original *http.Request) ([]Target, bool, error) {
 	foundTargets := make([]Target, 0, len(p.targets))
+	request := existingObjectRequest(ctx, original, original.URL.Path)
 	for _, target := range p.targets {
-		objectURL := *original.URL
-		objectURL.RawQuery = ""
-
-		request := original.Clone(ctx)
-		request.Method = http.MethodGet
-		request.URL = &objectURL
-		request.Body = nil
-		request.ContentLength = 0
-
 		response := p.do(ctx, target, request, nil)
 		if response.err != nil {
 			return nil, false, response.err

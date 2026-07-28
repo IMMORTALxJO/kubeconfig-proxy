@@ -27,7 +27,6 @@ func (h *activityHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writePlainStatus(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		h.lastActivity.Store(time.Now().UnixNano())
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))

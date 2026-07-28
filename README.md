@@ -43,6 +43,8 @@ The proxy keeps a list of source contexts from the original kubeconfig. Requests
 made through the proxy context are routed according to request type:
 
 - list requests are aggregated from all selected contexts;
+- paginated lists honor one global `limit` and use an opaque proxy continuation
+  token to advance across contexts without duplicates or omissions;
 - watch requests are streamed from all selected contexts;
 - create, update, patch, and delete requests are sent to all selected contexts;
 - discovery requests use the primary context;
@@ -94,6 +96,10 @@ The state file defaults to:
 ```text
 ~/.kube/kubeconfig-proxy/<context-name>.yaml
 ```
+
+Context names containing path separators or other filename-unsafe characters
+use a readable sanitized prefix plus a short hash. This keeps names such as
+`prod/blue` and `prod_blue` on distinct state paths.
 
 It is written with file mode `0600` and contains the proxy's private TLS key,
 certificate, bearer token, selected source contexts, primary context, listen
@@ -186,6 +192,8 @@ werf example.
 - `--kubeconfig ~/.kube/config` selects the source kubeconfig. If omitted,
   standard Kubernetes kubeconfig loading rules are used.
 - `--contexts dev,stage,prod` limits the proxy to specific source contexts.
+  Repeating a context name is rejected so mutations cannot be sent to the same
+  cluster twice.
 - `--context-regexp '^prod-'` selects source contexts by regular expression.
 - `--primary-context dev` selects the context used for discovery and other
   primary-only operations.
@@ -214,6 +222,10 @@ network errors and temporary upstream HTTP responses: `429`, `500`, `502`,
 
 The proxy uses the credentials from the source kubeconfig to talk to the source
 clusters. Protect the listen address accordingly.
+
+To keep a local client or upstream from exhausting proxy memory, mutating
+request bodies are limited to 16 MiB and buffered non-streaming upstream
+responses are limited to 64 MiB.
 
 When a context is added, the proxy generates:
 

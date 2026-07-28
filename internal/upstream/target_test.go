@@ -1,4 +1,4 @@
-package proxy
+package upstream
 
 import (
 	"encoding/base64"
@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/IMMORTALxJO/kubeconfig-proxy/internal/kubeconfig"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -40,14 +42,15 @@ func TestLoadTargetsUsesSelectedContextsAndCurrentPrimary(t *testing.T) {
 		{name: "beta", server: beta.URL, caData: serverCAData(beta), token: "beta-token", namespace: "beta-ns"},
 	}, "beta")
 
-	targets, primary, err := LoadTargets(kubeconfigPath, []string{"alpha", "beta"}, "")
+	source := loadTargetTestSource(t, kubeconfigPath)
+	targets, primary, err := LoadTargets(source, []string{"alpha", "beta"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := TargetNameList(targets), []string{"alpha", "beta"}; !slices.Equal(got, want) {
+	if got, want := NameList(targets), []string{"alpha", "beta"}; !slices.Equal(got, want) {
 		t.Fatalf("target name list = %v, want %v", got, want)
 	}
-	if got, want := TargetNames(targets), "alpha, beta"; got != want {
+	if got, want := Names(targets), "alpha, beta"; got != want {
 		t.Fatalf("target names = %q, want %q", got, want)
 	}
 	if primary.Name != "beta" {
@@ -104,7 +107,8 @@ func TestLoadTargetsSupportsOIDCAuthProvider(t *testing.T) {
 		},
 	}, "oidc")
 
-	targets, primary, err := LoadTargets(kubeconfigPath, []string{"oidc"}, "")
+	source := loadTargetTestSource(t, kubeconfigPath)
+	targets, primary, err := LoadTargets(source, []string{"oidc"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +140,8 @@ func TestLoadTargetsDefaultsToSortedContextsWhenCurrentContextIsEmpty(t *testing
 		{name: "alpha", server: server.URL, caData: serverCAData(server), token: "alpha-token"},
 	}, "")
 
-	targets, primary, err := LoadTargets(kubeconfigPath, nil, "")
+	source := loadTargetTestSource(t, kubeconfigPath)
+	targets, primary, err := LoadTargets(source, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,6 +186,12 @@ func TestLoadTargetsRejectsInvalidKubeconfigSelections(t *testing.T) {
 			wantErrContains: `primary context "beta" is not included`,
 		},
 		{
+			name:            "duplicate selected context",
+			path:            kubeconfigPath,
+			selected:        []string{"alpha", "alpha"},
+			wantErrContains: `context "alpha" is selected more than once`,
+		},
+		{
 			name:            "no contexts",
 			path:            writeTargetsTestKubeconfig(t, nil, ""),
 			wantErrContains: "source kubeconfig has no contexts",
@@ -189,7 +200,14 @@ func TestLoadTargetsRejectsInvalidKubeconfigSelections(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := LoadTargets(tt.path, tt.selected, tt.primary)
+			source, loadErr := kubeconfig.LoadSource(tt.path)
+			if loadErr != nil {
+				if !strings.Contains(loadErr.Error(), tt.wantErrContains) {
+					t.Fatalf("load error = %q, want to contain %q", loadErr.Error(), tt.wantErrContains)
+				}
+				return
+			}
+			_, _, err := LoadTargets(source, tt.selected, tt.primary)
 			if err == nil {
 				t.Fatal("LoadTargets returned nil error")
 			}
@@ -197,6 +215,25 @@ func TestLoadTargetsRejectsInvalidKubeconfigSelections(t *testing.T) {
 				t.Fatalf("error = %q, want to contain %q", err.Error(), tt.wantErrContains)
 			}
 		})
+	}
+
+	if _, _, err := LoadTargets(nil, nil, ""); err == nil || !strings.Contains(err.Error(), "source kubeconfig is required") {
+		t.Fatalf("nil source error = %v, want source kubeconfig error", err)
+	}
+}
+
+func TestTargetFromRESTConfigRejectsInvalidConfiguration(t *testing.T) {
+	kubeContext := &clientcmdapi.Context{Namespace: "default"}
+	if _, err := targetFromRESTConfig("broken-url", kubeContext, &rest.Config{Host: "://"}); err == nil || !strings.Contains(err.Error(), "parse host") {
+		t.Fatalf("invalid host error = %v, want parse host error", err)
+	}
+	if _, err := targetFromRESTConfig("broken-ca", kubeContext, &rest.Config{
+		Host: "https://example.test",
+		TLSClientConfig: rest.TLSClientConfig{
+			CAData: []byte("not a PEM certificate"),
+		},
+	}); err == nil || !strings.Contains(err.Error(), "build transport") {
+		t.Fatalf("invalid CA error = %v, want transport error", err)
 	}
 }
 
@@ -237,6 +274,15 @@ func writeTargetsTestKubeconfig(t *testing.T, contexts []targetContext, currentC
 		t.Fatal(err)
 	}
 	return path
+}
+
+func loadTargetTestSource(t *testing.T, path string) *kubeconfig.Source {
+	t.Helper()
+	source, err := kubeconfig.LoadSource(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return source
 }
 
 func validOIDCTestToken() string {

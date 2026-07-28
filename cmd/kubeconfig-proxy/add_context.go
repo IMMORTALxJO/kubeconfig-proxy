@@ -5,17 +5,13 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
-	"regexp"
-	"slices"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/IMMORTALxJO/kubeconfig-proxy/internal/kubeconfig"
 	"github.com/IMMORTALxJO/kubeconfig-proxy/internal/proxy"
 	proxystate "github.com/IMMORTALxJO/kubeconfig-proxy/internal/state"
-	"k8s.io/client-go/tools/clientcmd"
-	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+	"github.com/IMMORTALxJO/kubeconfig-proxy/internal/upstream"
 )
 
 type addContextOptions struct {
@@ -51,11 +47,20 @@ func runAddContext(args []string) error {
 		return err
 	}
 
-	selectedContexts, selectedPrimary, err := resolveAddContextTargets(absoluteKubeconfigPath, options.contextName, splitCSV(options.contextsCSV), options.contextRegexp, options.primaryContext)
+	source, err := kubeconfig.LoadSource(absoluteKubeconfigPath)
 	if err != nil {
 		return err
 	}
-	targets, primary, err := proxy.LoadTargets(absoluteKubeconfigPath, selectedContexts, selectedPrimary)
+	selectedContexts, selectedPrimary, err := source.SelectContexts(kubeconfig.ContextSelection{
+		ProxyContextName: options.contextName,
+		SelectedContexts: splitCSV(options.contextsCSV),
+		ContextRegexp:    options.contextRegexp,
+		PrimaryContext:   options.primaryContext,
+	})
+	if err != nil {
+		return err
+	}
+	targets, primary, err := upstream.LoadTargets(source, selectedContexts, selectedPrimary)
 	if err != nil {
 		return err
 	}
@@ -145,7 +150,10 @@ func resolveAddContextPaths(kubeconfigPath, statePath, contextName string) (stri
 		return "", "", err
 	}
 	if statePath == "" {
-		statePath = defaultStatePath(contextName)
+		statePath, err = defaultStatePath(contextName)
+		if err != nil {
+			return "", "", err
+		}
 	}
 	absoluteStatePath, err := filepath.Abs(statePath)
 	if err != nil {
@@ -154,7 +162,7 @@ func resolveAddContextPaths(kubeconfigPath, statePath, contextName string) (stri
 	return absoluteKubeconfigPath, absoluteStatePath, nil
 }
 
-func newAddContextProfile(options addContextOptions, kubeconfigPath, listenAddr string, targets []proxy.Target, primary proxy.Target) (*proxystate.Profile, []byte, error) {
+func newAddContextProfile(options addContextOptions, kubeconfigPath, listenAddr string, targets []upstream.Target, primary upstream.Target) (*proxystate.Profile, []byte, error) {
 	bearerToken, err := generateBearerToken()
 	if err != nil {
 		return nil, nil, err
@@ -169,7 +177,7 @@ func newAddContextProfile(options addContextOptions, kubeconfigPath, listenAddr 
 		Name:             options.contextName,
 		SourceKubeconfig: kubeconfigPath,
 		Listen:           listenAddr,
-		Contexts:         proxy.TargetNameList(targets),
+		Contexts:         upstream.NameList(targets),
 		PrimaryContext:   primary.Name,
 		BearerToken:      bearerToken,
 		ProxyTTL:         options.proxyTTL.String(),
@@ -189,91 +197,14 @@ func newAddContextProfile(options addContextOptions, kubeconfigPath, listenAddr 
 	return profile, certPEM, nil
 }
 
-func logAddContextResult(options addContextOptions, kubeconfigPath, statePath, serverURL string, targets []proxy.Target, primary proxy.Target) {
+func logAddContextResult(options addContextOptions, kubeconfigPath, statePath, serverURL string, targets []upstream.Target, primary upstream.Target) {
 	log.Printf("updated kubeconfig: %s", kubeconfigPath)
 	log.Printf("state file:         %s", statePath)
 	log.Printf("context:            %q", options.contextName) // #nosec G706 -- %q escapes control characters in user-provided context names.
 	log.Printf("listen:             %s", serverURL)
-	log.Printf("targets:            %s", proxy.TargetNames(targets))
+	log.Printf("targets:            %s", upstream.Names(targets))
 	log.Printf("primary target:     %s", primary.Name)
 	log.Printf("proxy ttl:          %s", durationLogValue(options.proxyTTL))
 	log.Printf("read only:          %t", options.readOnly)
 	log.Printf("serve logs:         %t", options.logsEnabled)
-}
-
-func resolveAddContextTargets(kubeconfigPath, proxyContextName string, selectedContexts []string, contextRegexp, primaryContext string) ([]string, string, error) {
-	if len(selectedContexts) > 0 && strings.TrimSpace(contextRegexp) != "" {
-		return nil, "", fmt.Errorf("--contexts and --context-regexp are mutually exclusive")
-	}
-
-	rawConfig, err := clientcmd.LoadFromFile(kubeconfigPath)
-	if err != nil {
-		return nil, "", err
-	}
-
-	contextNames, err := selectAddContextNames(rawConfig, proxyContextName, selectedContexts, contextRegexp)
-	if err != nil {
-		return nil, "", err
-	}
-	if err := validateAddContextNames(rawConfig, proxyContextName, contextNames); err != nil {
-		return nil, "", err
-	}
-	primaryContext = resolvePrimaryAddContext(rawConfig.CurrentContext, contextNames, primaryContext)
-	if !slices.Contains(contextNames, primaryContext) {
-		return nil, "", fmt.Errorf("primary context %q is not included in selected proxy contexts", primaryContext)
-	}
-	return contextNames, primaryContext, nil
-}
-
-func selectAddContextNames(rawConfig *clientcmdapi.Config, proxyContextName string, selectedContexts []string, contextRegexp string) ([]string, error) {
-	var contextNames []string
-	switch {
-	case len(selectedContexts) > 0:
-		contextNames = append([]string(nil), selectedContexts...)
-	case strings.TrimSpace(contextRegexp) != "":
-		re, err := regexp.Compile(contextRegexp)
-		if err != nil {
-			return nil, err
-		}
-		for name := range rawConfig.Contexts {
-			if name != proxyContextName && re.MatchString(name) {
-				contextNames = append(contextNames, name)
-			}
-		}
-		sort.Strings(contextNames)
-	default:
-		for name := range rawConfig.Contexts {
-			if name != proxyContextName {
-				contextNames = append(contextNames, name)
-			}
-		}
-		sort.Strings(contextNames)
-	}
-	return contextNames, nil
-}
-
-func validateAddContextNames(rawConfig *clientcmdapi.Config, proxyContextName string, contextNames []string) error {
-	if len(contextNames) == 0 {
-		return fmt.Errorf("no source contexts selected")
-	}
-	for _, name := range contextNames {
-		if name == proxyContextName {
-			return fmt.Errorf("source contexts must not include proxy context %q", proxyContextName)
-		}
-		if _, ok := rawConfig.Contexts[name]; !ok {
-			return fmt.Errorf("context %q not found in source kubeconfig", name)
-		}
-	}
-	return nil
-}
-
-func resolvePrimaryAddContext(currentContext string, contextNames []string, primaryContext string) string {
-	if primaryContext == "" {
-		if slices.Contains(contextNames, currentContext) {
-			primaryContext = currentContext
-		} else {
-			primaryContext = contextNames[0]
-		}
-	}
-	return primaryContext
 }
