@@ -43,6 +43,11 @@ func (p *Proxy) aggregatePaginatedList(w http.ResponseWriter, r *http.Request) {
 		writeStatusError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if r.URL.Query().Get(aggregateContinueQueryKey) == "" && state.limit > 0 {
+		if !p.initializePaginatedResourceVersions(w, r, state) {
+			return
+		}
+	}
 	if !p.collectPaginatedResponses(w, r, startIndex, state) {
 		return
 	}
@@ -74,6 +79,20 @@ func (p *Proxy) newPaginatedListState(r *http.Request) (*paginatedListState, int
 	}, startIndex, nil
 }
 
+func (p *Proxy) initializePaginatedResourceVersions(w http.ResponseWriter, r *http.Request, state *paginatedListState) bool {
+	request := paginatedRequestForTarget(r, 1, "")
+	for _, response := range p.doAll(r.Context(), request, nil) {
+		page, ok := inspectPaginatedResponse(w, response)
+		if !ok {
+			return false
+		}
+		if page.resourceVersion != "" {
+			state.resourceVersions[response.target.Name] = page.resourceVersion
+		}
+	}
+	return true
+}
+
 func (p *Proxy) collectPaginatedResponses(w http.ResponseWriter, r *http.Request, startIndex int, state *paginatedListState) bool {
 	for i := startIndex; i < len(p.targets); i++ {
 		response, page, ok := p.fetchPaginatedPage(w, r, p.targets[i], state)
@@ -93,21 +112,29 @@ func (p *Proxy) collectPaginatedResponses(w http.ResponseWriter, r *http.Request
 
 func (p *Proxy) fetchPaginatedPage(w http.ResponseWriter, r *http.Request, target Target, state *paginatedListState) (upstreamResponse, listPageInfo, bool) {
 	request := paginatedRequestForTarget(r, state.remaining(), state.upstreamContinue)
+	if state.upstreamContinue == "" {
+		applyListResourceVersion(request, state.resourceVersions[target.Name])
+	}
 	response := p.do(r.Context(), target, request, nil)
+	page, ok := inspectPaginatedResponse(w, response)
+	return response, page, ok
+}
+
+func inspectPaginatedResponse(w http.ResponseWriter, response upstreamResponse) (listPageInfo, bool) {
 	if response.err != nil {
 		writeStatusError(w, http.StatusBadGateway, fmt.Sprintf("%s: %v", response.target.Name, response.err))
-		return upstreamResponse{}, listPageInfo{}, false
+		return listPageInfo{}, false
 	}
 	if response.status < 200 || response.status >= 300 {
 		writeUpstreamResponse(w, response)
-		return upstreamResponse{}, listPageInfo{}, false
+		return listPageInfo{}, false
 	}
 	page, err := inspectListPage(response.body)
 	if err != nil {
 		writeStatusError(w, http.StatusBadGateway, fmt.Sprintf("%s: %v", response.target.Name, err))
-		return upstreamResponse{}, listPageInfo{}, false
+		return listPageInfo{}, false
 	}
-	return response, page, true
+	return page, true
 }
 
 func (state *paginatedListState) remaining() int {
@@ -240,12 +267,24 @@ func paginatedRequestForTarget(original *http.Request, limit int, upstreamContin
 	}
 	if upstreamContinue != "" {
 		query.Set(aggregateContinueQueryKey, upstreamContinue)
+		query.Del("resourceVersion")
+		query.Del("resourceVersionMatch")
 	} else {
 		query.Del(aggregateContinueQueryKey)
 	}
 	requestURL.RawQuery = query.Encode()
 	request.URL = &requestURL
 	return request
+}
+
+func applyListResourceVersion(request *http.Request, resourceVersion string) {
+	if resourceVersion == "" {
+		return
+	}
+	query := request.URL.Query()
+	query.Set("resourceVersion", resourceVersion)
+	query.Set("resourceVersionMatch", "Exact")
+	request.URL.RawQuery = query.Encode()
 }
 
 func inspectListPage(body []byte) (listPageInfo, error) {

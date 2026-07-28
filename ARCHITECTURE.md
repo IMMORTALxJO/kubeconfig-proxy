@@ -233,14 +233,23 @@ Kubernetes continuation tokens are local to one API server and cannot be sent
 to another cluster. Therefore paginated aggregation is sequential even though
 ordinary list aggregation is concurrent.
 
+Before the first page with a positive `limit`, the proxy issues a one-item list
+to every target and records the returned resource versions. Page reads that
+start a target use its recorded version with `resourceVersionMatch=Exact`;
+reads that continue within a target use its upstream continuation token. This
+keeps the aggregate resource version complete and stable from the first page,
+so a client can watch from that version without missing changes in targets
+visited by later pages.
+
 The proxy enforces one global `limit` and returns an opaque continuation token
 containing:
 
 - the configured target names;
 - the current target;
 - that target's upstream continuation token;
-- the request path and query scope, excluding `limit` and `continue`;
-- resource versions accumulated from completed pages.
+- the request path and query scope, excluding `limit`, `continue`,
+  `resourceVersion`, and `resourceVersionMatch`;
+- resource versions captured from all targets before the first page.
 
 The token is rejected if the target set or request scope changes. This prevents
 mixing target-local tokens, selectors, or paths across pages. Callers must treat

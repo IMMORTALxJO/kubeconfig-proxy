@@ -293,6 +293,41 @@ func TestAggregatedPaginationAcceptsClientGoContinuationWithoutResourceVersion(t
 	}
 }
 
+func TestPaginatedListFirstPageIncludesResourceVersionsForAllTargets(t *testing.T) {
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": paginatedListHandler(t, "10", []string{"a1", "a2"}),
+		"two": paginatedListHandler(t, "20", []string{"b1"}),
+	})
+	defer cleanup()
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/pods?limit=1", http.NoBody)
+	rec := httptest.NewRecorder()
+	serveTestHTTP(p, rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first page status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var page struct {
+		Metadata struct {
+			ResourceVersion string `json:"resourceVersion"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	resourceVersions, ok := decodeAggregateResourceVersion(page.Metadata.ResourceVersion)
+	if !ok {
+		t.Fatalf("first page resourceVersion = %q, want aggregate resource version", page.Metadata.ResourceVersion)
+	}
+	if want := map[string]string{"one": "10", "two": "20"}; !mapsEqual(resourceVersions, want) {
+		t.Fatalf("first page resourceVersions = %v, want %v", resourceVersions, want)
+	}
+}
+
 func assertPaginatedProxyResponse(t *testing.T, handlers map[string]http.HandlerFunc, rawURL string, wantStatus int, wantBody string) {
 	t.Helper()
 	targets, cleanup := testTargets(t, handlers)

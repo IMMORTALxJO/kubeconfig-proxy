@@ -2177,7 +2177,11 @@ func mustParseURL(t *testing.T, value string) *url.URL {
 func testTargets(t *testing.T, handlers map[string]http.HandlerFunc) ([]Target, func()) {
 	t.Helper()
 
-	names := []string{"one", "two"}
+	names := make([]string, 0, len(handlers))
+	for name := range handlers {
+		names = append(names, name)
+	}
+	slices.Sort(names)
 	targets := make([]Target, 0, len(names))
 	servers := make([]*httptest.Server, 0, len(names))
 	for _, name := range names {
