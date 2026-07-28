@@ -11,7 +11,34 @@ import (
 	"github.com/IMMORTALxJO/kubeconfig-proxy/internal/kubeconfig"
 )
 
+type deleteContextOptions struct {
+	contextName    string
+	kubeconfigPath string
+	statePath      string
+}
+
 func runDeleteContext(args []string) error {
+	options, err := parseDeleteContextOptions(args)
+	if err != nil {
+		return err
+	}
+	absoluteKubeconfigPath, statePaths, err := deleteContextFiles(options)
+	if err != nil {
+		return err
+	}
+	if err := removeStateArtifacts(statePaths); err != nil {
+		return err
+	}
+
+	log.Printf("updated kubeconfig: %q", absoluteKubeconfigPath) // #nosec G706 -- %q escapes control characters in the user-provided kubeconfig path.
+	log.Printf("deleted context:    %q", options.contextName)    // #nosec G706 -- %q escapes control characters in user-provided context names.
+	for _, statePath := range statePaths {
+		log.Printf("deleted state:      %q", statePath) // #nosec G706 -- %q escapes control characters in local state paths.
+	}
+	return nil
+}
+
+func parseDeleteContextOptions(args []string) (deleteContextOptions, error) {
 	flags := flag.NewFlagSet("kubeconfig-proxy delete-context", flag.ContinueOnError)
 	contextName := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -23,51 +50,61 @@ func runDeleteContext(args []string) error {
 		statePath      = flags.String("state", "", "additional state file path to remove")
 	)
 	if err := flags.Parse(args); err != nil {
-		return err
+		return deleteContextOptions{}, err
 	}
-	if contextName == "" {
-		if flags.NArg() == 1 {
-			contextName = flags.Arg(0)
-		}
-	} else if flags.NArg() > 0 {
-		return fmt.Errorf("usage: kubeconfig-proxy delete-context <context-name> [flags]")
+	contextName, err := resolveDeleteContextName(contextName, flags.Args())
+	if err != nil {
+		return deleteContextOptions{}, err
 	}
-	if contextName == "" {
-		return fmt.Errorf("usage: kubeconfig-proxy delete-context <context-name> [flags]")
-	}
+	return deleteContextOptions{
+		contextName:    contextName,
+		kubeconfigPath: *kubeconfigPath,
+		statePath:      *statePath,
+	}, nil
+}
 
-	absoluteKubeconfigPath, err := filepath.Abs(*kubeconfigPath)
-	if err != nil {
-		return err
+func resolveDeleteContextName(contextName string, positionalArgs []string) (string, error) {
+	if contextName != "" && len(positionalArgs) == 0 {
+		return contextName, nil
 	}
-	statePaths, err := kubeconfig.DeleteProxyContext(absoluteKubeconfigPath, contextName)
-	if err != nil {
-		return err
+	if contextName == "" && len(positionalArgs) == 1 {
+		return positionalArgs[0], nil
 	}
-	if *statePath != "" {
-		absoluteStatePath, err := filepath.Abs(*statePath)
-		if err != nil {
-			return err
-		}
-		statePaths = kubeconfig.AppendUniquePaths(statePaths, absoluteStatePath)
+	return "", fmt.Errorf("usage: kubeconfig-proxy delete-context <context-name> [flags]")
+}
+
+func deleteContextFiles(options deleteContextOptions) (string, []string, error) {
+	absoluteKubeconfigPath, err := filepath.Abs(options.kubeconfigPath)
+	if err != nil {
+		return "", nil, err
+	}
+	statePaths, err := kubeconfig.DeleteProxyContext(absoluteKubeconfigPath, options.contextName)
+	if err != nil {
+		return "", nil, err
+	}
+	statePaths, err = appendExplicitStatePath(statePaths, options.statePath)
+	if err != nil {
+		return "", nil, err
 	}
 	if len(statePaths) == 0 {
-		defaultPath, err := defaultStatePath(contextName)
+		defaultPath, err := defaultStatePath(options.contextName)
 		if err != nil {
-			return err
+			return "", nil, err
 		}
 		statePaths = append(statePaths, defaultPath)
 	}
-	if err := removeStateArtifacts(statePaths); err != nil {
-		return err
-	}
+	return absoluteKubeconfigPath, statePaths, nil
+}
 
-	log.Printf("updated kubeconfig: %s", absoluteKubeconfigPath)
-	log.Printf("deleted context:    %q", contextName) // #nosec G706 -- %q escapes control characters in user-provided context names.
-	for _, statePath := range statePaths {
-		log.Printf("deleted state:      %q", statePath) // #nosec G706 -- %q escapes control characters in local state paths.
+func appendExplicitStatePath(statePaths []string, statePath string) ([]string, error) {
+	if statePath == "" {
+		return statePaths, nil
 	}
-	return nil
+	absoluteStatePath, err := filepath.Abs(statePath)
+	if err != nil {
+		return nil, err
+	}
+	return kubeconfig.AppendUniquePaths(statePaths, absoluteStatePath), nil
 }
 
 func removeStateArtifacts(statePaths []string) error {

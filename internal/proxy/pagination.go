@@ -25,11 +25,34 @@ type listPageInfo struct {
 	resourceVersion string
 }
 
+type paginatedListState struct {
+	targetNames      []string
+	requestScope     string
+	resourceVersions map[string]string
+	responses        []upstreamResponse
+	limit            int
+	itemCount        int
+	arrayKey         string
+	nextCursor       string
+	upstreamContinue string
+}
+
 func (p *Proxy) aggregatePaginatedList(w http.ResponseWriter, r *http.Request) {
-	limit, err := parseListLimit(r.URL.Query().Get("limit"))
+	state, startIndex, err := p.newPaginatedListState(r)
 	if err != nil {
 		writeStatusError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if !p.collectPaginatedResponses(w, r, startIndex, state) {
+		return
+	}
+	writePaginatedListResponse(w, state)
+}
+
+func (p *Proxy) newPaginatedListState(r *http.Request) (*paginatedListState, int, error) {
+	limit, err := parseListLimit(r.URL.Query().Get("limit"))
+	if err != nil {
+		return nil, 0, err
 	}
 
 	targetNames := make([]string, 0, len(p.targets))
@@ -39,88 +62,103 @@ func (p *Proxy) aggregatePaginatedList(w http.ResponseWriter, r *http.Request) {
 	requestScope := listCursorScope(r)
 	startIndex, upstreamContinue, resourceVersions, err := decodeListCursor(r.URL.Query().Get(aggregateContinueQueryKey), targetNames, requestScope)
 	if err != nil {
-		writeStatusError(w, http.StatusBadRequest, err.Error())
-		return
+		return nil, 0, err
 	}
+	return &paginatedListState{
+		targetNames:      targetNames,
+		requestScope:     requestScope,
+		resourceVersions: resourceVersions,
+		responses:        make([]upstreamResponse, 0, len(p.targets)-startIndex),
+		limit:            limit,
+		upstreamContinue: upstreamContinue,
+	}, startIndex, nil
+}
 
-	responses := make([]upstreamResponse, 0, len(p.targets)-startIndex)
-	itemCount := 0
-	arrayKey := ""
-	nextCursor := ""
+func (p *Proxy) collectPaginatedResponses(w http.ResponseWriter, r *http.Request, startIndex int, state *paginatedListState) bool {
 	for i := startIndex; i < len(p.targets); i++ {
-		remaining := 0
-		if limit > 0 {
-			remaining = limit - itemCount
-			if remaining == 0 {
-				nextCursor, err = encodeListCursor(targetNames, p.targets[i].Name, "", resourceVersions, requestScope)
-				if err != nil {
-					writeStatusError(w, http.StatusInternalServerError, err.Error())
-					return
-				}
-				break
-			}
+		response, page, ok := p.fetchPaginatedPage(w, r, p.targets[i], state)
+		if !ok {
+			return false
 		}
-
-		request := paginatedRequestForTarget(r, remaining, upstreamContinue)
-		response := p.do(r.Context(), p.targets[i], request, nil)
-		if response.err != nil {
-			writeStatusError(w, http.StatusBadGateway, fmt.Sprintf("%s: %v", response.target.Name, response.err))
-			return
+		if err := state.addPage(response, page, i, len(p.targets)); err != nil {
+			writeStatusError(w, http.StatusBadGateway, err.Error())
+			return false
 		}
-		if response.status < 200 || response.status >= 300 {
-			writeUpstreamResponse(w, response)
-			return
-		}
-
-		page, err := inspectListPage(response.body)
-		if err != nil {
-			writeStatusError(w, http.StatusBadGateway, fmt.Sprintf("%s: %v", response.target.Name, err))
-			return
-		}
-		if arrayKey == "" {
-			arrayKey = page.arrayKey
-		} else if page.arrayKey != arrayKey {
-			writeStatusError(w, http.StatusBadGateway, fmt.Sprintf("%s: list response field %q does not match %q", response.target.Name, page.arrayKey, arrayKey))
-			return
-		}
-		if limit > 0 && page.itemCount > remaining {
-			writeStatusError(w, http.StatusBadGateway, fmt.Sprintf("%s: upstream returned %d items for remaining limit %d", response.target.Name, page.itemCount, remaining))
-			return
-		}
-
-		responses = append(responses, response)
-		itemCount += page.itemCount
-		if page.resourceVersion != "" {
-			resourceVersions[response.target.Name] = page.resourceVersion
-		}
-
-		switch {
-		case page.continueToken != "":
-			nextCursor, err = encodeListCursor(targetNames, response.target.Name, page.continueToken, resourceVersions, requestScope)
-		case limit > 0 && itemCount == limit && i+1 < len(p.targets):
-			nextCursor, err = encodeListCursor(targetNames, p.targets[i+1].Name, "", resourceVersions, requestScope)
-		}
-		if err != nil {
-			writeStatusError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if nextCursor != "" {
+		if state.nextCursor != "" {
 			break
 		}
-		upstreamContinue = ""
+	}
+	return true
+}
+
+func (p *Proxy) fetchPaginatedPage(w http.ResponseWriter, r *http.Request, target Target, state *paginatedListState) (upstreamResponse, listPageInfo, bool) {
+	request := paginatedRequestForTarget(r, state.remaining(), state.upstreamContinue)
+	response := p.do(r.Context(), target, request, nil)
+	if response.err != nil {
+		writeStatusError(w, http.StatusBadGateway, fmt.Sprintf("%s: %v", response.target.Name, response.err))
+		return upstreamResponse{}, listPageInfo{}, false
+	}
+	if response.status < 200 || response.status >= 300 {
+		writeUpstreamResponse(w, response)
+		return upstreamResponse{}, listPageInfo{}, false
+	}
+	page, err := inspectListPage(response.body)
+	if err != nil {
+		writeStatusError(w, http.StatusBadGateway, fmt.Sprintf("%s: %v", response.target.Name, err))
+		return upstreamResponse{}, listPageInfo{}, false
+	}
+	return response, page, true
+}
+
+func (state *paginatedListState) remaining() int {
+	if state.limit == 0 {
+		return 0
+	}
+	return state.limit - state.itemCount
+}
+
+func (state *paginatedListState) addPage(response upstreamResponse, page listPageInfo, targetIndex, targetCount int) error {
+	if state.arrayKey == "" {
+		state.arrayKey = page.arrayKey
+	} else if page.arrayKey != state.arrayKey {
+		return fmt.Errorf("%s: list response field %q does not match %q", response.target.Name, page.arrayKey, state.arrayKey)
+	}
+	if state.limit > 0 && page.itemCount > state.remaining() {
+		return fmt.Errorf("%s: upstream returned %d items for remaining limit %d", response.target.Name, page.itemCount, state.remaining())
 	}
 
-	merged, err := mergeListsWithResourceVersions(responses, resourceVersions)
+	state.responses = append(state.responses, response)
+	state.itemCount += page.itemCount
+	if page.resourceVersion != "" {
+		state.resourceVersions[response.target.Name] = page.resourceVersion
+	}
+	state.nextCursor = state.cursorAfterPage(response.target.Name, page.continueToken, targetIndex, targetCount)
+	state.upstreamContinue = ""
+	return nil
+}
+
+func (state *paginatedListState) cursorAfterPage(targetName, upstreamContinue string, targetIndex, targetCount int) string {
+	if upstreamContinue != "" {
+		return encodeListCursor(state.targetNames, targetName, upstreamContinue, state.resourceVersions, state.requestScope)
+	}
+	if state.limit > 0 && state.itemCount == state.limit && targetIndex+1 < targetCount {
+		return encodeListCursor(state.targetNames, state.targetNames[targetIndex+1], "", state.resourceVersions, state.requestScope)
+	}
+	return ""
+}
+
+func writePaginatedListResponse(w http.ResponseWriter, state *paginatedListState) {
+	merged, err := mergeListsWithResourceVersions(state.responses, state.resourceVersions)
 	if err != nil {
 		writeStatusError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	merged, err = setAggregateContinue(merged, nextCursor)
+	merged, err = setAggregateContinue(merged, state.nextCursor)
 	if err != nil {
 		writeStatusError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	copyHeaders(w.Header(), responses[0].header)
+	copyHeaders(w.Header(), state.responses[0].header)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(merged) // #nosec G705 -- response body is Kubernetes API JSON, not browser-rendered HTML.
@@ -171,18 +209,15 @@ func decodeListCursor(value string, targetNames []string, requestScope string) (
 	return targetIndex, token.Continue, cloneStringMap(token.ResourceVersions), nil
 }
 
-func encodeListCursor(targetNames []string, targetName, upstreamContinue string, resourceVersions map[string]string, requestScope string) (string, error) {
-	payload, err := json.Marshal(aggregateContinueToken{
+func encodeListCursor(targetNames []string, targetName, upstreamContinue string, resourceVersions map[string]string, requestScope string) string {
+	payload, _ := json.Marshal(aggregateContinueToken{
 		Targets:          append([]string(nil), targetNames...),
 		Target:           targetName,
 		Request:          requestScope,
 		Continue:         upstreamContinue,
 		ResourceVersions: cloneStringMap(resourceVersions),
 	})
-	if err != nil {
-		return "", fmt.Errorf("encode aggregate continue token: %w", err)
-	}
-	return aggregateContinuePrefix + base64.RawURLEncoding.EncodeToString(payload), nil
+	return aggregateContinuePrefix + base64.RawURLEncoding.EncodeToString(payload)
 }
 
 func listCursorScope(r *http.Request) string {

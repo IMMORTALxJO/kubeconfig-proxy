@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/IMMORTALxJO/kubeconfig-proxy/internal/kubeconfig"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -218,6 +219,21 @@ func TestLoadTargetsRejectsInvalidKubeconfigSelections(t *testing.T) {
 
 	if _, _, err := LoadTargets(nil, nil, ""); err == nil || !strings.Contains(err.Error(), "source kubeconfig is required") {
 		t.Fatalf("nil source error = %v, want source kubeconfig error", err)
+	}
+}
+
+func TestTargetFromRESTConfigRejectsInvalidConfiguration(t *testing.T) {
+	kubeContext := &clientcmdapi.Context{Namespace: "default"}
+	if _, err := targetFromRESTConfig("broken-url", kubeContext, &rest.Config{Host: "://"}); err == nil || !strings.Contains(err.Error(), "parse host") {
+		t.Fatalf("invalid host error = %v, want parse host error", err)
+	}
+	if _, err := targetFromRESTConfig("broken-ca", kubeContext, &rest.Config{
+		Host: "https://example.test",
+		TLSClientConfig: rest.TLSClientConfig{
+			CAData: []byte("not a PEM certificate"),
+		},
+	}); err == nil || !strings.Contains(err.Error(), "build transport") {
+		t.Fatalf("invalid CA error = %v, want transport error", err)
 	}
 }
 

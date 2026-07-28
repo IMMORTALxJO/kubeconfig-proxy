@@ -126,6 +126,25 @@ func TestCLIHelpers(t *testing.T) {
 	}
 }
 
+func TestDefaultCommandAndLongStateNames(t *testing.T) {
+	longName := strings.Repeat("a", 100)
+	gotName := safeFileName(longName)
+	if len(gotName) != 93 {
+		t.Fatalf("long safe filename length = %d, want 93", len(gotName))
+	}
+	if !strings.HasPrefix(gotName, strings.Repeat("a", 80)+"-") {
+		t.Fatalf("long safe filename = %q, want truncated readable prefix", gotName)
+	}
+	if executable := defaultExecCommand(); executable == "" {
+		t.Fatal("default executable is empty")
+	}
+
+	cmd := newDetachedServeCommand("kubeconfig-proxy-test", "/tmp/proxy-state.yaml")
+	if want := []string{"kubeconfig-proxy-test", "serve", "--state", "/tmp/proxy-state.yaml"}; !slices.Equal(cmd.Args, want) {
+		t.Fatalf("detached command args = %v, want %v", cmd.Args, want)
+	}
+}
+
 func TestAddContextWritesStateAndKubeconfigExecContext(t *testing.T) {
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
@@ -782,14 +801,21 @@ func TestServeStateRestartsWhenStateFileChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	waitForProxyTarget(t, profile, errCh, "beta")
+	assertServeLogContains(t, statePath, "targets:          beta")
+}
+
+func waitForProxyTarget(t *testing.T, profile *proxystate.Profile, errCh <-chan error, target string) {
+	t.Helper()
+
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		if time.Now().After(deadline) {
 			t.Fatal("serve did not restart with updated state")
 		}
 		body, err := tryGetProxyBody(profile, "/version")
-		if err == nil && strings.Contains(body, `"target":"beta"`) {
-			break
+		if err == nil && strings.Contains(body, `"target":"`+target+`"`) {
+			return
 		}
 		select {
 		case err := <-errCh:
@@ -797,12 +823,17 @@ func TestServeStateRestartsWhenStateFileChanges(t *testing.T) {
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+func assertServeLogContains(t *testing.T, statePath, want string) {
+	t.Helper()
+
 	logData, err := os.ReadFile(statePath + ".log")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(logData), "targets:          beta") {
-		t.Fatalf("reloaded serve log = %q, want beta target after logsEnabled change", string(logData))
+	if !strings.Contains(string(logData), want) {
+		t.Fatalf("reloaded serve log = %q, want %q", string(logData), want)
 	}
 }
 

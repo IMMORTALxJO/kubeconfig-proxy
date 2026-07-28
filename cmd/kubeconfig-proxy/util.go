@@ -64,9 +64,6 @@ func safeFileName(value string) string {
 	if !changed {
 		return safe
 	}
-	if safe == "" {
-		safe = "context"
-	}
 	sum := sha256.Sum256([]byte(value))
 	return fmt.Sprintf("%s-%x", safe, sum[:6])
 }

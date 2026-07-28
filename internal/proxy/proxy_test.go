@@ -652,17 +652,45 @@ func TestAggregatesPaginatedListAcrossTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	result := collectPaginatedList(t, p, 2)
+	if result.pageCount != 3 {
+		t.Fatalf("page count = %d, want 3", result.pageCount)
+	}
+	if want := []string{"a1", "a2", "a3", "b1", "b2"}; !slices.Equal(result.names, want) {
+		t.Fatalf("names = %v, want %v", result.names, want)
+	}
+	if want := []string{"one", "one", "one", "two", "two"}; !slices.Equal(result.contexts, want) {
+		t.Fatalf("contexts = %v, want %v", result.contexts, want)
+	}
+	resourceVersions, ok := decodeAggregateResourceVersion(result.resourceVersion)
+	if !ok {
+		t.Fatalf("final resourceVersion = %q, want aggregate resource version", result.resourceVersion)
+	}
+	if want := map[string]string{"one": "10", "two": "20"}; !mapsEqual(resourceVersions, want) {
+		t.Fatalf("resourceVersions = %v, want %v", resourceVersions, want)
+	}
+}
+
+type paginatedListResult struct {
+	names           []string
+	contexts        []string
+	resourceVersion string
+	pageCount       int
+}
+
+func collectPaginatedList(t *testing.T, p *Proxy, limit int) paginatedListResult {
+	t.Helper()
+
+	var result paginatedListResult
 	var names []string
 	var contexts []string
 	continueToken := ""
-	resourceVersion := ""
-	pageCount := 0
 	for {
-		pageCount++
-		if pageCount > 4 {
+		result.pageCount++
+		if result.pageCount > 4 {
 			t.Fatal("pagination did not terminate")
 		}
-		query := url.Values{"limit": []string{"2"}}
+		query := url.Values{"limit": []string{strconv.Itoa(limit)}}
 		if continueToken != "" {
 			query.Set("continue", continueToken)
 		}
@@ -670,7 +698,7 @@ func TestAggregatesPaginatedListAcrossTargets(t *testing.T) {
 		rec := httptest.NewRecorder()
 		serveTestHTTP(p, rec, req)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("page %d status = %d, want %d; body=%s", pageCount, rec.Code, http.StatusOK, rec.Body.String())
+			t.Fatalf("page %d status = %d, want %d; body=%s", result.pageCount, rec.Code, http.StatusOK, rec.Body.String())
 		}
 
 		var payload struct {
@@ -688,39 +716,25 @@ func TestAggregatesPaginatedListAcrossTargets(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 			t.Fatal(err)
 		}
-		if len(payload.Items) > 2 {
-			t.Fatalf("page %d returned %d items for global limit 2", pageCount, len(payload.Items))
+		if len(payload.Items) > limit {
+			t.Fatalf("page %d returned %d items for global limit %d", result.pageCount, len(payload.Items), limit)
 		}
 		for _, item := range payload.Items {
 			names = append(names, item.Metadata.Name)
 			contexts = append(contexts, item.Metadata.Labels[sourceContextLabel])
 		}
 		continueToken = payload.Metadata.Continue
-		resourceVersion = payload.Metadata.ResourceVersion
+		result.resourceVersion = payload.Metadata.ResourceVersion
 		if continueToken == "" {
 			break
 		}
 		if !strings.HasPrefix(continueToken, aggregateContinuePrefix) {
-			t.Fatalf("page %d continue token = %q, want aggregate token", pageCount, continueToken)
+			t.Fatalf("page %d continue token = %q, want aggregate token", result.pageCount, continueToken)
 		}
 	}
-
-	if pageCount != 3 {
-		t.Fatalf("page count = %d, want 3", pageCount)
-	}
-	if want := []string{"a1", "a2", "a3", "b1", "b2"}; !slices.Equal(names, want) {
-		t.Fatalf("names = %v, want %v", names, want)
-	}
-	if want := []string{"one", "one", "one", "two", "two"}; !slices.Equal(contexts, want) {
-		t.Fatalf("contexts = %v, want %v", contexts, want)
-	}
-	resourceVersions, ok := decodeAggregateResourceVersion(resourceVersion)
-	if !ok {
-		t.Fatalf("final resourceVersion = %q, want aggregate resource version", resourceVersion)
-	}
-	if want := map[string]string{"one": "10", "two": "20"}; !mapsEqual(resourceVersions, want) {
-		t.Fatalf("resourceVersions = %v, want %v", resourceVersions, want)
-	}
+	result.names = names
+	result.contexts = contexts
+	return result
 }
 
 func TestAggregatedListRejectsInvalidContinueTokens(t *testing.T) {
@@ -733,10 +747,7 @@ func TestAggregatedListRejectsInvalidContinueTokens(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mismatchedToken, err := encodeListCursor([]string{"other"}, "other", "", nil, "/api/v1/pods?")
-	if err != nil {
-		t.Fatal(err)
-	}
+	mismatchedToken := encodeListCursor([]string{"other"}, "other", "", nil, "/api/v1/pods?")
 	for _, continueToken := range []string{"plain-upstream-token", mismatchedToken} {
 		query := url.Values{"limit": []string{"1"}, "continue": []string{continueToken}}
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/pods?"+query.Encode(), http.NoBody)

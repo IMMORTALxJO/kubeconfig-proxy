@@ -137,6 +137,46 @@ func TestLoadSourceReturnsLoadErrors(t *testing.T) {
 	}
 }
 
+func TestSourceResolvesContextsAndClientConfig(t *testing.T) {
+	source := loadSelectionTestSource(t, []string{"beta", "alpha"}, "beta")
+
+	contexts, err := source.ResolveContexts(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"alpha", "beta"}; !slices.Equal(contexts, want) {
+		t.Fatalf("resolved contexts = %v, want %v", contexts, want)
+	}
+
+	contexts, err = source.ResolveContexts([]string{"beta", "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"beta", "alpha"}; !slices.Equal(contexts, want) {
+		t.Fatalf("explicit contexts = %v, want %v", contexts, want)
+	}
+	if _, err := source.ResolveContexts([]string{"alpha", "alpha"}); err == nil || !strings.Contains(err.Error(), "selected more than once") {
+		t.Fatalf("duplicate contexts error = %v", err)
+	}
+	if got := source.CurrentContext(); got != "beta" {
+		t.Fatalf("current context = %q, want beta", got)
+	}
+
+	kubeContext, restConfig, err := source.ClientConfig("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kubeContext.Cluster != "cluster-alpha" {
+		t.Fatalf("context cluster = %q, want cluster-alpha", kubeContext.Cluster)
+	}
+	if restConfig.Host != "https://alpha.example.test" {
+		t.Fatalf("REST host = %q, want alpha server", restConfig.Host)
+	}
+	if _, _, err := source.ClientConfig("missing"); err == nil || !strings.Contains(err.Error(), `context "missing" not found`) {
+		t.Fatalf("missing client config error = %v", err)
+	}
+}
+
 func loadSelectionTestSource(t *testing.T, contextNames []string, currentContext string) *Source {
 	t.Helper()
 	source, err := LoadSource(writeSelectionTestKubeconfig(t, contextNames, currentContext))
