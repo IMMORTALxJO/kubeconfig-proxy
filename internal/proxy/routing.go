@@ -99,23 +99,31 @@ func isNamedResourceGetRequest(r *http.Request) bool {
 
 func namedResourceRequest(path string) (string, bool) {
 	parts := splitPath(path)
-	switch {
-	case len(parts) == 4 && parts[0] == "api":
+	if len(parts) == 0 {
+		return "", false
+	}
+
+	switch parts[0] {
+	case "api":
+		return matchNamedResourceRequest(parts, 2)
+	case "apis":
+		return matchNamedResourceRequest(parts, 3)
+	default:
+		return "", false
+	}
+}
+
+func matchNamedResourceRequest(parts []string, namespaceIndex int) (string, bool) {
+	namedLength := namespaceIndex + 2
+	if len(parts) > namespaceIndex && parts[namespaceIndex] == "namespaces" {
+		namedLength += 2
+	}
+
+	switch len(parts) {
+	case namedLength:
 		return "/" + strings.Join(parts, "/"), false
-	case len(parts) == 5 && parts[0] == "api" && parts[2] != "namespaces":
-		return "/" + strings.Join(parts[:4], "/"), true
-	case len(parts) == 6 && parts[0] == "api" && parts[2] == "namespaces":
-		return "/" + strings.Join(parts, "/"), false
-	case len(parts) == 7 && parts[0] == "api" && parts[2] == "namespaces":
-		return "/" + strings.Join(parts[:6], "/"), true
-	case len(parts) == 5 && parts[0] == "apis":
-		return "/" + strings.Join(parts, "/"), false
-	case len(parts) == 6 && parts[0] == "apis" && parts[3] != "namespaces":
-		return "/" + strings.Join(parts[:5], "/"), true
-	case len(parts) == 7 && parts[0] == "apis" && parts[3] == "namespaces":
-		return "/" + strings.Join(parts, "/"), false
-	case len(parts) == 8 && parts[0] == "apis" && parts[3] == "namespaces":
-		return "/" + strings.Join(parts[:7], "/"), true
+	case namedLength + 1:
+		return "/" + strings.Join(parts[:namedLength], "/"), true
 	default:
 		return "", false
 	}
