@@ -83,3 +83,9 @@ Useful options:
 - Update `README.md` or examples when user-visible CLI behavior changes.
 - Keep examples executable and aligned with the current binary name, context names, and flags.
 - When adding a feature, document the expected routing semantics and the safety boundary.
+- Treat `ARCHITECTURE.md` as the source of truth for package responsibilities,
+  dependency direction, runtime lifecycle, routing ownership, state boundaries,
+  and repository layout.
+- Update `ARCHITECTURE.md` in the same change whenever those architectural
+  decisions or the documented layout change. Do not leave architecture changes
+  documented only in code, a pull request, or `README.md`.
