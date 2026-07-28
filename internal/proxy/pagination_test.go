@@ -247,6 +247,52 @@ func TestPaginatedTableResponse(t *testing.T) {
 	}, "/api/v1/pods?limit=1", http.StatusOK, `"rows"`)
 }
 
+func TestAggregatedPaginationAcceptsClientGoContinuationWithoutResourceVersion(t *testing.T) {
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": paginatedListHandler(t, "10", []string{"a1", "a2"}),
+	})
+	defer cleanup()
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstQuery := url.Values{
+		"limit":                []string{"1"},
+		"resourceVersion":      []string{"0"},
+		"resourceVersionMatch": []string{"NotOlderThan"},
+	}
+	firstReq := httptest.NewRequest(http.MethodGet, "/api/v1/pods?"+firstQuery.Encode(), http.NoBody)
+	firstRec := httptest.NewRecorder()
+	serveTestHTTP(p, firstRec, firstReq)
+	if firstRec.Code != http.StatusOK {
+		t.Fatalf("first page status = %d, want %d; body=%s", firstRec.Code, http.StatusOK, firstRec.Body.String())
+	}
+
+	var firstPage struct {
+		Metadata struct {
+			Continue string `json:"continue"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(firstRec.Body.Bytes(), &firstPage); err != nil {
+		t.Fatal(err)
+	}
+	if firstPage.Metadata.Continue == "" {
+		t.Fatal("first page continue token is empty")
+	}
+
+	nextQuery := url.Values{
+		"limit":    []string{"1"},
+		"continue": []string{firstPage.Metadata.Continue},
+	}
+	nextReq := httptest.NewRequest(http.MethodGet, "/api/v1/pods?"+nextQuery.Encode(), http.NoBody)
+	nextRec := httptest.NewRecorder()
+	serveTestHTTP(p, nextRec, nextReq)
+	if nextRec.Code != http.StatusOK {
+		t.Fatalf("continued page status = %d, want %d; body=%s", nextRec.Code, http.StatusOK, nextRec.Body.String())
+	}
+}
+
 func assertPaginatedProxyResponse(t *testing.T, handlers map[string]http.HandlerFunc, rawURL string, wantStatus int, wantBody string) {
 	t.Helper()
 	targets, cleanup := testTargets(t, handlers)

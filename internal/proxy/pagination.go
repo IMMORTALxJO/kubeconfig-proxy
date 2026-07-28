@@ -224,6 +224,8 @@ func listCursorScope(r *http.Request) string {
 	query := r.URL.Query()
 	query.Del("limit")
 	query.Del(aggregateContinueQueryKey)
+	query.Del("resourceVersion")
+	query.Del("resourceVersionMatch")
 	return r.URL.Path + "?" + query.Encode()
 }
 
