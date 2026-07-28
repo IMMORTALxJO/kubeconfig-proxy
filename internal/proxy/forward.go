@@ -18,7 +18,8 @@ func (p *Proxy) forwardLongRunning(w http.ResponseWriter, r *http.Request) {
 
 func (p *Proxy) forwardExistingObject(w http.ResponseWriter, r *http.Request) {
 	target := p.primary
-	if found, ok := p.targetForExistingObject(r.Context(), r, r.URL.Path); ok {
+	objectPath, _ := namedResourceRequest(r.URL.Path)
+	if found, ok := p.targetForExistingObject(r.Context(), r, objectPath); ok {
 		target = found
 	}
 	p.forwardSingle(w, r, target)

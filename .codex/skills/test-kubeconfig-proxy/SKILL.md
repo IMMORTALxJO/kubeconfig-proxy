@@ -59,6 +59,12 @@ The runner covers the first integration ring for this project:
 - Named GET routing to the source cluster that contains the object.
 - `kubectl logs` routing to the cluster that contains the pod.
 - `kubectl exec` routing to the cluster that contains the pod.
+- Named `GET` and `PATCH` scale subresources routing to the cluster that
+  contains the deployment.
+- Named `POST` eviction subresources routing to the cluster that contains the
+  pod.
+- Named-field-selector watches remaining open until a future matching object
+  appears.
 - PATCH routing based on the existing object when the patch body has no annotations.
 - DELETE routing only to clusters where the named object exists.
 - Read-only proxy context allowing read requests and rejecting mutating requests with `403`.

@@ -194,7 +194,7 @@ classification. The routing order in `Proxy.ServeHTTP` is significant:
 | 4 | Other watch | Open and merge streams from all targets |
 | 5 | Pod `log`, `exec`, `attach`, or `portforward` | Find the context containing the pod and stream there; fall back to primary |
 | 6 | Discovery, health, OpenAPI, or Helm storage list in Helm mode | Forward to primary |
-| 7 | Named resource `GET` | Find the context containing the object; fall back to primary |
+| 7 | Named resource or subresource `GET` | Find the context containing the parent object; fall back to primary |
 | 8 | Other non-watch `GET` | Aggregate lists from all targets |
 | 9 | `POST`, `PUT`, `PATCH`, or `DELETE` | Select mutation targets and fan out |
 | 10 | Any other request | Forward to primary |
@@ -224,8 +224,8 @@ its own resource version.
 
 Watch streams are opened concurrently and copied to the client as events
 arrive. Event writes are serialized, but ordering between clusters is
-intentionally not defined. Named-field-selector watches first issue list
-requests so an empty selection can return without opening unnecessary streams.
+intentionally not defined. An empty current selection does not close a watch:
+all target streams remain open so future matching objects are observed.
 
 ### Cross-context pagination
 
@@ -268,6 +268,11 @@ Mutation routing is intentionally explicit:
 For named `PATCH` and `DELETE`, the body may not contain annotations. The proxy
 looks up the existing object and uses its annotations or the set of contexts in
 which the object exists.
+
+Named subresource requests use the same parent-object lookup. This applies to
+buffered reads such as deployment `scale`, mutations such as scale updates and
+pod eviction, and any other standard one-segment Kubernetes subresource.
+Long-running pod subresources keep their dedicated streaming path.
 
 Before a `PUT`, each target may be queried for the current object. The proxy
 preserves that target's `uid` and `resourceVersion` in the outgoing body so one

@@ -3,7 +3,6 @@ package proxy
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"sync"
@@ -24,21 +23,6 @@ type watchOpenResult struct {
 }
 
 func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
-	empty, failed := p.selectedWatchIsEmpty(r)
-	if failed != nil {
-		if failed.err != nil {
-			writeStatusError(w, http.StatusBadGateway, failed.err.Error())
-			return
-		}
-		writeUpstreamResponse(w, *failed)
-		return
-	}
-	if empty {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
 	streams, failed := p.openWatchStreams(r.Context(), r)
 	if failed != nil {
 		for _, stream := range streams {
@@ -80,45 +64,6 @@ func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 	wg.Wait()
-}
-
-func (p *Proxy) selectedWatchIsEmpty(r *http.Request) (bool, *upstreamResponse) {
-	if !isNamedFieldSelector(r.URL.Query().Get("fieldSelector")) {
-		return false, nil
-	}
-
-	listURL := *r.URL
-	query := listURL.Query()
-	for _, key := range []string{"watch", "resourceVersion", "resourceVersionMatch", "allowWatchBookmarks", "timeoutSeconds", "sendInitialEvents"} {
-		query.Del(key)
-	}
-	listURL.RawQuery = query.Encode()
-
-	listRequest := r.Clone(r.Context())
-	listRequest.Method = http.MethodGet
-	listRequest.URL = &listURL
-	listRequest.Body = nil
-	listRequest.ContentLength = 0
-
-	responses := p.doAll(r.Context(), listRequest, nil)
-	for _, response := range responses {
-		if response.err != nil {
-			return false, &response
-		}
-		if response.status < 200 || response.status >= 300 {
-			return false, &response
-		}
-
-		var payload map[string]any
-		if err := json.Unmarshal(response.body, &payload); err != nil {
-			return false, &upstreamResponse{target: response.target, err: err}
-		}
-		items, ok := payload["items"].([]any)
-		if !ok || len(items) > 0 {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 func (p *Proxy) openWatchStreams(ctx context.Context, original *http.Request) ([]watchStream, *upstreamResponse) {

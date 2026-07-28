@@ -89,32 +89,36 @@ func labelSelectorHas(selector, key, value string) bool {
 	return false
 }
 
-func isNamedFieldSelector(selector string) bool {
-	for _, requirement := range strings.Split(selector, ",") {
-		requirement = strings.TrimSpace(requirement)
-		if strings.HasPrefix(requirement, "metadata.name=") || strings.HasPrefix(requirement, "metadata.name==") {
-			return true
-		}
-	}
-	return false
-}
-
 func isNamedResourceGetRequest(r *http.Request) bool {
-	return r.Method == http.MethodGet && isNamedResourcePath(r.URL.Path)
+	if r.Method != http.MethodGet {
+		return false
+	}
+	objectPath, _ := namedResourceRequest(r.URL.Path)
+	return objectPath != ""
 }
 
-func isNamedResourcePath(path string) bool {
+func namedResourceRequest(path string) (string, bool) {
 	parts := splitPath(path)
-	if len(parts) == 4 && parts[0] == "api" {
-		return true
+	switch {
+	case len(parts) == 4 && parts[0] == "api":
+		return "/" + strings.Join(parts, "/"), false
+	case len(parts) == 5 && parts[0] == "api" && parts[2] != "namespaces":
+		return "/" + strings.Join(parts[:4], "/"), true
+	case len(parts) == 6 && parts[0] == "api" && parts[2] == "namespaces":
+		return "/" + strings.Join(parts, "/"), false
+	case len(parts) == 7 && parts[0] == "api" && parts[2] == "namespaces":
+		return "/" + strings.Join(parts[:6], "/"), true
+	case len(parts) == 5 && parts[0] == "apis":
+		return "/" + strings.Join(parts, "/"), false
+	case len(parts) == 6 && parts[0] == "apis" && parts[3] != "namespaces":
+		return "/" + strings.Join(parts[:5], "/"), true
+	case len(parts) == 7 && parts[0] == "apis" && parts[3] == "namespaces":
+		return "/" + strings.Join(parts, "/"), false
+	case len(parts) == 8 && parts[0] == "apis" && parts[3] == "namespaces":
+		return "/" + strings.Join(parts[:7], "/"), true
+	default:
+		return "", false
 	}
-	if len(parts) == 6 && parts[0] == "api" && parts[2] == "namespaces" {
-		return true
-	}
-	if len(parts) == 5 && parts[0] == "apis" {
-		return true
-	}
-	return len(parts) == 7 && parts[0] == "apis" && parts[3] == "namespaces"
 }
 
 func isMutating(method string) bool {

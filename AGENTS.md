@@ -38,6 +38,8 @@ Treat routing behavior as the core product contract. Small changes in request cl
 - Read-only proxy contexts must reject `POST`, `PUT`, `PATCH`, and `DELETE` before upstream calls.
 - Discovery and primary-only behavior must stay predictable, especially for Helm/werf release storage compatibility.
 - Long-running pod subresources (`log`, `exec`, `attach`, `portforward`) should route to the cluster that contains the pod.
+- Other named subresource reads and mutations must resolve the parent object
+  before selecting targets.
 
 ## Testing
 

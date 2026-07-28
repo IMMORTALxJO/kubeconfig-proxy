@@ -50,6 +50,8 @@ made through the proxy context are routed according to request type:
 - discovery requests use the primary context;
 - named pod subresources such as `logs`, `exec`, `attach`, and `port-forward`
   are routed to the context that contains the pod;
+- other named subresources, including deployment `scale` and pod `eviction`,
+  are routed using the context that contains their parent object;
 - resources can opt into single-context mutation with annotations;
 - read-only proxy contexts reject mutating requests with `403 Forbidden`.
 

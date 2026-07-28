@@ -68,8 +68,10 @@ func (p *Proxy) bodyForTarget(ctx context.Context, target Target, original *http
 }
 
 func (p *Proxy) targetsForMutationRequest(ctx context.Context, original *http.Request, body []byte) ([]Target, error) {
-	if (original.Method == http.MethodDelete || original.Method == http.MethodPatch) && isNamedResourcePath(original.URL.Path) {
-		if targets, ok, err := p.targetsForExistingResourceMutation(ctx, original); err != nil || ok {
+	objectPath, subresource := namedResourceRequest(original.URL.Path)
+	lookupExisting := objectPath != "" && (subresource || original.Method == http.MethodDelete || original.Method == http.MethodPatch)
+	if lookupExisting {
+		if targets, ok, err := p.targetsForExistingResourceMutationAtPath(ctx, original, objectPath); err != nil || ok {
 			return targets, err
 		}
 	}
@@ -77,8 +79,12 @@ func (p *Proxy) targetsForMutationRequest(ctx context.Context, original *http.Re
 }
 
 func (p *Proxy) targetsForExistingResourceMutation(ctx context.Context, original *http.Request) ([]Target, bool, error) {
+	return p.targetsForExistingResourceMutationAtPath(ctx, original, original.URL.Path)
+}
+
+func (p *Proxy) targetsForExistingResourceMutationAtPath(ctx context.Context, original *http.Request, objectPath string) ([]Target, bool, error) {
 	foundTargets := make([]Target, 0, len(p.targets))
-	request := existingObjectRequest(ctx, original, original.URL.Path)
+	request := existingObjectRequest(ctx, original, objectPath)
 	for _, target := range p.targets {
 		response := p.do(ctx, target, request, nil)
 		if response.err != nil {

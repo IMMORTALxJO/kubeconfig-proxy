@@ -515,10 +515,11 @@ ensure_cluster() {
 cleanup_test_resources() {
   local ctx
   for ctx in "$CTX_A" "$CTX_B"; do
+    kubectl_ctx "$ctx" -n "$NS" delete deployment kcp-subresource-deployment --ignore-not-found >/dev/null 2>&1 || true
     kubectl_ctx "$ctx" -n "$NS" delete pod kcp-subresource-pod --ignore-not-found >/dev/null 2>&1 || true
     kubectl_ctx "$ctx" -n "$NS" delete serviceaccount kcp-subresource-sa --ignore-not-found >/dev/null 2>&1 || true
     kubectl_ctx "$ctx" -n "$NS" delete configmap \
-    kcp-only-a kcp-only-b kcp-fanout kcp-target-b kcp-single kcp-delete-a kcp-readonly \
+    kcp-only-a kcp-only-b kcp-fanout kcp-target-b kcp-single kcp-delete-a kcp-readonly kcp-watch-future \
       --ignore-not-found >/dev/null 2>&1 || true
     kubectl_ctx "$ctx" -n "$NS" delete secret sh.helm.release.v1.kcp.v1 --ignore-not-found >/dev/null 2>&1 || true
   done
@@ -546,6 +547,50 @@ $annotations
 data:
   value: "$name"
 EOF_MANIFEST
+}
+
+check_future_named_watch() {
+  local output_file="$TMP_DIR/future-watch.out"
+  local watch_path="/api/v1/namespaces/$NS/configmaps?watch=true&fieldSelector=metadata.name%3Dkcp-watch-future&timeoutSeconds=15"
+  local watch_pid
+  local attempt
+
+  kubectl_ctx "$PROXY_CONTEXT" get --raw "$watch_path" >"$output_file" 2>&1 &
+  watch_pid=$!
+
+  for ((attempt = 0; attempt < 10; attempt++)); do
+    if ! kill -0 "$watch_pid" 2>/dev/null; then
+      wait "$watch_pid" 2>/dev/null || true
+      add_result "FAIL" "named watch waits for future object" "watch closed before the object was created: $(<"$output_file")"
+      return 1
+    fi
+    sleep 0.1
+  done
+
+  if ! kubectl_ctx "$CTX_B" -n "$NS" create configmap kcp-watch-future --from-literal=value=future >/dev/null 2>&1; then
+    kill -TERM "$watch_pid" 2>/dev/null || true
+    wait "$watch_pid" 2>/dev/null || true
+    add_result "FAIL" "named watch waits for future object" "could not create watched object"
+    return 1
+  fi
+
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    if grep -q '"name":"kcp-watch-future"' "$output_file"; then
+      kill -TERM "$watch_pid" 2>/dev/null || true
+      wait "$watch_pid" 2>/dev/null || true
+      add_result "PASS" "named watch waits for future object" "received the object from kubeconfig-proxy-b"
+      return 0
+    fi
+    if ! kill -0 "$watch_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
+
+  kill -TERM "$watch_pid" 2>/dev/null || true
+  wait "$watch_pid" 2>/dev/null || true
+  add_result "FAIL" "named watch waits for future object" "$(<"$output_file")"
+  return 1
 }
 
 if [[ "${KCP_SKIP_MAKE_CHECK:-0}" == "1" ]]; then
@@ -706,7 +751,7 @@ run_cmd "seed service account for logs and exec in kubeconfig-proxy-b" kubectl_c
 run_cmd "seed pod for logs and exec in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" run kcp-subresource-pod \
   --image=busybox:1.37 \
   --restart=Never \
-  --overrides='{"spec":{"serviceAccountName":"kcp-subresource-sa","automountServiceAccountToken":false}}' \
+  --overrides='{"spec":{"serviceAccountName":"kcp-subresource-sa","automountServiceAccountToken":false,"terminationGracePeriodSeconds":0}}' \
   --command -- sh -c 'echo kcp-log-from-kubeconfig-proxy-b; sleep 300'
 run_cmd "wait for logs and exec pod readiness" kubectl_ctx "$CTX_B" -n "$NS" wait --for=condition=Ready pod/kcp-subresource-pod --timeout=90s
 
@@ -723,6 +768,47 @@ if [[ "$exec_output" == *"kcp-exec-from-kubeconfig-proxy-b"* ]]; then
 else
   add_result "FAIL" "kubectl exec routes to cluster containing pod" "$exec_output"
 fi
+
+run_cmd "seed deployment for scale subresource in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" create deployment kcp-subresource-deployment \
+  --image=nginx:1.29-alpine \
+  --replicas=1
+
+scale_get_output="$(kubectl_ctx "$PROXY_CONTEXT" get --raw "/apis/apps/v1/namespaces/$NS/deployments/kcp-subresource-deployment/scale" 2>&1)"
+scale_get_status=$?
+if [[ "$scale_get_status" -eq 0 && "$scale_get_output" == *'"replicas":1'* ]]; then
+  add_result "PASS" "GET scale routes to cluster containing deployment" "read scale from kubeconfig-proxy-b"
+else
+  add_result "FAIL" "GET scale routes to cluster containing deployment" "$scale_get_output"
+fi
+
+run_cmd "PATCH scale routes to cluster containing deployment" kubectl_ctx "$PROXY_CONTEXT" -n "$NS" scale deployment kcp-subresource-deployment --replicas=2
+scale_replicas="$(kubectl_ctx "$CTX_B" -n "$NS" get deployment kcp-subresource-deployment -o jsonpath='{.spec.replicas}' 2>&1)"
+if [[ "$scale_replicas" == "2" ]]; then
+  add_result "PASS" "PATCH scale changed deployment in kubeconfig-proxy-b" "replicas=2"
+else
+  add_result "FAIL" "PATCH scale changed deployment in kubeconfig-proxy-b" "$scale_replicas"
+fi
+expect_not_found "scale subresource did not target kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get deployment kcp-subresource-deployment
+
+eviction_manifest="$TMP_DIR/eviction.json"
+cat >"$eviction_manifest" <<EOF_EVICTION
+{
+  "apiVersion": "policy/v1",
+  "kind": "Eviction",
+  "metadata": {
+    "name": "kcp-subresource-pod",
+    "namespace": "$NS"
+  }
+}
+EOF_EVICTION
+run_cmd "POST eviction routes to cluster containing pod" kubectl_ctx "$PROXY_CONTEXT" create \
+  --raw "/api/v1/namespaces/$NS/pods/kcp-subresource-pod/eviction" \
+  -f "$eviction_manifest"
+run_cmd "eviction removes pod from kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" wait \
+  --for=delete pod/kcp-subresource-pod \
+  --timeout="$TIMEOUT"
+
+check_future_named_watch
 
 run_cmd "PATCH uses existing object routing" kubectl_ctx "$PROXY_CONTEXT" -n "$NS" patch configmap kcp-target-b --type merge -p '{"data":{"patched":"yes"}}'
 patch_value="$(kubectl_ctx "$CTX_B" -n "$NS" get configmap kcp-target-b -o jsonpath='{.data.patched}' 2>&1)"

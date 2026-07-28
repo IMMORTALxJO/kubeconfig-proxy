@@ -853,52 +853,6 @@ func TestAggregateWatchUsesPerTargetResourceVersions(t *testing.T) {
 	}
 }
 
-func TestAggregateWatchForMissingNamedResourceClosesImmediately(t *testing.T) {
-	calls := &callRecorder{}
-	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Query().Get("watch") == "true" {
-				t.Fatalf("watch should not be opened when selected list is empty")
-			}
-			calls.add("one:list")
-			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"10"},"items":[]}`))
-		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Query().Get("watch") == "true" {
-				t.Fatalf("watch should not be opened when selected list is empty")
-			}
-			calls.add("two:list")
-			_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"11"},"items":[]}`))
-		},
-	})
-	defer cleanup()
-
-	p, err := newTestProxy(targets, targets[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	query := url.Values{}
-	query.Set("watch", "true")
-	query.Set("fieldSelector", "metadata.name=demo")
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/namespaces/default/pods?"+query.Encode(), http.NoBody)
-	rec := httptest.NewRecorder()
-	serveTestHTTP(p, rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	if rec.Body.Len() != 0 {
-		t.Fatalf("body = %q, want empty closed watch response", rec.Body.String())
-	}
-	gotCalls := calls.snapshot()
-	for _, want := range []string{"one:list", "two:list"} {
-		if !slices.Contains(gotCalls, want) {
-			t.Fatalf("calls = %v, want %s", gotCalls, want)
-		}
-	}
-}
-
 func TestAggregateWatchPropagatesOpenFailure(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
 		"one": func(w http.ResponseWriter, _ *http.Request) {
@@ -1873,10 +1827,10 @@ func TestSmallRequestPathHelpers(t *testing.T) {
 	if !isLongRunningRequest(httptest.NewRequest(http.MethodGet, "/api/v1/pods?watch=true", http.NoBody)) {
 		t.Fatal("watch request should be long-running")
 	}
-	if !isNamedResourcePath("/api/v1/nodes/node-a") {
+	if objectPath, subresource := namedResourceRequest("/api/v1/nodes/node-a"); objectPath == "" || subresource {
 		t.Fatal("core cluster-scoped named resource path was not detected")
 	}
-	if !isNamedResourcePath("/apis/apps/v1/deployments/demo") {
+	if objectPath, subresource := namedResourceRequest("/apis/apps/v1/deployments/demo"); objectPath == "" || subresource {
 		t.Fatal("apis cluster-scoped named resource path was not detected")
 	}
 }
@@ -1982,29 +1936,6 @@ func TestTargetsForExistingResourceMutationRejectsUnexpectedLookupStatus(t *test
 	_, _, err = p.targetsForExistingResourceMutation(context.Background(), req)
 	if err == nil || !strings.Contains(err.Error(), "one: get existing resource before mutation returned HTTP 403") {
 		t.Fatalf("error = %v, want lookup status error", err)
-	}
-}
-
-func TestSelectedWatchIsEmptyRejectsInvalidListPayload(t *testing.T) {
-	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte("not-json"))
-		},
-		"two": func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"items":[]}`))
-		},
-	})
-	defer cleanup()
-
-	p, err := newTestProxy(targets, targets[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/pods?watch=true&fieldSelector=metadata.name=demo", http.NoBody)
-
-	empty, failed := p.selectedWatchIsEmpty(req)
-	if empty || failed == nil || failed.err == nil {
-		t.Fatalf("result = empty:%t failed:%#v, want invalid payload failure", empty, failed)
 	}
 }
 
