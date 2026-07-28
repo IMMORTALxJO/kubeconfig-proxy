@@ -22,12 +22,16 @@ TIMEOUT="${KCP_TEST_TIMEOUT:-30s}"
 CLUSTER_READY_TIMEOUT="${KCP_CLUSTER_READY_TIMEOUT:-120s}"
 WERF_TIMEOUT="${KCP_WERF_TIMEOUT:-180}"
 BINARY="$ROOT/bin/kubeconfig-proxy"
+COVERAGE_DATA_DIR="$TMP_DIR/coverage-data"
+COVERAGE_PROFILE="$TMP_DIR/integration-coverage.out"
 KUBERNETES_VERSION="v1.36.1"
 KUBECTL_VERSION="v1.36.1"
 KIND_NODE_IMAGE="kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5"
 KUBECTL_BIN=""
 KCP_CACHE_DIR="${KCP_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/kubeconfig-proxy}"
 TOUCHED_TEST_RESOURCES=0
+COVERAGE_ENABLED=0
+COVERAGE_REPORT=""
 
 declare -a RESULT_STATUS=()
 declare -a RESULT_NAME=()
@@ -79,37 +83,154 @@ print_results() {
   done
 }
 
+# Called from cleanup, which is invoked through trap.
+# shellcheck disable=SC2329
+print_coverage_report() {
+  if [[ -z "$COVERAGE_REPORT" ]]; then
+    return
+  fi
+  printf '\n## Integration coverage\n\n'
+  printf '%s\n' '```text'
+  printf '%s\n' "$COVERAGE_REPORT"
+  printf '%s\n' '```'
+}
+
+# Called from stop_coverage_proxies during cleanup.
+# shellcheck disable=SC2329
+proxy_pids_for_state() {
+  local state_path="$1"
+  ps -eo pid=,command= | awk -v expected=" serve --state $state_path" '
+    {
+      pid = $1
+      executable = $2
+      $1 = ""
+      sub(/^[[:space:]]+/, "", $0)
+      if (executable ~ /(^|\/)kubeconfig-proxy$/ && index($0, expected) > 0) {
+        print pid
+      }
+    }
+  '
+}
+
+# Called from cleanup, which is invoked through trap.
+# shellcheck disable=SC2329
+stop_coverage_proxies() {
+  local state_path
+  local pid
+  local attempt
+  local stopped=0
+  local pids_file="$TMP_DIR/coverage-proxy-pids"
+
+  : >"$pids_file"
+
+  for state_path in "$STATE_FILE" "$RO_STATE_FILE"; do
+    proxy_pids_for_state "$state_path" >>"$pids_file"
+  done
+
+  while IFS= read -r pid; do
+    if [[ -z "$pid" ]]; then
+      continue
+    fi
+    if kill -TERM "$pid" 2>/dev/null; then
+      stopped=$((stopped + 1))
+    fi
+  done <"$pids_file"
+
+  while IFS= read -r pid; do
+    if [[ -z "$pid" ]]; then
+      continue
+    fi
+    for ((attempt = 0; attempt < 100; attempt++)); do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        break
+      fi
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      add_result "FAIL" "stop coverage proxy processes" "process $pid did not exit"
+      return 1
+    fi
+  done <"$pids_file"
+
+  add_result "PASS" "stop coverage proxy processes" "$stopped process(es) stopped"
+}
+
+# Called from cleanup, which is invoked through trap.
+# shellcheck disable=SC2329
+finalize_integration_coverage() {
+  local report
+  local total
+
+  if ! find "$COVERAGE_DATA_DIR" -type f -name 'covmeta.*' -print -quit | grep -q .; then
+    add_result "FAIL" "integration coverage report" "coverage binary did not write metadata"
+    return 1
+  fi
+  if ! GOTOOLCHAIN=auto go tool covdata textfmt -i="$COVERAGE_DATA_DIR" -o="$COVERAGE_PROFILE"; then
+    add_result "FAIL" "integration coverage report" "could not convert coverage data"
+    return 1
+  fi
+  if ! report="$(GOTOOLCHAIN=auto go tool cover -func="$COVERAGE_PROFILE" 2>&1)"; then
+    add_result "FAIL" "integration coverage report" "$report"
+    return 1
+  fi
+  total="$(printf '%s\n' "$report" | awk '$1 == "total:" { print $NF }')"
+  if [[ -z "$total" ]]; then
+    add_result "FAIL" "integration coverage report" "total coverage is missing"
+    return 1
+  fi
+  COVERAGE_REPORT="$report"
+  add_result "PASS" "integration coverage report" "$total of statements"
+}
+
 # Invoked by the EXIT trap.
 # shellcheck disable=SC2329
 cleanup() {
   local code=$?
+
+  if [[ "$COVERAGE_ENABLED" == "1" ]]; then
+    if ! stop_coverage_proxies; then
+      code=1
+    fi
+  fi
+
   if [[ "${KCP_KEEP_KIND:-0}" == "1" ]]; then
     add_result "SKIP" "cleanup" "KCP_KEEP_KIND=1, leaving $TMP_DIR and kind clusters"
-    print_results
-    exit "$code"
+  else
+    if [[ -x "$BINARY" && -f "$KUBECONFIG_FILE" ]]; then
+      KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
+      KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$RO_PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
+      HOME="$TMP_DIR/home" KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$HASHED_PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
+      HOME="$TMP_DIR/home" KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$SAFE_PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
+      KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$DUPLICATE_PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
+    fi
+
+    if [[ "$TOUCHED_TEST_RESOURCES" == "1" && -n "${KUBECTL_BIN:-}" && -f "$KUBECONFIG_FILE" ]]; then
+      KUBECONFIG="$KUBECONFIG_FILE" "$KUBECTL_BIN" --request-timeout="$TIMEOUT" --context "$CTX_A" delete namespace "$WERF_NS" --ignore-not-found >/dev/null 2>&1 || true
+      KUBECONFIG="$KUBECONFIG_FILE" "$KUBECTL_BIN" --request-timeout="$TIMEOUT" --context "$CTX_B" delete namespace "$WERF_NS" --ignore-not-found >/dev/null 2>&1 || true
+    fi
+
+    local cluster
+    if [[ "${#CREATED_CLUSTERS[@]}" -gt 0 ]]; then
+      for cluster in "${CREATED_CLUSTERS[@]}"; do
+        kind delete cluster --name "$cluster" >/dev/null 2>&1 || true
+      done
+    fi
   fi
 
-  if [[ -x "$BINARY" && -f "$KUBECONFIG_FILE" ]]; then
-    KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
-    KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$RO_PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
-    HOME="$TMP_DIR/home" KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$HASHED_PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
-    HOME="$TMP_DIR/home" KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$SAFE_PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
-    KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$DUPLICATE_PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
+  if [[ "$COVERAGE_ENABLED" == "1" ]]; then
+    if ! finalize_integration_coverage; then
+      code=1
+    fi
   fi
 
-  if [[ "$TOUCHED_TEST_RESOURCES" == "1" && -n "${KUBECTL_BIN:-}" && -f "$KUBECONFIG_FILE" ]]; then
-    KUBECONFIG="$KUBECONFIG_FILE" "$KUBECTL_BIN" --request-timeout="$TIMEOUT" --context "$CTX_A" delete namespace "$WERF_NS" --ignore-not-found >/dev/null 2>&1 || true
-    KUBECONFIG="$KUBECONFIG_FILE" "$KUBECTL_BIN" --request-timeout="$TIMEOUT" --context "$CTX_B" delete namespace "$WERF_NS" --ignore-not-found >/dev/null 2>&1 || true
+  if [[ "${KCP_KEEP_KIND:-0}" != "1" ]]; then
+    rm -rf "$TMP_DIR"
   fi
-
-  local cluster
-  if [[ "${#CREATED_CLUSTERS[@]}" -gt 0 ]]; then
-    for cluster in "${CREATED_CLUSTERS[@]}"; do
-      kind delete cluster --name "$cluster" >/dev/null 2>&1 || true
-    done
+  if [[ "$HAD_FAILURE" -ne 0 ]]; then
+    code=1
   fi
-  rm -rf "$TMP_DIR"
   print_results
+  print_coverage_report
   exit "$code"
 }
 trap cleanup EXIT
@@ -428,13 +549,17 @@ EOF_MANIFEST
 }
 
 if [[ "${KCP_SKIP_MAKE_CHECK:-0}" == "1" ]]; then
-  if [[ -x "$BINARY" ]]; then
-    add_result "SKIP" "make check" "KCP_SKIP_MAKE_CHECK=1, using $BINARY"
-  else
-    add_result "FAIL" "make check" "KCP_SKIP_MAKE_CHECK=1 but $BINARY is missing or not executable"
-  fi
+  add_result "SKIP" "make check" "KCP_SKIP_MAKE_CHECK=1"
 else
   run_cmd "make check" make check
+fi
+
+if ! mkdir -p "$COVERAGE_DATA_DIR"; then
+  add_result "FAIL" "coverage data directory" "could not create $COVERAGE_DATA_DIR"
+elif run_cmd "build coverage binary" make build-cover; then
+  export GOCOVERDIR="$COVERAGE_DATA_DIR"
+  COVERAGE_ENABLED=1
+  run_cmd "coverage binary instrumentation" "$BINARY" version
 fi
 
 require_cmd kind
@@ -446,9 +571,9 @@ else
 fi
 
 if [[ ! -x "$BINARY" ]]; then
-  add_result "FAIL" "binary from make check" "$BINARY is missing or not executable"
+  add_result "FAIL" "coverage binary" "$BINARY is missing or not executable"
 else
-  add_result "PASS" "binary from make check" "$BINARY"
+  add_result "PASS" "coverage binary" "$BINARY"
 fi
 
 if [[ "$HAD_FAILURE" -ne 0 ]]; then

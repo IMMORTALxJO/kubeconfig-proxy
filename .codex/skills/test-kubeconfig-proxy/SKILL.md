@@ -13,7 +13,13 @@ Run the bundled script from the repository root:
 .codex/skills/test-kubeconfig-proxy/scripts/run.sh
 ```
 
-The script runs `make check`, creates or reuses local kind clusters named `kubeconfig-proxy-a` and `kubeconfig-proxy-b`, builds a temporary kubeconfig, adds proxy contexts using `bin/kubeconfig-proxy`, and validates real Kubernetes API behavior through pinned `kubectl`.
+The script runs `make check`, rebuilds `bin/kubeconfig-proxy` with Go coverage
+instrumentation, creates or reuses local kind clusters named
+`kubeconfig-proxy-a` and `kubeconfig-proxy-b`, builds a temporary kubeconfig,
+adds proxy contexts, and validates real Kubernetes API behavior through pinned
+`kubectl`. At the end it stops detached proxy processes, merges their
+`GOCOVERDIR` data with coverage from CLI invocations, and prints the standard
+per-function Go coverage report.
 
 The runner pins Kubernetes and `kubectl` to `v1.36.1`. New kind clusters are
 created with `kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5`.
@@ -31,7 +37,11 @@ Report the final Markdown status table from the script to the user. If the scrip
 
 The runner covers the first integration ring for this project:
 
-- `make check` and the resulting `bin/kubeconfig-proxy` binary.
+- `make check`.
+- A fresh `bin/kubeconfig-proxy` built with `-cover`, `-covermode=atomic`, and
+  `-coverpkg=./...`.
+- Integration coverage collected from CLI and detached proxy processes and
+  printed as a per-function report with a total statement percentage.
 - Required local tool: `kind`; `curl` is required only when the pinned `kubectl`
   client must be downloaded.
 - Pinned `kubectl v1.36.1`.
@@ -61,7 +71,8 @@ Use environment variables only when needed:
 
 - `KCP_KEEP_KIND=1` leaves clusters and temporary files in place for debugging.
 - `KCP_RECREATE_KIND=1` deletes existing `kubeconfig-proxy-a`/`kubeconfig-proxy-b` kind clusters before testing.
-- `KCP_SKIP_MAKE_CHECK=1` skips `make check` and uses the existing `bin/kubeconfig-proxy`.
+- `KCP_SKIP_MAKE_CHECK=1` skips `make check`; the coverage-instrumented binary
+  is still rebuilt.
 - `KCP_SKIP_WERF=1` skips the werf example when `werf` or image pulls are not available locally.
 - `KCP_WERF_NAMESPACE=<name>` sets the werf example namespace; by default the runner uses a unique temporary namespace.
 - `KCP_TEST_TIMEOUT=<duration>` sets kubectl request timeout, default `30s`.
