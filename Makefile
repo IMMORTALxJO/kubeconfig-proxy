@@ -21,10 +21,17 @@ YAMLFMT_FLAGS ?= -formatter retain_line_breaks=true
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
 YAML_FILES := $(shell find . \( -path './.git' -o -path './vendor' -o -path './examples/werf/.helm/templates' \) -prune -o \( -name '*.yaml' -o -name '*.yml' \) -print | sort)
-SHELL_FILES := install.sh .codex/skills/test-kubeconfig-proxy/scripts/run.sh
+SHELL_FILES := install.sh e2e/run.sh e2e/run-upstream-kubectl-e2e.sh
 GOTOOLCHAIN_ENV := GOTOOLCHAIN=$(GO_TOOLCHAIN)
+E2E_VARIANT_GOALS := $(filter local kubectl kind,$(MAKECMDGOALS))
 
-.PHONY: help fmt fmt-check yamlfmt yamlfmt-check vet staticcheck actionlint shellcheck gosec vuln test race build build-cover check clean
+.PHONY: help fmt fmt-check yamlfmt yamlfmt-check vet staticcheck actionlint shellcheck gosec vuln test race build build-cover check clean e2e local kubectl kind
+
+ifneq ($(strip $(E2E_VARIANT_GOALS)),)
+ifneq ($(words $(E2E_VARIANT_GOALS)),1)
+$(error use one e2e variant: make e2e local, make e2e kind, or make e2e kubectl)
+endif
+endif
 
 help:
 	@echo "Available targets:"
@@ -41,6 +48,11 @@ help:
 	@echo "  build        Build the CLI binary"
 	@echo "  build-cover  Build the CLI binary with coverage instrumentation"
 	@echo "  check        Run all CI checks"
+
+	@echo "  e2e          Run all e2e suites (kind, then upstream kubectl)"
+	@echo "  e2e local    Run only e2e/tests/test_* with kind/proxy setup"
+	@echo "  e2e kind     Run the two-cluster kind integration suite"
+	@echo "  e2e kubectl  Run the upstream kubectl compatibility suite"
 	@echo "  clean        Remove local build artifacts"
 
 fmt:
@@ -85,6 +97,24 @@ build-cover:
 	$(GOTOOLCHAIN_ENV) $(GO) build -cover -covermode=atomic -coverpkg=$(COVER_PACKAGES) -trimpath -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PACKAGE)
 
 check: fmt-check vet staticcheck actionlint shellcheck gosec vuln test race build
+
+ifeq ($(strip $(E2E_VARIANT_GOALS)),)
+e2e:
+	$(MAKE) --no-print-directory kind
+	$(MAKE) --no-print-directory kubectl
+else
+e2e:
+	@:
+endif
+
+local:
+	KCP_SKIP_MAKE_CHECK=1 KCP_SKIP_WERF=1 KCP_E2E_CUSTOM_TESTS_ONLY=1 e2e/run.sh
+
+kind:
+	e2e/run.sh
+
+kubectl:
+	e2e/run-upstream-kubectl-e2e.sh
 
 clean:
 	rm -rf $(BUILD_DIR)

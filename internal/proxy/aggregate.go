@@ -16,7 +16,7 @@ func (p *Proxy) aggregateList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	responses := p.doAll(r.Context(), r, nil)
+	responses := p.doAll(r.Context(), requestAcceptingJSONOnly(r), nil)
 	okResponses := make([]upstreamResponse, 0, len(responses))
 	for _, response := range responses {
 		if response.err != nil {

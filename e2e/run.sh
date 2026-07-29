@@ -17,6 +17,7 @@ DUPLICATE_PROXY_CONTEXT="kind-proxy-duplicate"
 CTX_A="kind-kubeconfig-proxy-a"
 CTX_B="kind-kubeconfig-proxy-b"
 NS="default"
+NAMESPACE="${KCP_E2E_NAMESPACE:-kubeconfig-proxy-e2e-tests}"
 WERF_NS="${KCP_WERF_NAMESPACE:-kcp-werf-$$}"
 TIMEOUT="${KCP_TEST_TIMEOUT:-30s}"
 CLUSTER_READY_TIMEOUT="${KCP_CLUSTER_READY_TIMEOUT:-120s}"
@@ -24,11 +25,13 @@ WERF_TIMEOUT="${KCP_WERF_TIMEOUT:-180}"
 BINARY="$ROOT/bin/kubeconfig-proxy"
 COVERAGE_DATA_DIR="$TMP_DIR/coverage-data"
 COVERAGE_PROFILE="$TMP_DIR/integration-coverage.out"
+COVERAGE_HTML="${KCP_COVERAGE_HTML:-$ROOT/.codex/reports/coverage.html}"
 KUBERNETES_VERSION="v1.36.1"
 KUBECTL_VERSION="v1.36.1"
 KIND_NODE_IMAGE="kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5"
 KUBECTL_BIN=""
 KCP_CACHE_DIR="${KCP_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/kubeconfig-proxy}"
+CUSTOM_TESTS_ONLY="${KCP_E2E_CUSTOM_TESTS_ONLY:-0}"
 TOUCHED_TEST_RESOURCES=0
 COVERAGE_ENABLED=0
 COVERAGE_REPORT=""
@@ -37,6 +40,7 @@ declare -a RESULT_STATUS=()
 declare -a RESULT_NAME=()
 declare -a RESULT_DETAILS=()
 declare -a CREATED_CLUSTERS=()
+declare -a COVERAGE_PROXY_PIDS=()
 HAD_FAILURE=0
 
 sanitize() {
@@ -123,9 +127,16 @@ stop_coverage_proxies() {
 
   : >"$pids_file"
 
+  for pid in "${COVERAGE_PROXY_PIDS[@]:-}"; do
+    printf '%s\n' "$pid" >>"$pids_file"
+  done
+
   for state_path in "$STATE_FILE" "$RO_STATE_FILE"; do
     proxy_pids_for_state "$state_path" >>"$pids_file"
   done
+
+  awk 'NF && !seen[$0]++' "$pids_file" >"${pids_file}.unique"
+  mv "${pids_file}.unique" "$pids_file"
 
   while IFS= read -r pid; do
     if [[ -z "$pid" ]]; then
@@ -155,6 +166,33 @@ stop_coverage_proxies() {
   add_result "PASS" "stop coverage proxy processes" "$stopped process(es) stopped"
 }
 
+# Invoked indirectly through run_cmd.
+# shellcheck disable=SC2329
+start_coverage_proxy() {
+  local state_path="$1"
+  local log_path="${state_path}.log"
+  local pid
+  local attempt
+
+  "$BINARY" serve --state "$state_path" >/dev/null 2>&1 &
+  pid=$!
+  COVERAGE_PROXY_PIDS+=("$pid")
+
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    if grep -q 'listen:' "$log_path" 2>/dev/null; then
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid"
+      return 1
+    fi
+    sleep 0.1
+  done
+
+  printf 'coverage proxy did not become ready: %s\n' "$state_path" >&2
+  return 1
+}
+
 # Called from cleanup, which is invoked through trap.
 # shellcheck disable=SC2329
 finalize_integration_coverage() {
@@ -173,13 +211,21 @@ finalize_integration_coverage() {
     add_result "FAIL" "integration coverage report" "$report"
     return 1
   fi
+  if ! mkdir -p "$(dirname "$COVERAGE_HTML")"; then
+    add_result "FAIL" "integration coverage report" "could not create report directory for $COVERAGE_HTML"
+    return 1
+  fi
+  if ! GOTOOLCHAIN=auto go tool cover -html="$COVERAGE_PROFILE" -o "$COVERAGE_HTML"; then
+    add_result "FAIL" "integration coverage report" "could not write $COVERAGE_HTML"
+    return 1
+  fi
   total="$(printf '%s\n' "$report" | awk '$1 == "total:" { print $NF }')"
   if [[ -z "$total" ]]; then
     add_result "FAIL" "integration coverage report" "total coverage is missing"
     return 1
   fi
   COVERAGE_REPORT="$report"
-  add_result "PASS" "integration coverage report" "$total of statements"
+  add_result "PASS" "integration coverage report" "$total of statements; HTML: $COVERAGE_HTML"
 }
 
 # Invoked by the EXIT trap.
@@ -247,6 +293,22 @@ run_cmd() {
   return 1
 }
 
+run_streamed() {
+  local name="$1"
+  shift
+  local log_file="$TMP_DIR/${#RESULT_STATUS[@]}.log"
+  local output
+
+  printf '\n==> %s\n' "$name"
+  if "$@" 2>&1 | tee "$log_file"; then
+    add_result "PASS" "$name" "ok"
+    return 0
+  fi
+  output="$(tail -n 40 "$log_file" 2>/dev/null || true)"
+  add_result "FAIL" "$name" "$output"
+  return 1
+}
+
 require_cmd() {
   local cmd="$1"
   if command -v "$cmd" >/dev/null 2>&1; then
@@ -265,6 +327,41 @@ kubectl_ctx() {
   local ctx="$1"
   shift
   kubectl_cmd --context "$ctx" "$@"
+}
+
+check_proxy_log() {
+  local state_path="$1"
+  local log_path="${state_path}.log"
+
+  if [[ -s "$log_path" ]]; then
+    add_result "PASS" "proxy serve logging" "$log_path"
+  else
+    add_result "FAIL" "proxy serve logging" "expected non-empty $log_path"
+  fi
+}
+
+run_custom_e2e_tests() {
+  local test_path
+  local found=0
+
+  for test_path in "$ROOT"/e2e/tests/test_*; do
+    [[ -f "$test_path" ]] || continue
+    found=1
+    run_streamed "custom e2e test: ${test_path#"$ROOT"/}" \
+      env \
+      KUBECTL_BIN="$KUBECTL_BIN" \
+      KCP_BIN="$BINARY" \
+      KUBECONFIG="$KUBECONFIG_FILE" \
+      CONTEXT_PROXY="$PROXY_CONTEXT" \
+      CONTEXT_A="$CTX_A" \
+      CONTEXT_B="$CTX_B" \
+      NAMESPACE="$NAMESPACE" \
+      bash "$test_path"
+  done
+
+  if [[ "$found" == "0" ]]; then
+    add_result "SKIP" "custom e2e tests" "no files matching e2e/tests/test_*"
+  fi
 }
 
 expect_not_found() {
@@ -604,6 +701,25 @@ run_cmd "add proxy context" "$BINARY" add-context "$PROXY_CONTEXT" \
   --logs-enabled \
   --exec-command "$BINARY"
 
+if [[ "$COVERAGE_ENABLED" == "1" ]]; then
+  if start_coverage_proxy "$STATE_FILE"; then
+    add_result "PASS" "start coverage proxy" "ok"
+  else
+    add_result "FAIL" "start coverage proxy" "could not start $STATE_FILE"
+  fi
+fi
+run_cmd "proxy discovery through exec credential" kubectl_ctx "$PROXY_CONTEXT" version
+
+run_custom_e2e_tests
+
+if [[ "$CUSTOM_TESTS_ONLY" == "1" ]]; then
+  check_proxy_log "$STATE_FILE"
+  if [[ "$HAD_FAILURE" -ne 0 ]]; then
+    exit 1
+  fi
+  exit 0
+fi
+
 run_cmd "add read-only proxy context" "$BINARY" add-context "$RO_PROXY_CONTEXT" \
   --kubeconfig "$KUBECONFIG_FILE" \
   --state "$RO_STATE_FILE" \
@@ -613,7 +729,16 @@ run_cmd "add read-only proxy context" "$BINARY" add-context "$RO_PROXY_CONTEXT" 
   --proxy-ttl "2m" \
   --request-timeout "$TIMEOUT" \
   --read-only \
+  --logs-enabled \
   --exec-command "$BINARY"
+
+if [[ "$COVERAGE_ENABLED" == "1" ]]; then
+  if start_coverage_proxy "$RO_STATE_FILE"; then
+    add_result "PASS" "start read-only coverage proxy" "ok"
+  else
+    add_result "FAIL" "start read-only coverage proxy" "could not start $RO_STATE_FILE"
+  fi
+fi
 
 duplicate_output="$("$BINARY" add-context "$DUPLICATE_PROXY_CONTEXT" \
   --kubeconfig "$KUBECONFIG_FILE" \
@@ -632,11 +757,13 @@ run_cmd "add proxy context with hashed default state path" env HOME="$TMP_DIR/ho
   --kubeconfig "$KUBECONFIG_FILE" \
   --contexts "$CTX_A,$CTX_B" \
   --listen "127.0.0.1:0" \
+  --logs-enabled \
   --exec-command "$BINARY"
 run_cmd "add proxy context with safe default state path" env HOME="$TMP_DIR/home" "$BINARY" add-context "$SAFE_PROXY_CONTEXT" \
   --kubeconfig "$KUBECONFIG_FILE" \
   --contexts "$CTX_A,$CTX_B" \
   --listen "127.0.0.1:0" \
+  --logs-enabled \
   --exec-command "$BINARY"
 state_file_count="$(find "$TMP_DIR/home/.kube/kubeconfig-proxy" -type f -name '*.yaml' | wc -l | tr -d ' ')"
 if [[ "$state_file_count" == "2" ]]; then
@@ -644,8 +771,6 @@ if [[ "$state_file_count" == "2" ]]; then
 else
   add_result "FAIL" "default state paths avoid sanitized-name collisions" "found $state_file_count state files"
 fi
-
-run_cmd "proxy discovery and exec credential auto-start" kubectl_ctx "$PROXY_CONTEXT" version
 
 run_cmd "seed aggregate resources in source clusters" bash -c "
   set -euo pipefail
@@ -676,6 +801,8 @@ if [[ "$readonly_list_output" == *"kcp-only-a=$CTX_A"* && "$readonly_list_output
 else
   add_result "FAIL" "read-only proxy allows list reads" "$readonly_list_output"
 fi
+check_proxy_log "$STATE_FILE"
+check_proxy_log "$RO_STATE_FILE"
 
 run_cmd "fan-out create mutation" kubectl_ctx "$PROXY_CONTEXT" -n "$NS" create configmap kcp-fanout --from-literal=value=shared
 expect_exists "fan-out object exists in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-fanout

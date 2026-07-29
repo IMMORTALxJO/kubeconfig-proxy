@@ -10,16 +10,22 @@ description: Run kubeconfig-proxy validation and local integration tests. Use wh
 Run the bundled script from the repository root:
 
 ```bash
-.codex/skills/test-kubeconfig-proxy/scripts/run.sh
+e2e/run.sh
 ```
+
+Equivalent Make targets are `make e2e` for all suites, `make e2e kind` for the
+two-cluster runner, `make e2e kubectl` for upstream compatibility, and
+`make e2e local` for only `e2e/tests/test_*` after kind/proxy setup.
 
 The script runs `make check`, rebuilds `bin/kubeconfig-proxy` with Go coverage
 instrumentation, creates or reuses local kind clusters named
 `kubeconfig-proxy-a` and `kubeconfig-proxy-b`, builds a temporary kubeconfig,
-adds proxy contexts, and validates real Kubernetes API behavior through pinned
-`kubectl`. At the end it stops detached proxy processes, merges their
+adds proxy contexts with serve logging enabled, and validates real Kubernetes
+API behavior through pinned `kubectl`. At the end it stops detached proxy
+processes, merges their
 `GOCOVERDIR` data with coverage from CLI invocations, and prints the standard
-per-function Go coverage report.
+per-function Go coverage report. It also writes the HTML report to
+`.codex/reports/coverage.html`.
 
 The runner pins Kubernetes and `kubectl` to `v1.36.1`. New kind clusters are
 created with `kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5`.
@@ -30,6 +36,65 @@ running proxy behavior checks. If the local `kubectl` is missing or not `v1.36.1
 the runner uses a cached official `v1.36.1` binary or downloads one and verifies
 its sha256 checksum. The default cache root is
 `${XDG_CACHE_HOME:-$HOME/.cache}/kubeconfig-proxy`.
+
+## Upstream kubectl compatibility
+
+Run the upstream Kubernetes `[sig-cli] Kubectl client` e2e suite through a
+single-source proxy context with:
+
+```bash
+e2e/run-upstream-kubectl-e2e.sh
+```
+
+The runner builds Kubernetes `v1.36.1` from a cached shallow checkout, creates
+or reuses the `kubeconfig-proxy-kubectl-e2e` kind cluster, and runs `e2e.test`
+with the direct source context for framework setup and assertions. A temporary
+wrapper replaces the e2e framework's `--kubeconfig` and `--context` arguments
+only for the upstream `kubectl` subprocess, forcing every tested CLI command
+through `kind-proxy-kubectl-e2e`. It also removes only the source-cluster
+`--server` argument injected by the framework; a distinct `--server` explicitly
+used by a test is preserved. It deliberately does not pass `--host`, because
+that would override the proxy server configured in the kubeconfig.
+Before any e2e command it builds one coverage-instrumented
+`bin/kubeconfig-proxy`; every CLI invocation and exec-credential-started proxy
+process uses that file with serve logging enabled. The runner always writes a
+final per-function and total coverage report from its `GOCOVERDIR` data and
+creates `.codex/reports/coverage.html`.
+The runner streams upstream Ginkgo output to the terminal in real time while
+also retaining its per-step log file for failures.
+The wrapper implements the upstream `kubectl.sh path` contract so the
+in-cluster-config test can copy the real kubectl binary into its pod.
+That test is excluded by default because it validates a direct in-pod
+`kubernetes.default.svc` configuration rather than the host proxy kubeconfig;
+set `KCP_KUBECTL_E2E_SKIP=` to include it deliberately.
+
+This is a single-source transparency test, not a multi-cluster routing test:
+the upstream e2e framework expects one coherent API server. Keep the regular
+two-cluster runner as the integration coverage for aggregation and fan-out.
+
+Useful options:
+
+- `KCP_KUBECTL_E2E_FOCUS=<regexp>` overrides the default
+  `[sig-cli] Kubectl client` Ginkgo focus for a fast targeted run.
+- `KCP_KUBECTL_E2E_SKIP=<regexp>` skips selected Ginkgo specs.
+- `KCP_KUBECTL_E2E_TIMEOUT=<duration>` changes the Ginkgo suite timeout,
+  default `6h`.
+- `KCP_KUBERNETES_SOURCE=<path>` uses an existing Kubernetes `v1.36.1`
+  checkout instead of the cache.
+- `KCP_KUBECTL_E2E_RECREATE_KIND=1` recreates the dedicated kind cluster.
+- `KCP_KEEP_KIND=1` leaves the cluster, temporary kubeconfig, e2e report,
+  proxy state, and enabled serve log in place for debugging.
+- `KCP_COVERAGE_HTML=<path>` changes the HTML coverage report path; by default
+  each e2e runner writes `.codex/reports/coverage.html` (the latest run wins).
+
+Kubernetes `v1.36.1` requires Bash 4.2 or newer to build. On macOS, install it
+with `brew install bash`; the runner finds the Homebrew path automatically, or
+accepts `KCP_KUBECTL_E2E_BASH=/path/to/bash`. When no suitable Bash is
+available, the runner builds native-platform binaries in Docker with
+`golang:1.26.0-bookworm`; override that image with
+`KCP_KUBECTL_E2E_BUILDER_IMAGE` if needed.
+Set `KCP_KUBECTL_E2E_DOCKER_PULL_TIMEOUT_SECONDS` to change the Docker image
+pull timeout (default `300`).
 
 Report the final Markdown status table from the script to the user. If the script exits non-zero, keep the table first and briefly mention the failed checks.
 
@@ -49,6 +114,9 @@ The runner covers the first integration ring for this project:
   Kubernetes `v1.36.1` with Ready nodes, using contexts
   `kind-kubeconfig-proxy-a` and `kind-kubeconfig-proxy-b`.
 - Proxy context creation and exec-credential auto-start.
+- Every regular file matching `e2e/tests/test_*`, run after proxy startup with
+  its output streamed to the terminal. The test passes only when its exit code
+  is zero.
 - Aggregated list responses with the virtual `context` label.
 - Aggregated list pagination with a global limit and cross-context continuation.
 - Duplicate source-context rejection before proxy state is written.
@@ -79,3 +147,30 @@ Use environment variables only when needed:
 - `KCP_CLUSTER_READY_TIMEOUT=<duration>` sets kind node readiness timeout, default `120s`.
 - `KCP_WERF_TIMEOUT=<seconds>` sets werf resource tracking timeout, default `180`.
 - `KCP_CACHE_DIR=<path>` overrides the cache root for downloaded pinned tools.
+
+## Custom e2e checks
+
+Place Bash scripts named `test_*` in `e2e/tests/`. The main two-cluster runner
+executes every regular matching file after the proxy context has started and
+continues to later custom checks even when one fails. Each script's output is
+streamed to the terminal; a zero exit code is reported as a pass and a non-zero
+exit code as a failure.
+
+`make e2e local` uses `KCP_E2E_CUSTOM_TESTS_ONLY=1`: it prepares the two kind
+contexts and the main proxy context, runs only these custom scripts, then
+cleans up and writes coverage without running the built-in kind assertions.
+
+Each script receives these environment variables:
+
+| Variable | Value |
+| --- | --- |
+| `KUBECTL_BIN` | Absolute path to the pinned `kubectl` binary. |
+| `KCP_BIN` | Absolute path to the coverage-instrumented `kubeconfig-proxy` binary. |
+| `KUBECONFIG` | Temporary kubeconfig used by the e2e run. |
+| `CONTEXT_PROXY` | Generated multi-cluster proxy context. |
+| `CONTEXT_A` | Source context for kind cluster `kubeconfig-proxy-a`. |
+| `CONTEXT_B` | Source context for kind cluster `kubeconfig-proxy-b`. |
+| `NAMESPACE` | `kubeconfig-proxy-e2e-tests`, stable for the whole run and available for custom test resources. |
+
+Set `KCP_E2E_NAMESPACE=<name>` to use another fixed namespace name for one
+run. Custom tests own the namespace lifecycle.

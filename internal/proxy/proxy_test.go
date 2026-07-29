@@ -519,6 +519,69 @@ func TestPatchNamedResourceUsesExistingResourceAnnotations(t *testing.T) {
 	}
 }
 
+func TestPutPodEphemeralContainersUsesExistingPodTarget(t *testing.T) {
+	calls := &callRecorder{}
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				if r.URL.Path != "/api/v1/namespaces/default/pods/demo" {
+					t.Fatalf("lookup path = %s, want pod path", r.URL.Path)
+				}
+				calls.add("one:get")
+				http.NotFound(w, r)
+			case http.MethodPut:
+				t.Fatalf("put should not be routed to a target where the pod is missing")
+			default:
+				t.Fatalf("unexpected method %s", r.Method)
+			}
+		},
+		"two": func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				switch r.URL.Path {
+				case "/api/v1/namespaces/default/pods/demo":
+					calls.add("two:get")
+					_, _ = w.Write([]byte(`{"kind":"Pod","metadata":{"name":"demo"}}`))
+				case "/api/v1/namespaces/default/pods/demo/ephemeralcontainers":
+					calls.add("two:get-ephemeralcontainers")
+					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				default:
+					t.Fatalf("lookup path = %s, want pod or ephemeralcontainers path", r.URL.Path)
+				}
+			case http.MethodPut:
+				if r.URL.Path != "/api/v1/namespaces/default/pods/demo/ephemeralcontainers" {
+					t.Fatalf("put path = %s, want ephemeral containers path", r.URL.Path)
+				}
+				calls.add("two:put")
+				_, _ = io.Copy(io.Discard, r.Body)
+				_, _ = w.Write([]byte(`{"kind":"Pod","metadata":{"name":"demo"}}`))
+			default:
+				t.Fatalf("unexpected method %s", r.Method)
+			}
+		},
+	})
+	defer cleanup()
+
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/namespaces/default/pods/demo/ephemeralcontainers", strings.NewReader(`{"ephemeralContainers":[]}`))
+	rec := httptest.NewRecorder()
+	serveTestHTTP(p, rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	gotCalls := calls.snapshot()
+	for _, want := range []string{"one:get", "two:get", "two:get-ephemeralcontainers", "two:put"} {
+		if !slices.Contains(gotCalls, want) {
+			t.Fatalf("calls = %v, want %s", gotCalls, want)
+		}
+	}
+}
+
 func TestContextNameAnnotationRejectsUnknownTarget(t *testing.T) {
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
 		"one": func(_ http.ResponseWriter, _ *http.Request) {
@@ -601,6 +664,47 @@ func TestAggregatesListResponses(t *testing.T) {
 	}
 	if payload.Items[1].Metadata.Labels["context"] != "two" {
 		t.Fatalf("second item labels = %#v", payload.Items[1].Metadata.Labels)
+	}
+}
+
+func TestAggregatedListsRequestJSONInsteadOfProtobuf(t *testing.T) {
+	var acceptsMu sync.Mutex
+	var accepts []string
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		acceptsMu.Lock()
+		accepts = append(accepts, r.Header.Get("Accept"))
+		acceptsMu.Unlock()
+		_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"10"},"items":[]}`))
+	}
+	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
+		"one": handler,
+		"two": handler,
+	})
+	defer cleanup()
+
+	p, err := newTestProxy(targets, targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/namespaces/default/pods", http.NoBody)
+	req.Header.Set("Accept", "application/json;as=Table;g=meta.k8s.io;v=v1, application/vnd.kubernetes.protobuf;as=Table;g=meta.k8s.io;v=v1, application/json, application/vnd.kubernetes.protobuf")
+	rec := httptest.NewRecorder()
+	serveTestHTTP(p, rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if len(accepts) != 2 {
+		t.Fatalf("upstream requests = %d, want 2", len(accepts))
+	}
+	for _, accept := range accepts {
+		if strings.Contains(accept, "application/vnd.kubernetes.protobuf") {
+			t.Fatalf("upstream Accept = %q, must not include protobuf", accept)
+		}
+		if !strings.Contains(accept, "application/json;as=Table;g=meta.k8s.io;v=v1") {
+			t.Fatalf("upstream Accept = %q, must preserve JSON Table media range", accept)
+		}
 	}
 }
 
@@ -1979,7 +2083,7 @@ func TestTargetsForExistingResourceMutationRejectsUnexpectedLookupStatus(t *test
 	}
 	req := httptest.NewRequest(http.MethodPatch, "/api/v1/namespaces/default/configmaps/demo", http.NoBody)
 
-	_, _, err = p.targetsForExistingResourceMutation(context.Background(), req)
+	_, _, err = p.targetsForExistingResourceMutation(context.Background(), req, req.URL.Path)
 	if err == nil || !strings.Contains(err.Error(), "one: get existing resource before mutation returned HTTP 403") {
 		t.Fatalf("error = %v, want lookup status error", err)
 	}

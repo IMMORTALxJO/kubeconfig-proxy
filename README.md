@@ -264,6 +264,40 @@ Run the full local check suite used by CI:
 make check
 ```
 
+Add project-specific two-cluster checks as Bash files matching
+`e2e/tests/test_*`. `e2e/run.sh` starts the proxy first, streams each test's
+output live, and marks it as passed only when it exits with code zero. Each
+test receives `KUBECTL_BIN`, `KCP_BIN`, `KUBECONFIG`, `CONTEXT_PROXY`,
+`CONTEXT_A`, `CONTEXT_B`, and `NAMESPACE` in its environment. `NAMESPACE` is
+the stable `kubeconfig-proxy-e2e-tests` namespace name for resources owned by
+those tests.
+
+Run e2e suites through Make:
+
+```bash
+make e2e          # all suites: kind, then upstream kubectl
+make e2e local    # only e2e/tests/test_*, after kind/proxy setup
+make e2e kind     # two-cluster kind integration suite
+make e2e kubectl  # upstream kubectl compatibility suite
+```
+
+Run the upstream Kubernetes `kubectl` e2e compatibility suite through a
+single-source proxy context:
+
+```bash
+e2e/run-upstream-kubectl-e2e.sh
+```
+
+The runner builds the pinned Kubernetes source and can take a long time. It is
+intended for host-side proxy kubeconfig compatibility; upstream's direct
+in-cluster-config scenario is excluded by default. It builds one
+coverage-instrumented `bin/kubeconfig-proxy` before e2e, enables proxy serve
+logging, and writes the final HTML coverage report to
+`.codex/reports/coverage.html` after cleanup. It is separate from the two-cluster
+integration runner because the upstream e2e suite
+expects one coherent Kubernetes API server; multi-cluster aggregation and
+fan-out remain covered by the project integration tests.
+
 Release builds are produced by GitHub Actions when a `v*` tag is pushed. The
 release workflow injects that tag into `kubeconfig-proxy version`.
 

@@ -80,7 +80,7 @@ func (p *Proxy) newPaginatedListState(r *http.Request) (*paginatedListState, int
 }
 
 func (p *Proxy) initializePaginatedResourceVersions(w http.ResponseWriter, r *http.Request, state *paginatedListState) bool {
-	request := paginatedRequestForTarget(r, 1, "")
+	request := requestAcceptingJSONOnly(paginatedRequestForTarget(r, 1, ""))
 	for _, response := range p.doAll(r.Context(), request, nil) {
 		page, ok := inspectPaginatedResponse(w, response)
 		if !ok {
@@ -111,7 +111,7 @@ func (p *Proxy) collectPaginatedResponses(w http.ResponseWriter, r *http.Request
 }
 
 func (p *Proxy) fetchPaginatedPage(w http.ResponseWriter, r *http.Request, target Target, state *paginatedListState) (upstreamResponse, listPageInfo, bool) {
-	request := paginatedRequestForTarget(r, state.remaining(), state.upstreamContinue)
+	request := requestAcceptingJSONOnly(paginatedRequestForTarget(r, state.remaining(), state.upstreamContinue))
 	if state.upstreamContinue == "" {
 		applyListResourceVersion(request, state.resourceVersions[target.Name])
 	}

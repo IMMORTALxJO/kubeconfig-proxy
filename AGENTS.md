@@ -54,7 +54,7 @@ Before handing off meaningful code changes, prefer `make check`. It runs formatt
 For real-cluster integration coverage, use the repository skill:
 
 ```bash
-.codex/skills/test-kubeconfig-proxy/scripts/run.sh
+e2e/run.sh
 ```
 
 When adding new user-visible proxy behavior, add or update checks in
