@@ -519,47 +519,16 @@ func TestPatchNamedResourceUsesExistingResourceAnnotations(t *testing.T) {
 	}
 }
 
+const (
+	testPodPath                    = "/api/v1/namespaces/default/pods/demo"
+	testPodEphemeralContainersPath = testPodPath + "/ephemeralcontainers"
+)
+
 func TestPutPodEphemeralContainersUsesExistingPodTarget(t *testing.T) {
 	calls := &callRecorder{}
 	targets, cleanup := testTargets(t, map[string]http.HandlerFunc{
-		"one": func(w http.ResponseWriter, r *http.Request) {
-			switch r.Method {
-			case http.MethodGet:
-				if r.URL.Path != "/api/v1/namespaces/default/pods/demo" {
-					t.Fatalf("lookup path = %s, want pod path", r.URL.Path)
-				}
-				calls.add("one:get")
-				http.NotFound(w, r)
-			case http.MethodPut:
-				t.Fatalf("put should not be routed to a target where the pod is missing")
-			default:
-				t.Fatalf("unexpected method %s", r.Method)
-			}
-		},
-		"two": func(w http.ResponseWriter, r *http.Request) {
-			switch r.Method {
-			case http.MethodGet:
-				switch r.URL.Path {
-				case "/api/v1/namespaces/default/pods/demo":
-					calls.add("two:get")
-					_, _ = w.Write([]byte(`{"kind":"Pod","metadata":{"name":"demo"}}`))
-				case "/api/v1/namespaces/default/pods/demo/ephemeralcontainers":
-					calls.add("two:get-ephemeralcontainers")
-					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				default:
-					t.Fatalf("lookup path = %s, want pod or ephemeralcontainers path", r.URL.Path)
-				}
-			case http.MethodPut:
-				if r.URL.Path != "/api/v1/namespaces/default/pods/demo/ephemeralcontainers" {
-					t.Fatalf("put path = %s, want ephemeral containers path", r.URL.Path)
-				}
-				calls.add("two:put")
-				_, _ = io.Copy(io.Discard, r.Body)
-				_, _ = w.Write([]byte(`{"kind":"Pod","metadata":{"name":"demo"}}`))
-			default:
-				t.Fatalf("unexpected method %s", r.Method)
-			}
-		},
+		"one": missingPodMutationHandler(t, calls),
+		"two": existingPodMutationHandler(t, calls),
 	})
 	defer cleanup()
 
@@ -567,7 +536,7 @@ func TestPutPodEphemeralContainersUsesExistingPodTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/namespaces/default/pods/demo/ephemeralcontainers", strings.NewReader(`{"ephemeralContainers":[]}`))
+	req := httptest.NewRequest(http.MethodPut, testPodEphemeralContainersPath, strings.NewReader(`{"ephemeralContainers":[]}`))
 	rec := httptest.NewRecorder()
 	serveTestHTTP(p, rec, req)
 
@@ -580,6 +549,68 @@ func TestPutPodEphemeralContainersUsesExistingPodTarget(t *testing.T) {
 			t.Fatalf("calls = %v, want %s", gotCalls, want)
 		}
 	}
+}
+
+func missingPodMutationHandler(t *testing.T, calls *callRecorder) http.HandlerFunc {
+	t.Helper()
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			expectTestRequestPath(t, r, testPodPath)
+			calls.add("one:get")
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method == http.MethodPut {
+			t.Fatal("put should not be routed to a target where the pod is missing")
+		}
+		t.Fatalf("unexpected method %s", r.Method)
+	}
+}
+
+func existingPodMutationHandler(t *testing.T, calls *callRecorder) http.HandlerFunc {
+	t.Helper()
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleExistingPodLookup(t, calls, w, r)
+		case http.MethodPut:
+			expectTestRequestPath(t, r, testPodEphemeralContainersPath)
+			calls.add("two:put")
+			_, _ = io.Copy(io.Discard, r.Body)
+			writeTestPod(w)
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	}
+}
+
+func handleExistingPodLookup(t *testing.T, calls *callRecorder, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+
+	switch r.URL.Path {
+	case testPodPath:
+		calls.add("two:get")
+		writeTestPod(w)
+	case testPodEphemeralContainersPath:
+		calls.add("two:get-ephemeralcontainers")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	default:
+		t.Fatalf("lookup path = %s, want pod or ephemeralcontainers path", r.URL.Path)
+	}
+}
+
+func expectTestRequestPath(t *testing.T, r *http.Request, want string) {
+	t.Helper()
+
+	if r.URL.Path != want {
+		t.Fatalf("request path = %s, want %s", r.URL.Path, want)
+	}
+}
+
+func writeTestPod(w http.ResponseWriter) {
+	_, _ = w.Write([]byte(`{"kind":"Pod","metadata":{"name":"demo"}}`))
 }
 
 func TestContextNameAnnotationRejectsUnknownTarget(t *testing.T) {
