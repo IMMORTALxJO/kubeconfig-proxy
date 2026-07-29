@@ -17,6 +17,7 @@ DUPLICATE_PROXY_CONTEXT="kind-proxy-duplicate"
 CTX_A="kind-kubeconfig-proxy-a"
 CTX_B="kind-kubeconfig-proxy-b"
 NS="default"
+AGGREGATION_TEST_SELECTOR="kubeconfig-proxy.io/e2e-aggregation=true"
 WERF_NS="${KCP_WERF_NAMESPACE:-kcp-werf-$$}"
 TIMEOUT="${KCP_TEST_TIMEOUT:-30s}"
 CLUSTER_READY_TIMEOUT="${KCP_CLUSTER_READY_TIMEOUT:-120s}"
@@ -571,9 +572,11 @@ cleanup_test_resources() {
   local ctx
   for ctx in "$CTX_A" "$CTX_B"; do
     kubectl_ctx "$ctx" -n "$NS" delete pod kcp-debug-pod kcp-subresource-pod --ignore-not-found >/dev/null 2>&1 || true
+    kubectl_ctx "$ctx" -n "$NS" delete deployment kcp-rollout --ignore-not-found >/dev/null 2>&1 || true
     kubectl_ctx "$ctx" -n "$NS" delete configmap \
-    kcp-only-a kcp-only-b kcp-fanout kcp-target-b kcp-single kcp-delete-a kcp-readonly kcp-watch-a kcp-watch-b \
+    kcp-only-a kcp-only-b kcp-page-a-{1..9} kcp-page-b-{1..9} kcp-fanout kcp-target-b kcp-single kcp-delete-a kcp-readonly kcp-watch-a kcp-watch-b \
       --ignore-not-found >/dev/null 2>&1 || true
+    kubectl_ctx "$ctx" -n "$NS" delete configmap --selector="$AGGREGATION_TEST_SELECTOR" --ignore-not-found >/dev/null 2>&1 || true
     kubectl_ctx "$ctx" -n "$NS" delete secret sh.helm.release.v1.kcp.v1 --ignore-not-found >/dev/null 2>&1 || true
   done
 }
@@ -584,6 +587,8 @@ source "$ROOT/e2e/checks/context.sh"
 source "$ROOT/e2e/checks/aggregation.sh"
 # shellcheck source=e2e/checks/routing.sh
 source "$ROOT/e2e/checks/routing.sh"
+# shellcheck source=e2e/checks/rollout.sh
+source "$ROOT/e2e/checks/rollout.sh"
 # shellcheck source=e2e/checks/subresources.sh
 source "$ROOT/e2e/checks/subresources.sh"
 # shellcheck source=e2e/checks/watch.sh
@@ -682,6 +687,7 @@ run_aggregation_checks
 check_proxy_log "$STATE_FILE"
 check_proxy_log "$RO_STATE_FILE"
 run_routing_checks
+run_rollout_checks
 run_subresource_checks
 run_watch_checks
 run_werf_checks
