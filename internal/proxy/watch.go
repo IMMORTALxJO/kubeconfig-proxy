@@ -100,7 +100,7 @@ func (p *Proxy) selectedWatchIsEmpty(r *http.Request) (bool, *upstreamResponse) 
 	listRequest.Body = nil
 	listRequest.ContentLength = 0
 
-	responses := p.doAll(r.Context(), listRequest, nil)
+	responses := p.doAll(r.Context(), requestAcceptingJSONOnly(listRequest), nil)
 	for _, response := range responses {
 		if response.err != nil {
 			return false, &response
@@ -153,7 +153,7 @@ func (p *Proxy) openWatchStream(ctx context.Context, original *http.Request, tar
 
 	upstreamURL := buildUpstreamURL(target.Host, original.URL)
 	applyAggregateResourceVersion(upstreamURL, target.Name)
-	request, err := newUpstreamRequest(requestCtx, target, original, upstreamURL, http.NoBody)
+	request, err := newUpstreamRequest(requestCtx, target, requestAcceptingJSONOnly(original), upstreamURL, http.NoBody)
 	if err != nil {
 		cancel()
 		if timer != nil {

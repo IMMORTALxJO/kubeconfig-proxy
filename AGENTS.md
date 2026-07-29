@@ -26,6 +26,16 @@ Treat routing behavior as the core product contract. Small changes in request cl
 - Add small helpers only when they remove real duplication or protect shared behavior. Do not introduce framework-style abstractions for one-off code.
 - Keep comments rare and useful; explain non-obvious routing or security decisions, not ordinary assignments.
 
+### Naming Conventions
+
+- Use idiomatic Go `camelCase` for local variables and unexported functions; use `PascalCase` only for exported identifiers.
+- Choose short names only for small, obvious scopes (`ctx`, `err`, `req`, `resp`, `cfg`). Else, prefer descriptive names that state the value's role, such as `sourceContext`, `targetClient`, or `routingAnnotations`.
+- Name booleans as readable predicates: `isReadOnly`, `hasContextName`, `shouldFanOut`, `canMutate`. Avoid vague boolean names such as `flag`, `enabled`, or `value`.
+- Name collections as plural nouns (`contexts`, `targets`, `errors`) and maps for their lookup role (`clientsByContext`, `annotationsByName`).
+- Name functions with a verb that describes their effect or result: `loadState`, `selectTarget`, `validateRequest`, `writeResponse`. Predicate functions should start with `is`, `has`, `can`, `should`, or `needs`.
+- Keep names aligned with the domain vocabulary already used by the CLI and proxy: use `context` for a configured Kubernetes context, `target` for a selected upstream, and `route` or `routing` for dispatch decisions.
+- Avoid abbreviations unless they are established Go or Kubernetes terms. Do not encode types in names (`strName`, `contextMap`) or repeat enclosing type/package names unnecessarily.
+
 ## Proxy Behavior Rules
 
 - Read/list/watch behavior must keep source context markers intact:
@@ -54,7 +64,7 @@ Before handing off meaningful code changes, prefer `make check`. It runs formatt
 For real-cluster integration coverage, use the repository skill:
 
 ```bash
-.codex/skills/test-kubeconfig-proxy/scripts/run.sh
+e2e/run.sh
 ```
 
 When adding new user-visible proxy behavior, add or update checks in

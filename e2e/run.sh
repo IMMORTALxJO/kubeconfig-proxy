@@ -24,6 +24,7 @@ WERF_TIMEOUT="${KCP_WERF_TIMEOUT:-180}"
 BINARY="$ROOT/bin/kubeconfig-proxy"
 COVERAGE_DATA_DIR="$TMP_DIR/coverage-data"
 COVERAGE_PROFILE="$TMP_DIR/integration-coverage.out"
+COVERAGE_HTML="${KCP_COVERAGE_HTML:-$ROOT/.codex/reports/coverage.html}"
 KUBERNETES_VERSION="v1.36.1"
 KUBECTL_VERSION="v1.36.1"
 KIND_NODE_IMAGE="kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5"
@@ -37,6 +38,7 @@ declare -a RESULT_STATUS=()
 declare -a RESULT_NAME=()
 declare -a RESULT_DETAILS=()
 declare -a CREATED_CLUSTERS=()
+declare -a COVERAGE_PROXY_PIDS=()
 HAD_FAILURE=0
 
 sanitize() {
@@ -123,9 +125,16 @@ stop_coverage_proxies() {
 
   : >"$pids_file"
 
+  for pid in "${COVERAGE_PROXY_PIDS[@]:-}"; do
+    printf '%s\n' "$pid" >>"$pids_file"
+  done
+
   for state_path in "$STATE_FILE" "$RO_STATE_FILE"; do
     proxy_pids_for_state "$state_path" >>"$pids_file"
   done
+
+  awk 'NF && !seen[$0]++' "$pids_file" >"${pids_file}.unique"
+  mv "${pids_file}.unique" "$pids_file"
 
   while IFS= read -r pid; do
     if [[ -z "$pid" ]]; then
@@ -155,6 +164,33 @@ stop_coverage_proxies() {
   add_result "PASS" "stop coverage proxy processes" "$stopped process(es) stopped"
 }
 
+# Invoked indirectly through run_cmd.
+# shellcheck disable=SC2329
+start_coverage_proxy() {
+  local state_path="$1"
+  local log_path="${state_path}.log"
+  local pid
+  local attempt
+
+  "$BINARY" serve --state "$state_path" >/dev/null 2>&1 &
+  pid=$!
+  COVERAGE_PROXY_PIDS+=("$pid")
+
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    if grep -q 'listen:' "$log_path" 2>/dev/null; then
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid"
+      return 1
+    fi
+    sleep 0.1
+  done
+
+  printf 'coverage proxy did not become ready: %s\n' "$state_path" >&2
+  return 1
+}
+
 # Called from cleanup, which is invoked through trap.
 # shellcheck disable=SC2329
 finalize_integration_coverage() {
@@ -173,13 +209,21 @@ finalize_integration_coverage() {
     add_result "FAIL" "integration coverage report" "$report"
     return 1
   fi
+  if ! mkdir -p "$(dirname "$COVERAGE_HTML")"; then
+    add_result "FAIL" "integration coverage report" "could not create report directory for $COVERAGE_HTML"
+    return 1
+  fi
+  if ! GOTOOLCHAIN=auto go tool cover -html="$COVERAGE_PROFILE" -o "$COVERAGE_HTML"; then
+    add_result "FAIL" "integration coverage report" "could not write $COVERAGE_HTML"
+    return 1
+  fi
   total="$(printf '%s\n' "$report" | awk '$1 == "total:" { print $NF }')"
   if [[ -z "$total" ]]; then
     add_result "FAIL" "integration coverage report" "total coverage is missing"
     return 1
   fi
   COVERAGE_REPORT="$report"
-  add_result "PASS" "integration coverage report" "$total of statements"
+  add_result "PASS" "integration coverage report" "$total of statements; HTML: $COVERAGE_HTML"
 }
 
 # Invoked by the EXIT trap.
@@ -265,6 +309,17 @@ kubectl_ctx() {
   local ctx="$1"
   shift
   kubectl_cmd --context "$ctx" "$@"
+}
+
+check_proxy_log() {
+  local state_path="$1"
+  local log_path="${state_path}.log"
+
+  if [[ -s "$log_path" ]]; then
+    add_result "PASS" "proxy serve logging" "$log_path"
+  else
+    add_result "FAIL" "proxy serve logging" "expected non-empty $log_path"
+  fi
 }
 
 expect_not_found() {
@@ -515,38 +570,26 @@ ensure_cluster() {
 cleanup_test_resources() {
   local ctx
   for ctx in "$CTX_A" "$CTX_B"; do
-    kubectl_ctx "$ctx" -n "$NS" delete pod kcp-subresource-pod --ignore-not-found >/dev/null 2>&1 || true
-    kubectl_ctx "$ctx" -n "$NS" delete serviceaccount kcp-subresource-sa --ignore-not-found >/dev/null 2>&1 || true
+    kubectl_ctx "$ctx" -n "$NS" delete pod kcp-debug-pod kcp-subresource-pod --ignore-not-found >/dev/null 2>&1 || true
     kubectl_ctx "$ctx" -n "$NS" delete configmap \
-    kcp-only-a kcp-only-b kcp-fanout kcp-target-b kcp-single kcp-delete-a kcp-readonly \
+    kcp-only-a kcp-only-b kcp-fanout kcp-target-b kcp-single kcp-delete-a kcp-readonly kcp-watch-a kcp-watch-b \
       --ignore-not-found >/dev/null 2>&1 || true
     kubectl_ctx "$ctx" -n "$NS" delete secret sh.helm.release.v1.kcp.v1 --ignore-not-found >/dev/null 2>&1 || true
   done
 }
 
-# Invoked indirectly via run_cmd.
-# shellcheck disable=SC2329
-apply_manifest() {
-  local ctx="$1"
-  local file="$2"
-  kubectl_ctx "$ctx" apply -f "$file"
-}
-
-write_configmap_manifest() {
-  local file="$1"
-  local name="$2"
-  local annotations="$3"
-  cat >"$file" <<EOF_MANIFEST
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: $name
-  namespace: $NS
-$annotations
-data:
-  value: "$name"
-EOF_MANIFEST
-}
+# shellcheck source=e2e/checks/context.sh
+source "$ROOT/e2e/checks/context.sh"
+# shellcheck source=e2e/checks/aggregation.sh
+source "$ROOT/e2e/checks/aggregation.sh"
+# shellcheck source=e2e/checks/routing.sh
+source "$ROOT/e2e/checks/routing.sh"
+# shellcheck source=e2e/checks/subresources.sh
+source "$ROOT/e2e/checks/subresources.sh"
+# shellcheck source=e2e/checks/watch.sh
+source "$ROOT/e2e/checks/watch.sh"
+# shellcheck source=e2e/checks/werf.sh
+source "$ROOT/e2e/checks/werf.sh"
 
 if [[ "${KCP_SKIP_MAKE_CHECK:-0}" == "1" ]]; then
   add_result "SKIP" "make check" "KCP_SKIP_MAKE_CHECK=1"
@@ -564,6 +607,7 @@ fi
 
 require_cmd kind
 setup_kubectl
+require_cmd curl
 if [[ "${KCP_SKIP_WERF:-0}" == "1" ]]; then
   add_result "SKIP" "required tool: werf" "KCP_SKIP_WERF=1"
 else
@@ -604,6 +648,15 @@ run_cmd "add proxy context" "$BINARY" add-context "$PROXY_CONTEXT" \
   --logs-enabled \
   --exec-command "$BINARY"
 
+if [[ "$COVERAGE_ENABLED" == "1" ]]; then
+  if start_coverage_proxy "$STATE_FILE"; then
+    add_result "PASS" "start coverage proxy" "ok"
+  else
+    add_result "FAIL" "start coverage proxy" "could not start $STATE_FILE"
+  fi
+fi
+run_cmd "proxy discovery through exec credential" kubectl_ctx "$PROXY_CONTEXT" version
+
 run_cmd "add read-only proxy context" "$BINARY" add-context "$RO_PROXY_CONTEXT" \
   --kubeconfig "$KUBECONFIG_FILE" \
   --state "$RO_STATE_FILE" \
@@ -613,176 +666,25 @@ run_cmd "add read-only proxy context" "$BINARY" add-context "$RO_PROXY_CONTEXT" 
   --proxy-ttl "2m" \
   --request-timeout "$TIMEOUT" \
   --read-only \
+  --logs-enabled \
   --exec-command "$BINARY"
 
-duplicate_output="$("$BINARY" add-context "$DUPLICATE_PROXY_CONTEXT" \
-  --kubeconfig "$KUBECONFIG_FILE" \
-  --state "$TMP_DIR/duplicate.yaml" \
-  --contexts "$CTX_A,$CTX_A" \
-  --listen "127.0.0.1:0" \
-  --exec-command "$BINARY" 2>&1)"
-duplicate_status=$?
-if [[ "$duplicate_status" -ne 0 && "$duplicate_output" == *"selected more than once"* && ! -f "$TMP_DIR/duplicate.yaml" ]]; then
-  add_result "PASS" "duplicate source contexts are rejected" "state was not written"
-else
-  add_result "FAIL" "duplicate source contexts are rejected" "status=$duplicate_status output=$duplicate_output"
+if [[ "$COVERAGE_ENABLED" == "1" ]]; then
+  if start_coverage_proxy "$RO_STATE_FILE"; then
+    add_result "PASS" "start read-only coverage proxy" "ok"
+  else
+    add_result "FAIL" "start read-only coverage proxy" "could not start $RO_STATE_FILE"
+  fi
 fi
 
-run_cmd "add proxy context with hashed default state path" env HOME="$TMP_DIR/home" "$BINARY" add-context "$HASHED_PROXY_CONTEXT" \
-  --kubeconfig "$KUBECONFIG_FILE" \
-  --contexts "$CTX_A,$CTX_B" \
-  --listen "127.0.0.1:0" \
-  --exec-command "$BINARY"
-run_cmd "add proxy context with safe default state path" env HOME="$TMP_DIR/home" "$BINARY" add-context "$SAFE_PROXY_CONTEXT" \
-  --kubeconfig "$KUBECONFIG_FILE" \
-  --contexts "$CTX_A,$CTX_B" \
-  --listen "127.0.0.1:0" \
-  --exec-command "$BINARY"
-state_file_count="$(find "$TMP_DIR/home/.kube/kubeconfig-proxy" -type f -name '*.yaml' | wc -l | tr -d ' ')"
-if [[ "$state_file_count" == "2" ]]; then
-  add_result "PASS" "default state paths avoid sanitized-name collisions" "created two distinct state files"
-else
-  add_result "FAIL" "default state paths avoid sanitized-name collisions" "found $state_file_count state files"
-fi
-
-run_cmd "proxy discovery and exec credential auto-start" kubectl_ctx "$PROXY_CONTEXT" version
-
-run_cmd "seed aggregate resources in source clusters" bash -c "
-  set -euo pipefail
-  KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_A' -n '$NS' create configmap kcp-only-a --from-literal=value=a
-  KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_A' -n '$NS' label configmap kcp-only-a kcp-pagination=yes
-  KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_B' -n '$NS' create configmap kcp-only-b --from-literal=value=b
-  KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_B' -n '$NS' label configmap kcp-only-b kcp-pagination=yes
-"
-
-aggregate_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmaps -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.labels.context}{"\n"}{end}' 2>&1)"
-if [[ "$aggregate_output" == *"kcp-only-a=$CTX_A"* && "$aggregate_output" == *"kcp-only-b=$CTX_B"* ]]; then
-  add_result "PASS" "aggregated list adds context labels" "saw kcp-only-a=$CTX_A and kcp-only-b=$CTX_B"
-else
-  add_result "FAIL" "aggregated list adds context labels" "$aggregate_output"
-fi
-
-paginated_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmaps -l kcp-pagination=yes --chunk-size=1 -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.labels.context}{"\n"}{end}' 2>&1)"
-paginated_count="$(printf '%s\n' "$paginated_output" | sed '/^$/d' | wc -l | tr -d ' ')"
-if [[ "$paginated_count" == "2" && "$paginated_output" == *"kcp-only-a=$CTX_A"* && "$paginated_output" == *"kcp-only-b=$CTX_B"* ]]; then
-  add_result "PASS" "aggregated list pagination crosses target boundary" "chunk-size=1 returned both contexts exactly once"
-else
-  add_result "FAIL" "aggregated list pagination crosses target boundary" "$paginated_output"
-fi
-
-readonly_list_output="$(kubectl_ctx "$RO_PROXY_CONTEXT" -n "$NS" get configmaps -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.labels.context}{"\n"}{end}' 2>&1)"
-if [[ "$readonly_list_output" == *"kcp-only-a=$CTX_A"* && "$readonly_list_output" == *"kcp-only-b=$CTX_B"* ]]; then
-  add_result "PASS" "read-only proxy allows list reads" "saw kcp-only-a=$CTX_A and kcp-only-b=$CTX_B"
-else
-  add_result "FAIL" "read-only proxy allows list reads" "$readonly_list_output"
-fi
-
-run_cmd "fan-out create mutation" kubectl_ctx "$PROXY_CONTEXT" -n "$NS" create configmap kcp-fanout --from-literal=value=shared
-expect_exists "fan-out object exists in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-fanout
-expect_exists "fan-out object exists in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap kcp-fanout
-
-target_b_manifest="$TMP_DIR/context-name.yaml"
-write_configmap_manifest "$target_b_manifest" "kcp-target-b" "  annotations:
-    kubeconfig-proxy.io/context-name: $CTX_B"
-run_cmd "context-name routes create to kubeconfig-proxy-b" apply_manifest "$PROXY_CONTEXT" "$target_b_manifest"
-expect_not_found "context-name object absent from kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-target-b
-expect_exists "context-name object exists in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap kcp-target-b
-
-named_get_value="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmap kcp-target-b -o jsonpath='{.metadata.name}' 2>&1)"
-if [[ "$named_get_value" == "kcp-target-b" ]]; then
-  add_result "PASS" "named GET routes to cluster containing object" "found object through proxy"
-else
-  add_result "FAIL" "named GET routes to cluster containing object" "$named_get_value"
-fi
-
-single_manifest="$TMP_DIR/single-context.yaml"
-write_configmap_manifest "$single_manifest" "kcp-single" "  annotations:
-    kubeconfig-proxy.io/single-context: \"true\""
-run_cmd "single-context routes create to first context" apply_manifest "$PROXY_CONTEXT" "$single_manifest"
-expect_exists "single-context object exists in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-single
-expect_not_found "single-context object absent from kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap kcp-single
-
-run_cmd "seed service account for logs and exec in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" create serviceaccount kcp-subresource-sa
-run_cmd "seed pod for logs and exec in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" run kcp-subresource-pod \
-  --image=busybox:1.37 \
-  --restart=Never \
-  --overrides='{"spec":{"serviceAccountName":"kcp-subresource-sa","automountServiceAccountToken":false}}' \
-  --command -- sh -c 'echo kcp-log-from-kubeconfig-proxy-b; sleep 300'
-run_cmd "wait for logs and exec pod readiness" kubectl_ctx "$CTX_B" -n "$NS" wait --for=condition=Ready pod/kcp-subresource-pod --timeout=90s
-
-logs_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" logs kcp-subresource-pod 2>&1)"
-if [[ "$logs_output" == *"kcp-log-from-kubeconfig-proxy-b"* ]]; then
-  add_result "PASS" "kubectl logs routes to cluster containing pod" "read kubeconfig-proxy-b pod logs"
-else
-  add_result "FAIL" "kubectl logs routes to cluster containing pod" "$logs_output"
-fi
-
-exec_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" exec kcp-subresource-pod -- sh -c 'echo kcp-exec-from-kubeconfig-proxy-b' 2>&1)"
-if [[ "$exec_output" == *"kcp-exec-from-kubeconfig-proxy-b"* ]]; then
-  add_result "PASS" "kubectl exec routes to cluster containing pod" "executed command in kubeconfig-proxy-b pod"
-else
-  add_result "FAIL" "kubectl exec routes to cluster containing pod" "$exec_output"
-fi
-
-run_cmd "PATCH uses existing object routing" kubectl_ctx "$PROXY_CONTEXT" -n "$NS" patch configmap kcp-target-b --type merge -p '{"data":{"patched":"yes"}}'
-patch_value="$(kubectl_ctx "$CTX_B" -n "$NS" get configmap kcp-target-b -o jsonpath='{.data.patched}' 2>&1)"
-if [[ "$patch_value" == "yes" ]]; then
-  add_result "PASS" "PATCH changed only annotated target" "kubeconfig-proxy-b patched"
-else
-  add_result "FAIL" "PATCH changed only annotated target" "$patch_value"
-fi
-expect_not_found "PATCH did not create object in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-target-b
-
-run_cmd "seed delete-only resource in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" create configmap kcp-delete-a --from-literal=value=a
-run_cmd "DELETE routes only where named object exists" kubectl_ctx "$PROXY_CONTEXT" -n "$NS" delete configmap kcp-delete-a
-expect_not_found "DELETE removed object from kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-delete-a
-
-readonly_output="$(kubectl_ctx "$RO_PROXY_CONTEXT" -n "$NS" create configmap kcp-readonly --from-literal=value=blocked 2>&1)"
-if [[ "$readonly_output" == *"Forbidden"* || "$readonly_output" == *"read-only proxy rejects"* ]]; then
-  add_result "PASS" "read-only proxy rejects mutation" "$readonly_output"
-else
-  add_result "FAIL" "read-only proxy rejects mutation" "$readonly_output"
-fi
-expect_not_found "read-only did not create object in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap kcp-readonly
-expect_not_found "read-only did not create object in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap kcp-readonly
-
-run_cmd "seed helm release storage in both clusters" bash -c "
-  set -euo pipefail
-  KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_A' -n '$NS' create secret generic sh.helm.release.v1.kcp.v1 --from-literal=release=a --dry-run=client -o yaml | KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_A' -n '$NS' apply -f -
-  KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_A' -n '$NS' label secret sh.helm.release.v1.kcp.v1 owner=helm name=kcp --overwrite
-  KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_B' -n '$NS' create secret generic sh.helm.release.v1.kcp.v1 --from-literal=release=b --dry-run=client -o yaml | KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_B' -n '$NS' apply -f -
-  KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_B' -n '$NS' label secret sh.helm.release.v1.kcp.v1 owner=helm name=kcp --overwrite
-"
-helm_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get secrets -l owner=helm,name=kcp -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>&1)"
-helm_count="$(printf '%s\n' "$helm_output" | sed '/^$/d' | wc -l | tr -d ' ')"
-if [[ "$helm_count" == "1" && "$helm_output" == *"sh.helm.release.v1.kcp.v1"* ]]; then
-  add_result "PASS" "helm-release-proxy reads release storage from primary only" "one release storage item returned"
-else
-  add_result "FAIL" "helm-release-proxy reads release storage from primary only" "$helm_output"
-fi
-
-if [[ "${KCP_SKIP_WERF:-0}" == "1" ]]; then
-  add_result "SKIP" "werf example converge and dismiss" "KCP_SKIP_WERF=1"
-else
-  run_cmd "werf example converge" bash -c "
-    set -euo pipefail
-    cd '$ROOT/examples/werf'
-    KUBECONFIG='$KUBECONFIG_FILE' werf converge --env kind --dev --namespace '$WERF_NS' --kube-context '$PROXY_CONTEXT' --timeout '$WERF_TIMEOUT'
-  "
-
-  expect_exists "werf nginx deployment exists in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$WERF_NS" get deployment kubeconfig-proxy-werf-nginx
-  expect_exists "werf nginx deployment exists in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$WERF_NS" get deployment kubeconfig-proxy-werf-nginx
-  expect_exists "werf single-context job exists in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$WERF_NS" get job kubeconfig-proxy-werf-smoke
-  expect_not_found "werf single-context job absent from kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$WERF_NS" get job kubeconfig-proxy-werf-smoke
-
-  run_cmd "werf example dismiss" bash -c "
-    set -euo pipefail
-    cd '$ROOT/examples/werf'
-    KUBECONFIG='$KUBECONFIG_FILE' werf dismiss --env kind --with-namespace --namespace '$WERF_NS' --kube-context '$PROXY_CONTEXT'
-  "
-  expect_namespace_deleted_or_terminating "werf namespace removed from kubeconfig-proxy-a" "$CTX_A"
-  expect_namespace_deleted_or_terminating "werf namespace removed from kubeconfig-proxy-b" "$CTX_B"
-fi
+run_context_checks
+run_aggregation_checks
+check_proxy_log "$STATE_FILE"
+check_proxy_log "$RO_STATE_FILE"
+run_routing_checks
+run_subresource_checks
+run_watch_checks
+run_werf_checks
 
 cleanup_test_resources
 

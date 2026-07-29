@@ -26,19 +26,25 @@ func splitPath(path string) []string {
 }
 
 func podObjectPathForSubresource(path string) (string, bool) {
+	podPath, ok := podObjectPath(path)
+	if !ok {
+		return "", false
+	}
 	parts := splitPath(path)
-	if len(parts) != 7 {
-		return "", false
-	}
-	if parts[0] != "api" || parts[2] != "namespaces" || parts[4] != "pods" {
-		return "", false
-	}
 	switch parts[6] {
 	case "attach", "exec", "log", "portforward":
-		return "/" + strings.Join(parts[:6], "/"), true
+		return podPath, true
 	default:
 		return "", false
 	}
+}
+
+func podObjectPath(path string) (string, bool) {
+	parts := splitPath(path)
+	if len(parts) != 7 || parts[0] != "api" || parts[2] != "namespaces" || parts[4] != "pods" {
+		return "", false
+	}
+	return "/" + strings.Join(parts[:6], "/"), true
 }
 
 func isAggregatableListRequest(r *http.Request) bool {

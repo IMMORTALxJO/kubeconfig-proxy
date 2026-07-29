@@ -102,6 +102,32 @@ func newUpstreamRequest(ctx context.Context, target Target, original *http.Reque
 	return request, nil
 }
 
+func requestAcceptingJSONOnly(original *http.Request) *http.Request {
+	request := original.Clone(original.Context())
+	request.Header = original.Header.Clone()
+
+	accepts := make([]string, 0, len(request.Header.Values("Accept")))
+	for _, header := range request.Header.Values("Accept") {
+		for _, mediaRange := range strings.Split(header, ",") {
+			mediaRange = strings.TrimSpace(mediaRange)
+			if mediaRange == "" || isKubernetesProtobufMediaRange(mediaRange) {
+				continue
+			}
+			accepts = append(accepts, mediaRange)
+		}
+	}
+	if len(accepts) == 0 {
+		accepts = []string{"application/json"}
+	}
+	request.Header.Set("Accept", strings.Join(accepts, ", "))
+	return request
+}
+
+func isKubernetesProtobufMediaRange(mediaRange string) bool {
+	mediaType, _, _ := strings.Cut(mediaRange, ";")
+	return strings.EqualFold(strings.TrimSpace(mediaType), "application/vnd.kubernetes.protobuf")
+}
+
 func shouldRetry(response upstreamResponse) bool {
 	if response.err != nil {
 		return true
