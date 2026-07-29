@@ -48,7 +48,7 @@ func runCredentialWithCommandFactory(args []string, commandFactory detachedServe
 		return err
 	}
 	profile := runtime.Profile
-	client, err := profileHTTPClient(profile)
+	client, err := newProfileHTTPClient(profile)
 	if err != nil {
 		return err
 	}
@@ -61,7 +61,7 @@ func runCredentialWithCommandFactory(args []string, commandFactory detachedServe
 		}
 	}
 
-	return writeExecCredential(os.Stdout, profile.BearerToken, execCredentialExpiration(time.Now(), runtime.ProxyTTL))
+	return writeExecCredential(os.Stdout, profile.BearerToken, expirationForExecCredential(time.Now(), runtime.ProxyTTL))
 }
 
 func lockState(statePath string) (func(), error) {
@@ -115,7 +115,7 @@ func checkReady(client *http.Client, profile *proxystate.Profile) error {
 	return nil
 }
 
-func profileHTTPClient(profile *proxystate.Profile) (*http.Client, error) {
+func newProfileHTTPClient(profile *proxystate.Profile) (*http.Client, error) {
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM([]byte(profile.TLS.CertPEM)) {
 		return nil, fmt.Errorf("state TLS certificate is not valid PEM")
@@ -180,7 +180,7 @@ func writeExecCredential(w io.Writer, token string, expiration *time.Time) error
 	return encoder.Encode(credential)
 }
 
-func execCredentialExpiration(now time.Time, proxyTTL time.Duration) *time.Time {
+func expirationForExecCredential(now time.Time, proxyTTL time.Duration) *time.Time {
 	if proxyTTL <= 0 {
 		return nil
 	}

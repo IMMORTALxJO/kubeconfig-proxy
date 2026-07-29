@@ -94,7 +94,7 @@ func TestDecodeListCursorRejectsInvalidTokens(t *testing.T) {
 
 func TestPaginationRequestHelpers(t *testing.T) {
 	original := httptest.NewRequest(http.MethodGet, "/api/v1/pods?limit=10&continue=aggregate&labelSelector=app%3Ddemo", http.NoBody)
-	if got := listCursorScope(original); got != "/api/v1/pods?labelSelector=app%3Ddemo" {
+	if got := scopeForListCursor(original); got != "/api/v1/pods?labelSelector=app%3Ddemo" {
 		t.Fatalf("cursor scope = %q", got)
 	}
 

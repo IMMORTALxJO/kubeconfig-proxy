@@ -2137,7 +2137,7 @@ func TestSelectedWatchIsEmptyRejectsInvalidListPayload(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/pods?watch=true&fieldSelector=metadata.name=demo", http.NoBody)
 
-	empty, failed := p.selectedWatchIsEmpty(req)
+	empty, failed := p.isNamedWatchEmptyAcrossTargets(req)
 	if empty || failed == nil || failed.err == nil {
 		t.Fatalf("result = empty:%t failed:%#v, want invalid payload failure", empty, failed)
 	}

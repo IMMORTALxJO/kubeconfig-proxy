@@ -101,41 +101,41 @@ func TestCLIHelpers(t *testing.T) {
 	if got := splitCSV("  "); got != nil {
 		t.Fatalf("splitCSV blank = %v, want nil", got)
 	}
-	if got := durationLogValue(0); got != "disabled" {
-		t.Fatalf("durationLogValue(0) = %q, want disabled", got)
+	if got := formatDurationForLog(0); got != "disabled" {
+		t.Fatalf("formatDurationForLog(0) = %q, want disabled", got)
 	}
-	if got := durationLogValue(2 * time.Second); got != "2s" {
-		t.Fatalf("durationLogValue(2s) = %q, want 2s", got)
+	if got := formatDurationForLog(2 * time.Second); got != "2s" {
+		t.Fatalf("formatDurationForLog(2s) = %q, want 2s", got)
 	}
-	unsafeName := safeFileName("prod/blue:west_1")
+	unsafeName := sanitizeFileName("prod/blue:west_1")
 	if !strings.HasPrefix(unsafeName, "prod_blue_west_1-") {
-		t.Fatalf("safeFileName = %q, want readable prefix and hash", unsafeName)
+		t.Fatalf("sanitizeFileName = %q, want readable prefix and hash", unsafeName)
 	}
-	if got := safeFileName("Prod.Blue-1"); got != "Prod.Blue-1" {
-		t.Fatalf("safeFileName uppercase/dot/dash = %q, want Prod.Blue-1", got)
+	if got := sanitizeFileName("Prod.Blue-1"); got != "Prod.Blue-1" {
+		t.Fatalf("sanitizeFileName uppercase/dot/dash = %q, want Prod.Blue-1", got)
 	}
-	if got := safeFileName("prod/blue"); got == safeFileName("prod_blue") {
+	if got := sanitizeFileName("prod/blue"); got == sanitizeFileName("prod_blue") {
 		t.Fatalf("unsafe and safe context names map to the same filename %q", got)
 	}
-	gotStatePath, err := defaultStatePath("prod/blue")
+	gotStatePath, err := resolveDefaultStatePath("prod/blue")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(".kube", "kubeconfig-proxy", safeFileName("prod/blue")+".yaml"); !strings.HasSuffix(gotStatePath, want) {
-		t.Fatalf("defaultStatePath = %q, want suffix %q", gotStatePath, want)
+	if want := filepath.Join(".kube", "kubeconfig-proxy", sanitizeFileName("prod/blue")+".yaml"); !strings.HasSuffix(gotStatePath, want) {
+		t.Fatalf("resolveDefaultStatePath = %q, want suffix %q", gotStatePath, want)
 	}
 }
 
 func TestDefaultCommandAndLongStateNames(t *testing.T) {
 	longName := strings.Repeat("a", 100)
-	gotName := safeFileName(longName)
+	gotName := sanitizeFileName(longName)
 	if len(gotName) != 93 {
 		t.Fatalf("long safe filename length = %d, want 93", len(gotName))
 	}
 	if !strings.HasPrefix(gotName, strings.Repeat("a", 80)+"-") {
 		t.Fatalf("long safe filename = %q, want truncated readable prefix", gotName)
 	}
-	if executable := defaultExecCommand(); executable == "" {
+	if executable := resolveDefaultExecCommand(); executable == "" {
 		t.Fatal("default executable is empty")
 	}
 
@@ -712,7 +712,7 @@ func TestServeStateStopsAfterTTLWithoutRequests(t *testing.T) {
 	go func() {
 		errCh <- runWithArgs([]string{"serve", "--state", statePath}, nil)
 	}()
-	readyClient, err := profileHTTPClient(profile)
+	readyClient, err := newProfileHTTPClient(profile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -783,7 +783,7 @@ func TestServeStateRestartsWhenStateFileChanges(t *testing.T) {
 	}()
 	defer stopServeAndWait(t, stop, errCh)
 
-	readyClient, err := profileHTTPClient(profile)
+	readyClient, err := newProfileHTTPClient(profile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -880,7 +880,7 @@ func TestServeStateStopsWhenStateFileDisappears(t *testing.T) {
 	go func() {
 		errCh <- runWithArgs([]string{"serve", "--state", statePath}, nil)
 	}()
-	readyClient, err := profileHTTPClient(profile)
+	readyClient, err := newProfileHTTPClient(profile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -919,7 +919,7 @@ func TestReadinessDoesNotRefreshActivityTTL(t *testing.T) {
 	if nextCalled.Load() {
 		t.Fatal("readiness request should not be proxied to the upstream handler")
 	}
-	if !handler.idleFor(time.Second) {
+	if !handler.isIdleFor(time.Second) {
 		t.Fatal("readiness request unexpectedly refreshed last activity")
 	}
 }
@@ -973,7 +973,7 @@ func TestActivityHandlerIsBusyWhileRequestInFlight(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("handler did not start request")
 	}
-	if handler.idleFor(0) {
+	if handler.isIdleFor(0) {
 		t.Fatal("handler should not be idle while request is in flight")
 	}
 }
@@ -1275,9 +1275,9 @@ func TestWaitReadyTimesOut(t *testing.T) {
 }
 
 func TestProfileHTTPClientRejectsInvalidCertificate(t *testing.T) {
-	_, err := profileHTTPClient(&proxystate.Profile{TLS: proxystate.TLS{CertPEM: "not pem"}})
+	_, err := newProfileHTTPClient(&proxystate.Profile{TLS: proxystate.TLS{CertPEM: "not pem"}})
 	if err == nil {
-		t.Fatal("profileHTTPClient returned nil error")
+		t.Fatal("newProfileHTTPClient returned nil error")
 	}
 	if !strings.Contains(err.Error(), "state TLS certificate is not valid PEM") {
 		t.Fatalf("error = %q, want invalid PEM error", err.Error())
@@ -1290,7 +1290,7 @@ func TestProfileHTTPClientRequiresTLS12(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	client, err := profileHTTPClient(&proxystate.Profile{TLS: proxystate.TLS{CertPEM: string(certPEM)}})
+	client, err := newProfileHTTPClient(&proxystate.Profile{TLS: proxystate.TLS{CertPEM: string(certPEM)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1331,8 +1331,8 @@ func TestTTLCheckIntervalBounds(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := ttlCheckInterval(tt.ttl); got != tt.want {
-			t.Fatalf("ttlCheckInterval(%s) = %s, want %s", tt.ttl, got, tt.want)
+		if got := calculateTTLCheckInterval(tt.ttl); got != tt.want {
+			t.Fatalf("calculateTTLCheckInterval(%s) = %s, want %s", tt.ttl, got, tt.want)
 		}
 	}
 }
@@ -1461,17 +1461,17 @@ func TestWriteExecCredentialOmitsExpirationWhenProxyTTLDisabled(t *testing.T) {
 
 func TestExecCredentialExpirationUsesProxyTTLWithSkew(t *testing.T) {
 	now := time.Date(2026, 7, 16, 15, 0, 0, 0, time.UTC)
-	expiration := execCredentialExpiration(now, 10*time.Minute)
+	expiration := expirationForExecCredential(now, 10*time.Minute)
 	if expiration == nil {
 		t.Fatal("expiration is nil")
 	}
 	if got, want := expiration.Sub(now), 9*time.Minute+50*time.Second; got != want {
 		t.Fatalf("valid duration = %s, want %s", got, want)
 	}
-	if expiration := execCredentialExpiration(now, 0); expiration != nil {
+	if expiration := expirationForExecCredential(now, 0); expiration != nil {
 		t.Fatalf("expiration = %v, want nil when proxyTTL is disabled", expiration)
 	}
-	if expiration := execCredentialExpiration(now, time.Nanosecond); expiration == nil || expiration.Sub(now) != time.Nanosecond {
+	if expiration := expirationForExecCredential(now, time.Nanosecond); expiration == nil || expiration.Sub(now) != time.Nanosecond {
 		t.Fatalf("tiny ttl expiration = %v, want now + 1ns", expiration)
 	}
 }
@@ -1544,7 +1544,7 @@ func TestGenerateTLSCertificateIncludesDNSAndLoopbackFallbackSANs(t *testing.T) 
 
 func mustDefaultStatePath(t *testing.T, contextName string) string {
 	t.Helper()
-	path, err := defaultStatePath(contextName)
+	path, err := resolveDefaultStatePath(contextName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1664,7 +1664,7 @@ func getProxyBody(t *testing.T, profile *proxystate.Profile, path string) string
 }
 
 func tryGetProxyBody(profile *proxystate.Profile, path string) (string, error) {
-	client, err := profileHTTPClient(profile)
+	client, err := newProfileHTTPClient(profile)
 	if err != nil {
 		return "", err
 	}

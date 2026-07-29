@@ -42,7 +42,7 @@ func (h *activityHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.next.ServeHTTP(w, r)
 }
 
-func (h *activityHandler) idleFor(ttl time.Duration) bool {
+func (h *activityHandler) isIdleFor(ttl time.Duration) bool {
 	if h.inFlight.Load() > 0 {
 		return false
 	}

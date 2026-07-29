@@ -16,7 +16,7 @@ func (p *Proxy) aggregateList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	responses := p.doAll(r.Context(), requestAcceptingJSONOnly(r), nil)
+	responses := p.requestAllTargets(r.Context(), requestAcceptingJSONOnly(r), nil)
 	okResponses := make([]upstreamResponse, 0, len(responses))
 	for _, response := range responses {
 		if response.err != nil {
@@ -53,15 +53,15 @@ func mergeListsWithResourceVersions(responses []upstreamResponse, initialResourc
 		if err := json.Unmarshal(response.body, &payload); err != nil {
 			return nil, fmt.Errorf("%s: decode list response: %w", response.target.Name, err)
 		}
-		if resourceVersion := payloadResourceVersion(payload); resourceVersion != "" {
+		if resourceVersion := resourceVersionFromPayload(payload); resourceVersion != "" {
 			resourceVersions[response.target.Name] = resourceVersion
 		}
 
 		switch {
 		case hasArray(payload, "items"):
-			mergeArrayField(payload, &merged, "items", response.target.Name, entryMetadata)
+			mergeArrayField(payload, &merged, "items", response.target.Name, ensureMetadataForListEntry)
 		case hasArray(payload, "rows"):
-			mergeArrayField(payload, &merged, "rows", response.target.Name, tableRowMetadata)
+			mergeArrayField(payload, &merged, "rows", response.target.Name, ensureMetadataForTableRow)
 		default:
 			return response.body, nil
 		}
@@ -82,13 +82,13 @@ func cloneStringMap(source map[string]string) map[string]string {
 	return cloned
 }
 
-// entryMetadata returns the metadata map of a list item.
-func entryMetadata(entry map[string]any) map[string]any {
+// ensureMetadataForListEntry returns the metadata map of a list item, creating it when absent.
+func ensureMetadataForListEntry(entry map[string]any) map[string]any {
 	return ensureMap(entry, "metadata")
 }
 
-// tableRowMetadata returns the metadata map of a table row's embedded object, if any.
-func tableRowMetadata(row map[string]any) map[string]any {
+// ensureMetadataForTableRow returns the metadata map of a table row's embedded object, creating it when absent.
+func ensureMetadataForTableRow(row map[string]any) map[string]any {
 	object, ok := row["object"].(map[string]any)
 	if !ok {
 		return nil
@@ -96,14 +96,14 @@ func tableRowMetadata(row map[string]any) map[string]any {
 	return ensureMap(object, "metadata")
 }
 
-func mergeArrayField(payload map[string]any, merged *map[string]any, key, contextName string, metadataOf func(map[string]any) map[string]any) {
+func mergeArrayField(payload map[string]any, merged *map[string]any, key, contextName string, ensureMetadata func(map[string]any) map[string]any) {
 	entries, _ := payload[key].([]any)
 	for i := range entries {
 		entry, ok := entries[i].(map[string]any)
 		if !ok {
 			continue
 		}
-		if metadata := metadataOf(entry); metadata != nil {
+		if metadata := ensureMetadata(entry); metadata != nil {
 			markSourceContext(metadata, contextName)
 		}
 	}
@@ -167,7 +167,7 @@ func hasArray(payload map[string]any, key string) bool {
 	return ok
 }
 
-func payloadResourceVersion(payload map[string]any) string {
+func resourceVersionFromPayload(payload map[string]any) string {
 	metadata, ok := payload["metadata"].(map[string]any)
 	if !ok {
 		return ""

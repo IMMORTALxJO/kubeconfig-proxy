@@ -45,7 +45,7 @@ func LoadTargets(source *kubeconfig.Source, selectedContexts []string, primaryCo
 		if err != nil {
 			return nil, Target{}, err
 		}
-		target, err := targetFromRESTConfig(contextName, kubeContext, restConfig)
+		target, err := newTargetFromRESTConfig(contextName, kubeContext, restConfig)
 		if err != nil {
 			return nil, Target{}, err
 		}
@@ -74,7 +74,7 @@ func NameList(targets []Target) []string {
 	return names
 }
 
-func targetFromRESTConfig(name string, kubeContext *clientcmdapi.Context, config *rest.Config) (Target, error) {
+func newTargetFromRESTConfig(name string, kubeContext *clientcmdapi.Context, config *rest.Config) (Target, error) {
 	host, err := url.Parse(config.Host)
 	if err != nil {
 		return Target{}, fmt.Errorf("parse host for context %q: %w", name, err)

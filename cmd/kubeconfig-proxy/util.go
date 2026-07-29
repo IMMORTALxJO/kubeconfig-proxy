@@ -27,19 +27,19 @@ func splitCSV(value string) []string {
 	return out
 }
 
-func defaultKubeconfigPath() string {
+func resolveDefaultKubeconfigPath() string {
 	return clientcmd.NewDefaultClientConfigLoadingRules().GetDefaultFilename()
 }
 
-func defaultStatePath(contextName string) (string, error) {
+func resolveDefaultStatePath(contextName string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("detect home dir: %w", err)
 	}
-	return filepath.Join(home, ".kube", "kubeconfig-proxy", safeFileName(contextName)+".yaml"), nil
+	return filepath.Join(home, ".kube", "kubeconfig-proxy", sanitizeFileName(contextName)+".yaml"), nil
 }
 
-func safeFileName(value string) string {
+func sanitizeFileName(value string) string {
 	const maxReadablePrefix = 80
 
 	safe := strings.Map(func(r rune) rune {
@@ -68,7 +68,7 @@ func safeFileName(value string) string {
 	return fmt.Sprintf("%s-%x", safe, sum[:6])
 }
 
-func defaultExecCommand() string {
+func resolveDefaultExecCommand() string {
 	path, err := os.Executable()
 	if err != nil {
 		return "kubeconfig-proxy"
@@ -76,7 +76,7 @@ func defaultExecCommand() string {
 	return path
 }
 
-func durationLogValue(value time.Duration) string {
+func formatDurationForLog(value time.Duration) string {
 	if value <= 0 {
 		return "disabled"
 	}

@@ -90,7 +90,7 @@ func parseAddContextOptions(args []string) (addContextOptions, error) {
 		args = args[1:]
 	}
 	var (
-		kubeconfigPath = flags.String("kubeconfig", defaultKubeconfigPath(), "kubeconfig path to update")
+		kubeconfigPath = flags.String("kubeconfig", resolveDefaultKubeconfigPath(), "kubeconfig path to update")
 		statePath      = flags.String("state", "", "state file path; defaults to ~/.kube/kubeconfig-proxy/<context>.yaml")
 		listenAddr     = flags.String("listen", "", "proxy listen address; defaults to an available 127.0.0.1 port")
 		contextsCSV    = flags.String("contexts", "", "comma-separated source kubeconfig contexts to include")
@@ -103,7 +103,7 @@ func parseAddContextOptions(args []string) (addContextOptions, error) {
 		helmRelease    = flags.Bool("helm-release-proxy", false, "proxy Helm release storage list/watch requests only through the primary context")
 		readOnly       = flags.Bool("read-only", false, "reject mutating Kubernetes API requests with 403")
 		logsEnabled    = flags.Bool("logs-enabled", false, "write serve logs to the state log file")
-		execCommand    = flags.String("exec-command", defaultExecCommand(), "command written to kubeconfig exec auth")
+		execCommand    = flags.String("exec-command", resolveDefaultExecCommand(), "command written to kubeconfig exec auth")
 	)
 	if err := flags.Parse(args); err != nil {
 		return addContextOptions{}, err
@@ -150,7 +150,7 @@ func resolveAddContextPaths(kubeconfigPath, statePath, contextName string) (stri
 		return "", "", err
 	}
 	if statePath == "" {
-		statePath, err = defaultStatePath(contextName)
+		statePath, err = resolveDefaultStatePath(contextName)
 		if err != nil {
 			return "", "", err
 		}
@@ -204,7 +204,7 @@ func logAddContextResult(options addContextOptions, kubeconfigPath, statePath, s
 	log.Printf("listen:             %s", serverURL)
 	log.Printf("targets:            %s", upstream.Names(targets))
 	log.Printf("primary target:     %s", primary.Name)
-	log.Printf("proxy ttl:          %s", durationLogValue(options.proxyTTL))
+	log.Printf("proxy ttl:          %s", formatDurationForLog(options.proxyTTL))
 	log.Printf("read only:          %t", options.readOnly)
 	log.Printf("serve logs:         %t", options.logsEnabled)
 }

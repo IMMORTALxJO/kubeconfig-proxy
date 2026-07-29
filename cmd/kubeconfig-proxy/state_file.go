@@ -20,7 +20,7 @@ func readStateFileSnapshot(path string) (stateFileSnapshot, error) {
 	return stateFileSnapshot{modTime: info.ModTime(), size: info.Size()}, nil
 }
 
-func (s stateFileSnapshot) equal(other stateFileSnapshot) bool {
+func (s stateFileSnapshot) isEqual(other stateFileSnapshot) bool {
 	return s.size == other.size && s.modTime.Equal(other.modTime)
 }
 
@@ -44,7 +44,7 @@ func watchStateFile(ctx context.Context, path string, snapshot stateFileSnapshot
 					changed <- fmt.Errorf("stat state file %s: %w", path, err)
 					return
 				}
-				if !snapshot.equal(next) {
+				if !snapshot.isEqual(next) {
 					changed <- nil
 					return
 				}

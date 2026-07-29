@@ -9,7 +9,7 @@ import (
 func (p *Proxy) forwardLongRunning(w http.ResponseWriter, r *http.Request) {
 	target := p.primary
 	if objectPath, ok := podObjectPathForSubresource(r.URL.Path); ok {
-		if found, foundOK := p.targetForExistingObject(r.Context(), r, objectPath); foundOK {
+		if found, foundOK := p.findTargetForExistingObject(r.Context(), r, objectPath); foundOK {
 			target = found
 		}
 	}
@@ -18,7 +18,7 @@ func (p *Proxy) forwardLongRunning(w http.ResponseWriter, r *http.Request) {
 
 func (p *Proxy) forwardExistingObject(w http.ResponseWriter, r *http.Request) {
 	target := p.primary
-	if found, ok := p.targetForExistingObject(r.Context(), r, r.URL.Path); ok {
+	if found, ok := p.findTargetForExistingObject(r.Context(), r, r.URL.Path); ok {
 		target = found
 	}
 	p.forwardSingle(w, r, target)
@@ -30,7 +30,7 @@ func (p *Proxy) forwardSingle(w http.ResponseWriter, r *http.Request, target Tar
 		return
 	}
 
-	response := p.do(r.Context(), target, r, nil)
+	response := p.requestTarget(r.Context(), target, r, nil)
 	if response.err != nil {
 		writeStatusError(w, http.StatusBadGateway, response.err.Error())
 		return
@@ -38,10 +38,10 @@ func (p *Proxy) forwardSingle(w http.ResponseWriter, r *http.Request, target Tar
 	writeUpstreamResponse(w, response)
 }
 
-func (p *Proxy) targetForExistingObject(ctx context.Context, original *http.Request, objectPath string) (Target, bool) {
-	request := existingObjectRequest(ctx, original, objectPath)
+func (p *Proxy) findTargetForExistingObject(ctx context.Context, original *http.Request, objectPath string) (Target, bool) {
+	request := newExistingObjectRequest(ctx, original, objectPath)
 	for _, target := range p.targets {
-		response := p.do(ctx, target, request, nil)
+		response := p.requestTarget(ctx, target, request, nil)
 		if response.err == nil && response.status >= 200 && response.status < 300 {
 			return response.target, true
 		}
@@ -49,7 +49,7 @@ func (p *Proxy) targetForExistingObject(ctx context.Context, original *http.Requ
 	return Target{}, false
 }
 
-func existingObjectRequest(ctx context.Context, original *http.Request, objectPath string) *http.Request {
+func newExistingObjectRequest(ctx context.Context, original *http.Request, objectPath string) *http.Request {
 	objectURL := *original.URL
 	objectURL.Path = objectPath
 	objectURL.RawQuery = ""
