@@ -264,19 +264,16 @@ Run the full local check suite used by CI:
 make check
 ```
 
-Add project-specific two-cluster checks as Bash files matching
-`e2e/tests/test_*`. `e2e/run.sh` starts the proxy first, streams each test's
-output live, and marks it as passed only when it exits with code zero. Each
-test receives `KUBECTL_BIN`, `KCP_BIN`, `KUBECONFIG`, `CONTEXT_PROXY`,
-`CONTEXT_A`, `CONTEXT_B`, and `NAMESPACE` in its environment. `NAMESPACE` is
-the stable `kubeconfig-proxy-e2e-tests` namespace name for resources owned by
-those tests.
+The two-cluster checks are grouped by behavior under `e2e/checks/` and sourced
+by `e2e/run.sh`. Keep routing assertions there so each run uses the runner's
+temporary kubeconfig, coverage-instrumented proxy, structured result table,
+and cleanup.
 
 Run e2e suites through Make:
 
 ```bash
 make e2e          # all suites: kind, then upstream kubectl
-make e2e local    # only e2e/tests/test_*, after kind/proxy setup
+make e2e local    # built-in kind checks, without make check or werf
 make e2e kind     # two-cluster kind integration suite
 make e2e kubectl  # upstream kubectl compatibility suite
 ```

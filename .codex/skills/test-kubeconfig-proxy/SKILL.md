@@ -15,7 +15,7 @@ e2e/run.sh
 
 Equivalent Make targets are `make e2e` for all suites, `make e2e kind` for the
 two-cluster runner, `make e2e kubectl` for upstream compatibility, and
-`make e2e local` for only `e2e/tests/test_*` after kind/proxy setup.
+`make e2e local` for the built-in kind checks without `make check` or werf.
 
 The script runs `make check`, rebuilds `bin/kubeconfig-proxy` with Go coverage
 instrumentation, creates or reuses local kind clusters named
@@ -107,16 +107,14 @@ The runner covers the first integration ring for this project:
   `-coverpkg=./...`.
 - Integration coverage collected from CLI and detached proxy processes and
   printed as a per-function report with a total statement percentage.
-- Required local tool: `kind`; `curl` is required only when the pinned `kubectl`
-  client must be downloaded.
+- Required local tools: `kind` and `curl` (the latter is used by the
+  port-forward check and when the pinned `kubectl` client must be downloaded).
 - Pinned `kubectl v1.36.1`.
 - Two kind clusters: `kubeconfig-proxy-a` and `kubeconfig-proxy-b` running
   Kubernetes `v1.36.1` with Ready nodes, using contexts
   `kind-kubeconfig-proxy-a` and `kind-kubeconfig-proxy-b`.
-- Proxy context creation and exec-credential auto-start.
-- Every regular file matching `e2e/tests/test_*`, run after proxy startup with
-  its output streamed to the terminal. The test passes only when its exit code
-  is zero.
+- Proxy context creation, explicit coverage-instrumented serve process, and
+  exec-credential access.
 - Aggregated list responses with the virtual `context` label.
 - Aggregated list pagination with a global limit and cross-context continuation.
 - Duplicate source-context rejection before proxy state is written.
@@ -127,6 +125,11 @@ The runner covers the first integration ring for this project:
 - Named GET routing to the source cluster that contains the object.
 - `kubectl logs` routing to the cluster that contains the pod.
 - `kubectl exec` routing to the cluster that contains the pod.
+- `kubectl attach` and `kubectl port-forward` routing to the cluster that
+  contains the pod.
+- `kubectl debug` routing its ephemeral-container mutation to the cluster that
+  contains the pod.
+- Multi-cluster `kubectl get -w` events from both source clusters.
 - PATCH routing based on the existing object when the patch body has no annotations.
 - DELETE routing only to clusters where the named object exists.
 - Read-only proxy context allowing read requests and rejecting mutating requests with `403`.
@@ -148,29 +151,18 @@ Use environment variables only when needed:
 - `KCP_WERF_TIMEOUT=<seconds>` sets werf resource tracking timeout, default `180`.
 - `KCP_CACHE_DIR=<path>` overrides the cache root for downloaded pinned tools.
 
-## Custom e2e checks
+## Check layout
 
-Place Bash scripts named `test_*` in `e2e/tests/`. The main two-cluster runner
-executes every regular matching file after the proxy context has started and
-continues to later custom checks even when one fails. Each script's output is
-streamed to the terminal; a zero exit code is reported as a pass and a non-zero
-exit code as a failure.
+The two-cluster runner sources category files from `e2e/checks/`:
 
-`make e2e local` uses `KCP_E2E_CUSTOM_TESTS_ONLY=1`: it prepares the two kind
-contexts and the main proxy context, runs only these custom scripts, then
-cleans up and writes coverage without running the built-in kind assertions.
+- `context.sh` validates proxy-context setup and state paths.
+- `aggregation.sh` covers aggregate reads and pagination.
+- `routing.sh` covers mutations, routing annotations, read-only mode, and
+  `kubectl debug`.
+- `subresources.sh` covers logs, exec, attach, and port-forward.
+- `watch.sh` covers multi-cluster watch events.
+- `werf.sh` covers Helm storage and the werf example.
 
-Each script receives these environment variables:
-
-| Variable | Value |
-| --- | --- |
-| `KUBECTL_BIN` | Absolute path to the pinned `kubectl` binary. |
-| `KCP_BIN` | Absolute path to the coverage-instrumented `kubeconfig-proxy` binary. |
-| `KUBECONFIG` | Temporary kubeconfig used by the e2e run. |
-| `CONTEXT_PROXY` | Generated multi-cluster proxy context. |
-| `CONTEXT_A` | Source context for kind cluster `kubeconfig-proxy-a`. |
-| `CONTEXT_B` | Source context for kind cluster `kubeconfig-proxy-b`. |
-| `NAMESPACE` | `kubeconfig-proxy-e2e-tests`, stable for the whole run and available for custom test resources. |
-
-Set `KCP_E2E_NAMESPACE=<name>` to use another fixed namespace name for one
-run. Custom tests own the namespace lifecycle.
+Keep checks as functions that use the runner's helpers (`run_cmd`,
+`kubectl_ctx`, `expect_exists`, and `expect_not_found`) so failures remain in
+the final result table and cleanup is centralized.
