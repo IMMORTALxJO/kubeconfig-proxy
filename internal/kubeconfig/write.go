@@ -23,8 +23,8 @@ func AddProxyContext(path, contextName, serverURL, namespace, command, statePath
 		config = clientcmdapi.NewConfig()
 	}
 
-	clusterName := proxyEntryName(contextName)
-	authName := proxyEntryName(contextName)
+	clusterName := formatProxyEntryName(contextName)
+	authName := formatProxyEntryName(contextName)
 	config.Clusters[clusterName] = &clientcmdapi.Cluster{
 		Server:                   serverURL,
 		CertificateAuthorityData: certificateAuthorityData,
@@ -55,7 +55,7 @@ func DeleteProxyContext(path, contextName string) ([]string, error) {
 		return nil, err
 	}
 
-	entryName := proxyEntryName(contextName)
+	entryName := formatProxyEntryName(contextName)
 	statePaths := make([]string, 0, 1)
 	changed := false
 
@@ -63,7 +63,7 @@ func DeleteProxyContext(path, contextName string) ([]string, error) {
 		if context.Cluster != entryName || context.AuthInfo != entryName {
 			return nil, fmt.Errorf("context %q is not managed by kubeconfig-proxy", contextName)
 		}
-		statePaths = AppendUniquePaths(statePaths, authInfoStatePaths(config.AuthInfos[context.AuthInfo])...)
+		statePaths = AppendUniquePaths(statePaths, statePathsFromAuthInfo(config.AuthInfos[context.AuthInfo])...)
 		delete(config.Contexts, contextName)
 		if config.CurrentContext == contextName {
 			config.CurrentContext = ""
@@ -72,7 +72,7 @@ func DeleteProxyContext(path, contextName string) ([]string, error) {
 	}
 
 	if authInfo := config.AuthInfos[entryName]; authInfo != nil {
-		statePaths = AppendUniquePaths(statePaths, authInfoStatePaths(authInfo)...)
+		statePaths = AppendUniquePaths(statePaths, statePathsFromAuthInfo(authInfo)...)
 		delete(config.AuthInfos, entryName)
 		changed = true
 	}
@@ -97,11 +97,11 @@ func writeKubeconfigFile(path string, config *clientcmdapi.Config) error {
 	return os.Chmod(path, 0o600)
 }
 
-func proxyEntryName(contextName string) string {
+func formatProxyEntryName(contextName string) string {
 	return proxyEntryPrefix + contextName
 }
 
-func authInfoStatePaths(authInfo *clientcmdapi.AuthInfo) []string {
+func statePathsFromAuthInfo(authInfo *clientcmdapi.AuthInfo) []string {
 	if authInfo == nil || authInfo.Exec == nil {
 		return nil
 	}

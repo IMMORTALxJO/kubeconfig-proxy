@@ -24,31 +24,31 @@ type watchOpenResult struct {
 }
 
 func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
-	empty, failed := p.selectedWatchIsEmpty(r)
-	if failed != nil {
-		if failed.err != nil {
-			writeStatusError(w, http.StatusBadGateway, failed.err.Error())
+	isEmpty, failure := p.isNamedWatchEmptyAcrossTargets(r)
+	if failure != nil {
+		if failure.err != nil {
+			writeStatusError(w, http.StatusBadGateway, failure.err.Error())
 			return
 		}
-		writeUpstreamResponse(w, *failed)
+		writeUpstreamResponse(w, *failure)
 		return
 	}
-	if empty {
+	if isEmpty {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	streams, failed := p.openWatchStreams(r.Context(), r)
-	if failed != nil {
+	streams, failure := p.openWatchStreams(r.Context(), r)
+	if failure != nil {
 		for _, stream := range streams {
 			closeWatchStream(stream)
 		}
-		if failed.err != nil {
-			writeStatusError(w, http.StatusBadGateway, failed.err.Error())
+		if failure.err != nil {
+			writeStatusError(w, http.StatusBadGateway, failure.err.Error())
 			return
 		}
-		writeUpstreamResponse(w, *failed)
+		writeUpstreamResponse(w, *failure)
 		return
 	}
 	defer func() {
@@ -82,7 +82,7 @@ func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 }
 
-func (p *Proxy) selectedWatchIsEmpty(r *http.Request) (bool, *upstreamResponse) {
+func (p *Proxy) isNamedWatchEmptyAcrossTargets(r *http.Request) (bool, *upstreamResponse) {
 	if !isNamedFieldSelector(r.URL.Query().Get("fieldSelector")) {
 		return false, nil
 	}
@@ -100,7 +100,7 @@ func (p *Proxy) selectedWatchIsEmpty(r *http.Request) (bool, *upstreamResponse) 
 	listRequest.Body = nil
 	listRequest.ContentLength = 0
 
-	responses := p.doAll(r.Context(), requestAcceptingJSONOnly(listRequest), nil)
+	responses := p.requestAllTargets(r.Context(), requestAcceptingJSONOnly(listRequest), nil)
 	for _, response := range responses {
 		if response.err != nil {
 			return false, &response

@@ -226,7 +226,7 @@ func TestDeleteProxyContextHandlesMissingAndUnchangedKubeconfigs(t *testing.T) {
 func TestDeleteProxyContextClearsCurrentContextAndParsesStateEqualsArg(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config")
 	config := clientcmdapi.NewConfig()
-	entryName := proxyEntryName("prod-proxy")
+	entryName := formatProxyEntryName("prod-proxy")
 	config.Clusters[entryName] = &clientcmdapi.Cluster{Server: "https://127.0.0.1:9443"}
 	config.AuthInfos[entryName] = &clientcmdapi.AuthInfo{Exec: &clientcmdapi.ExecConfig{
 		Args: []string{"credential", "--state=/tmp/prod-proxy.yaml", "--state", "/tmp/prod-proxy.yaml"},
@@ -270,10 +270,10 @@ func TestDeleteProxyContextRejectsUnmanagedContext(t *testing.T) {
 }
 
 func TestAuthInfoStatePathsHandlesMissingExec(t *testing.T) {
-	if got := authInfoStatePaths(nil); got != nil {
+	if got := statePathsFromAuthInfo(nil); got != nil {
 		t.Fatalf("nil auth info paths = %v, want nil", got)
 	}
-	if got := authInfoStatePaths(&clientcmdapi.AuthInfo{}); got != nil {
+	if got := statePathsFromAuthInfo(&clientcmdapi.AuthInfo{}); got != nil {
 		t.Fatalf("auth info without exec paths = %v, want nil", got)
 	}
 }

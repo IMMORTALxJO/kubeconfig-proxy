@@ -64,7 +64,7 @@ func (p *Proxy) newPaginatedListState(r *http.Request) (*paginatedListState, int
 	for _, target := range p.targets {
 		targetNames = append(targetNames, target.Name)
 	}
-	requestScope := listCursorScope(r)
+	requestScope := scopeForListCursor(r)
 	startIndex, upstreamContinue, resourceVersions, err := decodeListCursor(r.URL.Query().Get(aggregateContinueQueryKey), targetNames, requestScope)
 	if err != nil {
 		return nil, 0, err
@@ -81,7 +81,7 @@ func (p *Proxy) newPaginatedListState(r *http.Request) (*paginatedListState, int
 
 func (p *Proxy) initializePaginatedResourceVersions(w http.ResponseWriter, r *http.Request, state *paginatedListState) bool {
 	request := requestAcceptingJSONOnly(paginatedRequestForTarget(r, 1, ""))
-	for _, response := range p.doAll(r.Context(), request, nil) {
+	for _, response := range p.requestAllTargets(r.Context(), request, nil) {
 		page, ok := inspectPaginatedResponse(w, response)
 		if !ok {
 			return false
@@ -115,7 +115,7 @@ func (p *Proxy) fetchPaginatedPage(w http.ResponseWriter, r *http.Request, targe
 	if state.upstreamContinue == "" {
 		applyListResourceVersion(request, state.resourceVersions[target.Name])
 	}
-	response := p.do(r.Context(), target, request, nil)
+	response := p.requestTarget(r.Context(), target, request, nil)
 	page, ok := inspectPaginatedResponse(w, response)
 	return response, page, ok
 }
@@ -247,7 +247,7 @@ func encodeListCursor(targetNames []string, targetName, upstreamContinue string,
 	return aggregateContinuePrefix + base64.RawURLEncoding.EncodeToString(payload)
 }
 
-func listCursorScope(r *http.Request) string {
+func scopeForListCursor(r *http.Request) string {
 	query := r.URL.Query()
 	query.Del("limit")
 	query.Del(aggregateContinueQueryKey)
@@ -292,7 +292,7 @@ func inspectListPage(body []byte) (listPageInfo, error) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return listPageInfo{}, fmt.Errorf("decode list response: %w", err)
 	}
-	page := listPageInfo{resourceVersion: payloadResourceVersion(payload)}
+	page := listPageInfo{resourceVersion: resourceVersionFromPayload(payload)}
 	switch {
 	case hasArray(payload, "items"):
 		page.arrayKey = "items"

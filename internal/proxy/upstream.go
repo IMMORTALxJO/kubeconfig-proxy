@@ -11,11 +11,11 @@ import (
 	"time"
 )
 
-func (p *Proxy) doAll(ctx context.Context, original *http.Request, body []byte) []upstreamResponse {
-	return p.doAllToTargets(ctx, p.targets, original, body)
+func (p *Proxy) requestAllTargets(ctx context.Context, original *http.Request, body []byte) []upstreamResponse {
+	return p.requestTargets(ctx, p.targets, original, body)
 }
 
-func (p *Proxy) doAllToTargets(ctx context.Context, targets []Target, original *http.Request, body []byte) []upstreamResponse {
+func (p *Proxy) requestTargets(ctx context.Context, targets []Target, original *http.Request, body []byte) []upstreamResponse {
 	responses := make([]upstreamResponse, len(targets))
 	var wg sync.WaitGroup
 	for i, target := range targets {
@@ -28,20 +28,20 @@ func (p *Proxy) doAllToTargets(ctx context.Context, targets []Target, original *
 				responses[i] = upstreamResponse{target: target, err: err}
 				return
 			}
-			responses[i] = p.do(ctx, target, original, targetBody)
+			responses[i] = p.requestTarget(ctx, target, original, targetBody)
 		}()
 	}
 	wg.Wait()
 	return responses
 }
 
-func (p *Proxy) do(ctx context.Context, target Target, original *http.Request, body []byte) upstreamResponse {
+func (p *Proxy) requestTarget(ctx context.Context, target Target, original *http.Request, body []byte) upstreamResponse {
 	upstreamURL := buildUpstreamURL(target.Host, original.URL)
 
-	var last upstreamResponse
+	var lastResponse upstreamResponse
 	for attempt := 0; attempt <= p.options.Retries; attempt++ {
-		response := p.doOnce(ctx, target, original, upstreamURL, body)
-		last = response
+		response := p.requestTargetOnce(ctx, target, original, upstreamURL, body)
+		lastResponse = response
 		if !shouldRetry(response) || attempt == p.options.Retries {
 			return response
 		}
@@ -50,10 +50,10 @@ func (p *Proxy) do(ctx context.Context, target Target, original *http.Request, b
 		}
 	}
 
-	return last
+	return lastResponse
 }
 
-func (p *Proxy) doOnce(ctx context.Context, target Target, original *http.Request, upstreamURL *url.URL, body []byte) upstreamResponse {
+func (p *Proxy) requestTargetOnce(ctx context.Context, target Target, original *http.Request, upstreamURL *url.URL, body []byte) upstreamResponse {
 	requestCtx := ctx
 	cancel := func() {}
 	if p.options.RequestTimeout > 0 && shouldUseRequestTimeout(original) {
@@ -165,15 +165,15 @@ func buildUpstreamURL(host *url.URL, requestURL *url.URL) *url.URL {
 	return &upstreamURL
 }
 
-func singleJoiningSlash(a, b string) string {
-	aslash := strings.HasSuffix(a, "/")
-	bslash := strings.HasPrefix(b, "/")
+func singleJoiningSlash(firstPath, secondPath string) string {
+	hasTrailingSlash := strings.HasSuffix(firstPath, "/")
+	hasLeadingSlash := strings.HasPrefix(secondPath, "/")
 	switch {
-	case aslash && bslash:
-		return a + b[1:]
-	case !aslash && !bslash:
-		return a + "/" + b
+	case hasTrailingSlash && hasLeadingSlash:
+		return firstPath + secondPath[1:]
+	case !hasTrailingSlash && !hasLeadingSlash:
+		return firstPath + "/" + secondPath
 	default:
-		return a + b
+		return firstPath + secondPath
 	}
 }

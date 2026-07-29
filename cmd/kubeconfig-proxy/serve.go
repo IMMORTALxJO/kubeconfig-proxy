@@ -132,8 +132,8 @@ func serveRuntime(statePath string, runtime *serveRuntimeConfig, snapshot stateF
 	logger.Printf("listen:           https://%s", listener.Addr().String())
 	logger.Printf("targets:          %s", upstream.Names(runtime.targets))
 	logger.Printf("primary target:   %s", runtime.primary.Name)
-	logger.Printf("proxy ttl:        %s", durationLogValue(runtime.proxyTTL))
-	logger.Printf("request timeout: %s", durationLogValue(runtime.requestTimeout))
+	logger.Printf("proxy ttl:        %s", formatDurationForLog(runtime.proxyTTL))
+	logger.Printf("request timeout: %s", formatDurationForLog(runtime.requestTimeout))
 	logger.Printf("retries:         %d", runtime.profile.Options.Retries)
 	logger.Printf("retry backoff:   %s", runtime.retryBackoff)
 	logger.Printf("read only:       %t", runtime.profile.Options.ReadOnly)
@@ -169,7 +169,7 @@ func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.C
 	var ttlCh <-chan time.Time
 	var ticker *time.Ticker
 	if proxyTTL > 0 {
-		ticker = time.NewTicker(ttlCheckInterval(proxyTTL))
+		ticker = time.NewTicker(calculateTTLCheckInterval(proxyTTL))
 		defer ticker.Stop()
 		ttlCh = ticker.C
 	}
@@ -202,7 +202,7 @@ func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.C
 			}
 			return errStateFileChanged
 		case <-ttlCh:
-			if activityHandler.idleFor(proxyTTL) {
+			if activityHandler.isIdleFor(proxyTTL) {
 				logger.Printf("shutting down after %s without active requests", proxyTTL)
 				return shutdownServer(server)
 			}
@@ -239,7 +239,7 @@ func newServeLogger(statePath string, enabled bool) (*log.Logger, func() error, 
 	return log.New(logFile, "", log.LstdFlags), logFile.Close, nil
 }
 
-func ttlCheckInterval(ttl time.Duration) time.Duration {
+func calculateTTLCheckInterval(ttl time.Duration) time.Duration {
 	if ttl <= 0 {
 		return time.Second
 	}

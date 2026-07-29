@@ -29,7 +29,7 @@ func (p *Proxy) fanOut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	responses := p.doAllToTargets(r.Context(), targets, r, body)
+	responses := p.requestTargets(r.Context(), targets, r, body)
 	for _, response := range responses {
 		if response.err != nil {
 			writeStatusError(w, http.StatusBadGateway, fmt.Sprintf("%s: %v", response.target.Name, response.err))
@@ -52,7 +52,7 @@ func (p *Proxy) bodyForTarget(ctx context.Context, target Target, original *http
 	getRequest.Method = http.MethodGet
 	getRequest.Body = nil
 	getRequest.ContentLength = 0
-	response := p.do(ctx, target, getRequest, nil)
+	response := p.requestTarget(ctx, target, getRequest, nil)
 	if response.err != nil {
 		return nil, response.err
 	}
@@ -86,9 +86,9 @@ func (p *Proxy) targetsForMutationRequest(ctx context.Context, original *http.Re
 
 func (p *Proxy) targetsForExistingResourceMutation(ctx context.Context, original *http.Request, objectPath string) ([]Target, bool, error) {
 	foundTargets := make([]Target, 0, len(p.targets))
-	request := existingObjectRequest(ctx, original, objectPath)
+	request := newExistingObjectRequest(ctx, original, objectPath)
 	for _, target := range p.targets {
-		response := p.do(ctx, target, request, nil)
+		response := p.requestTarget(ctx, target, request, nil)
 		if response.err != nil {
 			return nil, false, response.err
 		}

@@ -46,7 +46,7 @@ func parseDeleteContextOptions(args []string) (deleteContextOptions, error) {
 		args = args[1:]
 	}
 	var (
-		kubeconfigPath = flags.String("kubeconfig", defaultKubeconfigPath(), "kubeconfig path to update")
+		kubeconfigPath = flags.String("kubeconfig", resolveDefaultKubeconfigPath(), "kubeconfig path to update")
 		statePath      = flags.String("state", "", "additional state file path to remove")
 	)
 	if err := flags.Parse(args); err != nil {
@@ -87,7 +87,7 @@ func deleteContextFiles(options deleteContextOptions) (string, []string, error) 
 		return "", nil, err
 	}
 	if len(statePaths) == 0 {
-		defaultPath, err := defaultStatePath(options.contextName)
+		defaultPath, err := resolveDefaultStatePath(options.contextName)
 		if err != nil {
 			return "", nil, err
 		}
