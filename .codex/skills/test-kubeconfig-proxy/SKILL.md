@@ -129,6 +129,8 @@ The runner covers the first integration ring for this project:
   contains the pod.
 - `kubectl debug` routing its ephemeral-container mutation to the cluster that
   contains the pod.
+- `kubectl rollout restart` and `kubectl rollout status` for matching
+  deployments in both source clusters.
 - Multi-cluster `kubectl get -w` events from both source clusters.
 - PATCH routing based on the existing object when the patch body has no annotations.
 - DELETE routing only to clusters where the named object exists.
@@ -159,6 +161,7 @@ The two-cluster runner sources category files from `e2e/checks/`:
 - `aggregation.sh` covers aggregate reads and pagination.
 - `routing.sh` covers mutations, routing annotations, read-only mode, and
   `kubectl debug`.
+- `rollout.sh` covers Deployment restart and status routing.
 - `subresources.sh` covers logs, exec, attach, and port-forward.
 - `watch.sh` covers multi-cluster watch events.
 - `werf.sh` covers Helm storage and the werf example.
