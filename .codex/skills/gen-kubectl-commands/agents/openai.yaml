@@ -1,0 +1,4 @@
+interface:
+  display_name: "Generate Kubectl Commands"
+  short_description: "Build an ordered kubectl API command corpus"
+  default_prompt: "Use $gen-kubectl-commands to inspect kubectl help and write the ordered HTTP-capture command corpus."
