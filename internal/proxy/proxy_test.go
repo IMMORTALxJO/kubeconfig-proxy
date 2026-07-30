@@ -149,7 +149,7 @@ func TestClassifyRequest(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			request := httptest.NewRequest(test.method, test.path, nil)
+			request := httptest.NewRequest(test.method, test.path, http.NoBody)
 			if got := classifyRequest(request, test.helmMode); got != test.want {
 				t.Fatalf("classifyRequest() = %d, want %d", got, test.want)
 			}
