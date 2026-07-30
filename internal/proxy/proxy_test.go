@@ -335,6 +335,111 @@ func TestAggregateAndWatchFailures(t *testing.T) {
 	})
 }
 
+func TestAggregateListWithoutPageAndNamedFallbacks(t *testing.T) {
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
+			if strings.Contains(r.URL.RawQuery, "limit") {
+				t.Errorf("limit was forwarded: %s", r.URL.RawQuery)
+			}
+			if strings.HasSuffix(r.URL.Path, "/demo") {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"one"}}]}`))
+		},
+		"two": func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/demo") {
+				_, _ = w.Write([]byte(`{"metadata":{"name":"demo"}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"two"}}]}`))
+		},
+	})
+	defer cleanup()
+	list := serve(p, http.MethodGet, "/api/v1/configmaps?limit=0", "")
+	if list.Code != http.StatusOK || !contains(list.Body.String(), `"two"`) {
+		t.Fatalf("list = %d %s", list.Code, list.Body.String())
+	}
+	named := serve(p, http.MethodGet, "/api/v1/configmaps/demo", "")
+	if named.Code != http.StatusOK || !contains(named.Body.String(), `"demo"`) {
+		t.Fatalf("named = %d %s", named.Code, named.Body.String())
+	}
+}
+
+func TestNamedAndPodFallbackToPrimary(t *testing.T) {
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/demo") {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_, _ = w.Write([]byte("primary"))
+		},
+		"two": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) },
+	})
+	defer cleanup()
+	if got := serve(p, http.MethodGet, "/api/v1/configmaps/demo", ""); got.Code != http.StatusNotFound {
+		t.Fatalf("named = %d", got.Code)
+	}
+	if got := serve(p, http.MethodGet, "/api/v1/namespaces/default/pods/demo/log", ""); got.Code != http.StatusOK || got.Body.String() != "primary" {
+		t.Fatalf("pod = %d %s", got.Code, got.Body.String())
+	}
+}
+
+func TestTransportRetriesRetryableResponse(t *testing.T) {
+	attempts := 0
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, _ *http.Request) {
+			attempts++
+			if attempts == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = w.Write([]byte(`{"items":[]}`))
+		},
+		"two": func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"items":[]}`)) },
+	})
+	defer cleanup()
+	p.options.Retries = 1
+	response := serve(p, http.MethodGet, "/api/v1/configmaps", "")
+	if response.Code != http.StatusOK || attempts != 2 {
+		t.Fatalf("response = %d, attempts = %d", response.Code, attempts)
+	}
+}
+
+func TestMutationExistingObjectErrors(t *testing.T) {
+	t.Run("non-404 blocks mutation", func(t *testing.T) {
+		p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+			"one": func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				t.Fatal("mutation must not be sent")
+			},
+			"two": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) },
+		})
+		defer cleanup()
+		response := serve(p, http.MethodPatch, "/api/v1/configmaps/demo", `{}`)
+		if response.Code != http.StatusBadRequest || !contains(response.Body.String(), "HTTP 403") {
+			t.Fatalf("response = %d %s", response.Code, response.Body.String())
+		}
+	})
+	t.Run("existing annotation selects target", func(t *testing.T) {
+		calls := &callLog{}
+		p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+			"one": calls.handler("one", `{"metadata":{"annotations":{"kubeconfig-proxy.io/context-name":"two"}}}`),
+			"two": calls.handler("two", `{"metadata":{"name":"demo"}}`),
+		})
+		defer cleanup()
+		response := serve(p, http.MethodPatch, "/api/v1/configmaps/demo", `{}`)
+		callsByContext := calls.names()
+		if response.Code != http.StatusOK || len(callsByContext) != 3 || strings.Count(strings.Join(callsByContext, ","), "two") != 2 {
+			t.Fatalf("response = %d calls = %v", response.Code, calls.names())
+		}
+	})
+}
+
 type callLog struct {
 	mu     sync.Mutex
 	values []string
