@@ -6,11 +6,11 @@ has_all_aggregation_items() {
   local output="$1"
   local i
 
-  if [[ "$output" != *"kcp-only-a=$CTX_A"* || "$output" != *"kcp-only-b=$CTX_B"* ]]; then
+  if [[ "$output" != *"$(e2e_resource_name only-a)=$CTX_A"* || "$output" != *"$(e2e_resource_name only-b)=$CTX_B"* ]]; then
     return 1
   fi
   for i in {1..9}; do
-    if [[ "$output" != *"kcp-page-a-$i=$CTX_A"* || "$output" != *"kcp-page-b-$i=$CTX_B"* ]]; then
+    if [[ "$output" != *"$(e2e_resource_name "page-a-$i")=$CTX_A"* || "$output" != *"$(e2e_resource_name "page-b-$i")=$CTX_B"* ]]; then
       return 1
     fi
   done
@@ -32,21 +32,21 @@ run_aggregation_checks() {
 
   run_cmd "seed aggregate resources in source clusters" bash -c "
     set -euo pipefail
-    KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_A' -n '$NS' create configmap kcp-only-a --from-literal=value=a
-    KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_A' -n '$NS' label configmap kcp-only-a '$AGGREGATION_TEST_SELECTOR'
-    KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_B' -n '$NS' create configmap kcp-only-b --from-literal=value=b
-    KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_B' -n '$NS' label configmap kcp-only-b '$AGGREGATION_TEST_SELECTOR'
+    KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_A' -n '$NS' create configmap '$E2E_RESOURCE_PREFIX-only-a' --from-literal=value=a
+    KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_A' -n '$NS' label configmap '$E2E_RESOURCE_PREFIX-only-a' '$AGGREGATION_TEST_SELECTOR'
+    KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_B' -n '$NS' create configmap '$E2E_RESOURCE_PREFIX-only-b' --from-literal=value=b
+    KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_B' -n '$NS' label configmap '$E2E_RESOURCE_PREFIX-only-b' '$AGGREGATION_TEST_SELECTOR'
     for i in {1..9}; do
-      KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_A' -n '$NS' create configmap kcp-page-a-\$i --from-literal=value=a-\$i
-      KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_A' -n '$NS' label configmap kcp-page-a-\$i '$AGGREGATION_TEST_SELECTOR'
-      KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_B' -n '$NS' create configmap kcp-page-b-\$i --from-literal=value=b-\$i
-      KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_B' -n '$NS' label configmap kcp-page-b-\$i '$AGGREGATION_TEST_SELECTOR'
+      KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_A' -n '$NS' create configmap \"$E2E_RESOURCE_PREFIX-page-a-\$i\" --from-literal=value=a-\$i
+      KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_A' -n '$NS' label configmap \"$E2E_RESOURCE_PREFIX-page-a-\$i\" '$AGGREGATION_TEST_SELECTOR'
+      KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_B' -n '$NS' create configmap \"$E2E_RESOURCE_PREFIX-page-b-\$i\" --from-literal=value=b-\$i
+      KUBECONFIG='$KUBECONFIG_FILE' '$KUBECTL_BIN' --request-timeout='$TIMEOUT' --context '$CTX_B' -n '$NS' label configmap \"$E2E_RESOURCE_PREFIX-page-b-\$i\" '$AGGREGATION_TEST_SELECTOR'
     done
   "
 
   aggregate_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmaps -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.labels.context}{"\n"}{end}' 2>&1)"
-  if [[ "$aggregate_output" == *"kcp-only-a=$CTX_A"* && "$aggregate_output" == *"kcp-only-b=$CTX_B"* ]]; then
-    add_result "PASS" "aggregated list adds context labels" "saw kcp-only-a=$CTX_A and kcp-only-b=$CTX_B"
+  if [[ "$aggregate_output" == *"$(e2e_resource_name only-a)=$CTX_A"* && "$aggregate_output" == *"$(e2e_resource_name only-b)=$CTX_B"* ]]; then
+    add_result "PASS" "aggregated list adds context labels" "saw prefixed resources in both contexts"
   else
     add_result "FAIL" "aggregated list adds context labels" "$aggregate_output"
   fi
@@ -68,8 +68,8 @@ run_aggregation_checks() {
   fi
 
   readonly_list_output="$(kubectl_ctx "$RO_PROXY_CONTEXT" -n "$NS" get configmaps -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.labels.context}{"\n"}{end}' 2>&1)"
-  if [[ "$readonly_list_output" == *"kcp-only-a=$CTX_A"* && "$readonly_list_output" == *"kcp-only-b=$CTX_B"* ]]; then
-    add_result "PASS" "read-only proxy allows list reads" "saw kcp-only-a=$CTX_A and kcp-only-b=$CTX_B"
+  if [[ "$readonly_list_output" == *"$(e2e_resource_name only-a)=$CTX_A"* && "$readonly_list_output" == *"$(e2e_resource_name only-b)=$CTX_B"* ]]; then
+    add_result "PASS" "read-only proxy allows list reads" "saw prefixed resources in both contexts"
   else
     add_result "FAIL" "read-only proxy allows list reads" "$readonly_list_output"
   fi

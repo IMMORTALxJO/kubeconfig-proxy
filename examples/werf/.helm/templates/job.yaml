@@ -1,18 +1,18 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ .Chart.Name }}-smoke
+  name: {{ if .Values.namePrefix }}{{ .Values.namePrefix }}-{{ end }}{{ .Chart.Name }}-smoke
   annotations:
     kubeconfig-proxy.io/single-context: "true"
   labels:
-    app.kubernetes.io/name: {{ .Chart.Name }}-smoke
+    app.kubernetes.io/name: {{ if .Values.namePrefix }}{{ .Values.namePrefix }}-{{ end }}{{ .Chart.Name }}-smoke
     app.kubernetes.io/part-of: {{ .Chart.Name }}
 spec:
   backoffLimit: 0
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: {{ .Chart.Name }}-smoke
+      app.kubernetes.io/name: {{ if .Values.namePrefix }}{{ .Values.namePrefix }}-{{ end }}{{ .Chart.Name }}-smoke
         app.kubernetes.io/part-of: {{ .Chart.Name }}
     spec:
       restartPolicy: Never

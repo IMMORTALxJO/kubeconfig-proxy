@@ -74,6 +74,11 @@ the runner uses a cached official `v1.36.1` binary or downloads one and verifies
 its sha256 checksum. The default cache root is
 `${XDG_CACHE_HOME:-$HOME/.cache}/kubeconfig-proxy`.
 
+The two shared kind clusters are never deleted by the runner. Each run creates
+a branch-scoped namespace and prefixes every test resource with a DNS-safe
+value derived from `KCP_E2E_BRANCH` (or the local branch), so separate branches
+can run concurrently. Use `KCP_E2E_PREFIX` to set that prefix explicitly.
+
 ## Upstream kubectl compatibility
 
 Run the upstream Kubernetes `[sig-cli] Kubectl client` e2e suite through a
@@ -192,6 +197,10 @@ Use environment variables only when needed:
 - `KCP_CLUSTER_READY_TIMEOUT=<duration>` sets kind node readiness timeout, default `120s`.
 - `KCP_WERF_TIMEOUT=<seconds>` sets werf resource tracking timeout, default `180`.
 - `KCP_CACHE_DIR=<path>` overrides the cache root for downloaded pinned tools.
+- `KCP_E2E_BRANCH=<name>` selects the branch name used for isolated resource
+  prefixes; by default the current local branch is used.
+- `KCP_E2E_PREFIX=<name>` overrides the generated resource prefix. It must be a
+  lowercase DNS label no longer than 32 characters.
 
 ## Check layout
 

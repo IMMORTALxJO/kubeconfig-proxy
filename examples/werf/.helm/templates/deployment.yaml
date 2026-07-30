@@ -1,15 +1,15 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Chart.Name }}-nginx
+  name: {{ if .Values.namePrefix }}{{ .Values.namePrefix }}-{{ end }}{{ .Chart.Name }}-nginx
   labels:
-    app.kubernetes.io/name: {{ .Chart.Name }}-nginx
+    app.kubernetes.io/name: {{ if .Values.namePrefix }}{{ .Values.namePrefix }}-{{ end }}{{ .Chart.Name }}-nginx
     app.kubernetes.io/part-of: {{ .Chart.Name }}
 spec:
   replicas: {{ .Values.nginx.replicas }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ .Chart.Name }}-nginx
+      app.kubernetes.io/name: {{ if .Values.namePrefix }}{{ .Values.namePrefix }}-{{ end }}{{ .Chart.Name }}-nginx
   template:
     metadata:
       labels:
