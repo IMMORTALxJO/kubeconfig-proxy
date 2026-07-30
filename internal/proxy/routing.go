@@ -5,142 +5,128 @@ import (
 	"strings"
 )
 
-func (p *Proxy) shouldUsePrimaryOnly(r *http.Request) bool {
-	return isDiscoveryPath(r.URL.Path) || p.options.HelmReleaseProxy && isHelmStorageListRequest(r)
+type routeClass uint8
+
+const (
+	routePrimary routeClass = iota
+	routeWatch
+	routePodStream
+	routeNamedGet
+	routeList
+	routeMutation
+)
+
+type resourcePath struct {
+	isResource   bool
+	isCollection bool
+	isObject     bool
+	isPod        bool
+	subresource  string
+	ownerPath    string
 }
 
-func shouldUseRequestTimeout(r *http.Request) bool {
-	return !isLongRunningRequest(r)
+func classifyRequest(r *http.Request, helmMode bool) routeClass {
+	if isPrimaryRequest(r, helmMode) {
+		return routePrimary
+	}
+	resource := parseResourcePath(r.URL.Path)
+	if isWatch(r) && resource.isCollection {
+		return routeWatch
+	}
+	if r.Method == http.MethodGet && resource.isPod && isPodConnection(resource.subresource) {
+		return routePodStream
+	}
+	if r.Method == http.MethodGet && resource.isObject && resource.subresource == "" {
+		return routeNamedGet
+	}
+	if r.Method == http.MethodGet && resource.isCollection {
+		return routeList
+	}
+	if isMutation(r.Method) && resource.isResource {
+		return routeMutation
+	}
+	return routePrimary
 }
 
-func isLongRunningRequest(r *http.Request) bool {
-	if isWatchRequest(r) {
+func isPrimaryRequest(r *http.Request, helmMode bool) bool {
+	if isDiscoveryPath(r.URL.Path) || isRequestResponseAPI(r) {
 		return true
 	}
-	_, ok := podObjectPathForSubresource(r.URL.Path)
-	return ok
+	return helmMode && isHelmStorageList(r)
 }
 
-func splitPath(path string) []string {
-	return strings.Split(strings.Trim(path, "/"), "/")
-}
-
-func podObjectPathForSubresource(path string) (string, bool) {
-	podPath, ok := podObjectPath(path)
-	if !ok {
-		return "", false
-	}
-	parts := splitPath(path)
-	switch parts[6] {
-	case "attach", "exec", "log", "portforward":
-		return podPath, true
+func parseResourcePath(path string) resourcePath {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	base, namespaced := 0, false
+	switch {
+	case len(parts) >= 3 && parts[0] == "api":
+		base = 3
+		if len(parts) >= 5 && parts[2] == "namespaces" {
+			base, namespaced = 5, true
+		}
+	case len(parts) >= 4 && parts[0] == "apis":
+		base = 4
+		if len(parts) >= 6 && parts[3] == "namespaces" {
+			base, namespaced = 6, true
+		}
 	default:
-		return "", false
+		return resourcePath{}
 	}
-}
-
-func podObjectPath(path string) (string, bool) {
-	parts := splitPath(path)
-	if len(parts) != 7 || parts[0] != "api" || parts[2] != "namespaces" || parts[4] != "pods" {
-		return "", false
+	if len(parts) < base {
+		return resourcePath{}
 	}
-	return "/" + strings.Join(parts[:6], "/"), true
+	result := resourcePath{isResource: true, isCollection: len(parts) == base}
+	if len(parts) > base {
+		result.isObject = true
+		result.ownerPath = "/" + strings.Join(parts[:base+1], "/")
+	}
+	if len(parts) > base+1 {
+		result.subresource = parts[base+1]
+	}
+	resourceIndex := base - 1
+	if namespaced {
+		resourceIndex = base - 1
+	}
+	result.isPod = parts[resourceIndex] == "pods"
+	return result
 }
 
-func isAggregatableListRequest(r *http.Request) bool {
-	return r.Method == http.MethodGet && !isDiscoveryPath(r.URL.Path) && r.URL.Query().Get("watch") != "true"
+func isMutation(method string) bool {
+	return method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete
 }
 
-func isWatchRequest(r *http.Request) bool {
+func isWatch(r *http.Request) bool {
 	return r.Method == http.MethodGet && r.URL.Query().Get("watch") == "true"
 }
 
-func isHelmStorageListRequest(r *http.Request) bool {
-	if r.Method != http.MethodGet {
+func isPodConnection(subresource string) bool {
+	return subresource == "log" || subresource == "exec" || subresource == "attach" || subresource == "portforward"
+}
+
+func isRequestResponseAPI(r *http.Request) bool {
+	if r.Method != http.MethodPost {
 		return false
 	}
-	if !isCoreResourceListPath(r.URL.Path, "secrets", "configmaps") {
+	path := r.URL.Path
+	return strings.Contains(path, "selfsubjectreview") || strings.Contains(path, "accessreview") || strings.Contains(path, "tokenreviews") || strings.HasSuffix(path, "/serviceaccounts/token") || strings.Contains(path, "/serviceaccounts/") && strings.HasSuffix(path, "/token")
+}
+
+func isHelmStorageList(r *http.Request) bool {
+	if r.Method != http.MethodGet || !parseResourcePath(r.URL.Path).isCollection {
 		return false
 	}
-	return labelSelectorHas(r.URL.Query().Get("labelSelector"), "owner", "helm")
-}
-
-func isCoreResourceListPath(path string, resources ...string) bool {
-	parts := splitPath(path)
-	resource := ""
-	switch {
-	case len(parts) == 3 && parts[0] == "api" && parts[1] == "v1":
-		resource = parts[2]
-	case len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "namespaces":
-		resource = parts[4]
-	default:
+	path := r.URL.Path
+	if !strings.HasSuffix(path, "/secrets") && !strings.HasSuffix(path, "/configmaps") {
 		return false
 	}
-
-	for _, candidate := range resources {
-		if resource == candidate {
-			return true
-		}
-	}
-	return false
-}
-
-func labelSelectorHas(selector, key, value string) bool {
-	for _, requirement := range strings.Split(selector, ",") {
-		requirement = strings.TrimSpace(requirement)
-		if requirement == key+"="+value || requirement == key+"=="+value {
-			return true
-		}
-	}
-	return false
-}
-
-func isNamedFieldSelector(selector string) bool {
-	for _, requirement := range strings.Split(selector, ",") {
-		requirement = strings.TrimSpace(requirement)
-		if strings.HasPrefix(requirement, "metadata.name=") || strings.HasPrefix(requirement, "metadata.name==") {
-			return true
-		}
-	}
-	return false
-}
-
-func isNamedResourceGetRequest(r *http.Request) bool {
-	return r.Method == http.MethodGet && isNamedResourcePath(r.URL.Path)
-}
-
-func isNamedResourcePath(path string) bool {
-	parts := splitPath(path)
-	if len(parts) == 4 && parts[0] == "api" {
-		return true
-	}
-	if len(parts) == 6 && parts[0] == "api" && parts[2] == "namespaces" {
-		return true
-	}
-	if len(parts) == 5 && parts[0] == "apis" {
-		return true
-	}
-	return len(parts) == 7 && parts[0] == "apis" && parts[3] == "namespaces"
-}
-
-func isMutating(method string) bool {
-	switch method {
-	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
-		return true
-	default:
-		return false
-	}
+	return strings.Contains(r.URL.Query().Get("labelSelector"), "owner=helm") || strings.Contains(r.URL.Query().Get("labelSelector"), "owner==helm")
 }
 
 func isDiscoveryPath(path string) bool {
-	return path == "/api" ||
-		path == "/apis" ||
-		path == "/version" ||
-		strings.HasPrefix(path, "/api/") && strings.Count(strings.Trim(path, "/"), "/") <= 1 ||
-		strings.HasPrefix(path, "/apis/") && strings.Count(strings.Trim(path, "/"), "/") <= 2 ||
-		strings.HasPrefix(path, "/openapi") ||
-		strings.HasPrefix(path, "/swagger") ||
-		strings.HasPrefix(path, "/healthz") ||
-		strings.HasPrefix(path, "/livez") ||
-		strings.HasPrefix(path, "/readyz")
+	trimmed := strings.Trim(path, "/")
+	parts := strings.Split(trimmed, "/")
+	return path == "/api" || path == "/apis" || path == "/version" ||
+		strings.HasPrefix(path, "/openapi") || strings.HasPrefix(path, "/swagger") ||
+		strings.HasPrefix(path, "/healthz") || strings.HasPrefix(path, "/livez") || strings.HasPrefix(path, "/readyz") ||
+		len(parts) <= 2 && strings.HasPrefix(path, "/api/") || len(parts) <= 3 && strings.HasPrefix(path, "/apis/")
 }

@@ -42,6 +42,9 @@ curl -fsSL https://raw.githubusercontent.com/IMMORTALxJO/kubeconfig-proxy/master
 The proxy keeps a list of source contexts from the original kubeconfig. Requests
 made through the proxy context are routed according to request type:
 
+The complete request matrix, including target selection, concurrency, and
+failure semantics, is in [ROUTING.md](ROUTING.md).
+
 - list requests are aggregated from all selected contexts;
 - paginated lists honor one global `limit` and use an opaque proxy continuation
   token to advance across contexts without duplicates or omissions;
@@ -159,8 +162,8 @@ metadata:
     kubeconfig-proxy.io/single-context: "true"
 ```
 
-The selected context for `single-context` is the first configured context by
-alphabetical name. If both annotations are present,
+The selected context for `single-context` is the primary context. If both
+annotations are present,
 `kubeconfig-proxy.io/context-name` wins.
 
 ## Helm And Werf

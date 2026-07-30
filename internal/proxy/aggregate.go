@@ -1,218 +1,389 @@
 package proxy
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
+	"strconv"
 	"strings"
 )
 
+const (
+	aggregateContinuePrefix        = "kubeconfig-proxy-continue:"
+	aggregateResourceVersionPrefix = "kubeconfig-proxy:"
+	maxAggregatePageLimit          = 10000
+)
+
+type pageCursor struct {
+	Target           int               `json:"target"`
+	Continue         string            `json:"continue,omitempty"`
+	Scope            string            `json:"scope"`
+	Targets          string            `json:"targets"`
+	ResourceVersions map[string]string `json:"resourceVersions,omitempty"`
+}
+
 func (p *Proxy) aggregateList(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Query().Get("limit") != "" || r.URL.Query().Get(aggregateContinueQueryKey) != "" {
-		p.aggregatePaginatedList(w, r)
+	if r.URL.Query().Get("limit") != "" || r.URL.Query().Get("continue") != "" {
+		p.aggregatePage(w, r)
 		return
 	}
-
-	responses := p.requestAllTargets(r.Context(), requestAcceptingJSONOnly(r), nil)
-	okResponses := make([]upstreamResponse, 0, len(responses))
+	responses := p.requestTargets(r.Context(), p.targets, r, nil)
 	for _, response := range responses {
-		if response.err != nil {
-			writeStatusError(w, http.StatusBadGateway, fmt.Sprintf("%s: %v", response.target.Name, response.err))
+		if response.err != nil || response.status < 200 || response.status >= 300 {
+			writeTargetFailure(w, response)
 			return
 		}
-		if response.status < 200 || response.status >= 300 {
-			writeUpstreamResponse(w, response)
-			return
-		}
-		okResponses = append(okResponses, response)
 	}
-
-	merged, err := mergeLists(okResponses)
+	body, err := mergeLists(responses)
 	if err != nil {
-		writeStatusError(w, http.StatusBadGateway, err.Error())
+		writeStatus(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	copyHeaders(w.Header(), okResponses[0].header)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(merged) // #nosec G705 -- response body is Kubernetes API JSON, not browser-rendered HTML.
+	_, _ = w.Write(body)
+}
+
+func (p *Proxy) aggregatePage(w http.ResponseWriter, r *http.Request) {
+	limit, err := aggregatePageLimit(r)
+	if err != nil {
+		writeStatus(w, http.StatusBadRequest, "invalid list limit")
+		return
+	}
+	if limit == 0 {
+		p.aggregateListWithoutPage(w, r)
+		return
+	}
+	cursor, err := p.decodeCursor(r)
+	if err != nil {
+		writeStatus(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	resourceVersions, failure := p.pageResourceVersions(r, cursor)
+	if failure.err != nil || failure.status != 0 {
+		writeAggregatePageFailure(w, failure)
+		return
+	}
+	items := make([]any, 0)
+	var template map[string]any
+	for index := cursor.Target; index < len(p.targets) && len(items) < limit; index++ {
+		page, entries, next, failure := p.readAggregatePage(r, index, cursor, limit-len(items), resourceVersions[p.targets[index].Name])
+		if failure.err != nil || failure.status != 0 {
+			writeAggregatePageFailure(w, failure)
+			return
+		}
+		items = append(items, entries...)
+		template = page
+		if next != "" {
+			setCursor(template, pageCursor{Target: index, Continue: next, Scope: pageScope(r), Targets: p.targetSet(), ResourceVersions: resourceVersions})
+			break
+		}
+		if len(items) == limit && index+1 < len(p.targets) {
+			setCursor(template, pageCursor{Target: index + 1, Scope: pageScope(r), Targets: p.targetSet(), ResourceVersions: resourceVersions})
+			break
+		}
+	}
+	if template == nil {
+		template = map[string]any{}
+	}
+	if _, entriesKey, ok := listEntries(template); ok {
+		template[entriesKey] = items
+	} else {
+		template["items"] = items
+	}
+	setAggregateResourceVersionValues(template, resourceVersions)
+	result, _ := json.Marshal(template)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(result)
+}
+
+func (p *Proxy) pageResourceVersions(r *http.Request, cursor pageCursor) (map[string]string, upstreamResponse) {
+	if len(cursor.ResourceVersions) != 0 {
+		versions := make(map[string]string, len(p.targets))
+		for _, target := range p.targets {
+			version := cursor.ResourceVersions[target.Name]
+			if version == "" {
+				return nil, upstreamResponse{target: target, err: fmt.Errorf("missing page resource version")}
+			}
+			versions[target.Name] = version
+		}
+		return versions, upstreamResponse{}
+	}
+
+	responses := p.requestTargets(r.Context(), p.targets, aggregatePageVersionRequest(r), nil)
+	versions := make(map[string]string, len(responses))
+	for _, response := range responses {
+		if response.err != nil || response.status < 200 || response.status >= 300 {
+			return nil, response
+		}
+		version, err := listResourceVersion(response.body)
+		if err != nil {
+			return nil, upstreamResponse{target: response.target, err: err}
+		}
+		versions[response.target.Name] = version
+	}
+	return versions, upstreamResponse{}
+}
+
+func aggregatePageVersionRequest(r *http.Request) *http.Request {
+	request := r.Clone(r.Context())
+	url := *r.URL
+	query := url.Query()
+	query.Set("limit", "1")
+	query.Del("continue")
+	query.Del("resourceVersion")
+	query.Del("resourceVersionMatch")
+	url.RawQuery = query.Encode()
+	request.URL = &url
+	return request
+}
+
+func listResourceVersion(body []byte) (string, error) {
+	var payload struct {
+		Metadata struct {
+			ResourceVersion string `json:"resourceVersion"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", fmt.Errorf("decode list response: %w", err)
+	}
+	if payload.Metadata.ResourceVersion == "" {
+		return "", fmt.Errorf("list response has no resource version")
+	}
+	return payload.Metadata.ResourceVersion, nil
+}
+
+func (p *Proxy) readAggregatePage(r *http.Request, index int, cursor pageCursor, limit int, resourceVersion string) (map[string]any, []any, string, upstreamResponse) {
+	request := aggregatePageRequest(r, index == cursor.Target, cursor.Continue, limit, resourceVersion)
+	response := p.requestTarget(r.Context(), p.targets[index], request, nil)
+	if response.err != nil || response.status < 200 || response.status >= 300 {
+		return nil, nil, "", response
+	}
+	var page map[string]any
+	if json.Unmarshal(response.body, &page) != nil {
+		return nil, nil, "", upstreamResponse{target: response.target, err: fmt.Errorf("decode list response")}
+	}
+	entries, _, ok := listEntries(page)
+	if !ok {
+		return nil, nil, "", upstreamResponse{target: response.target, err: fmt.Errorf("response is not a Kubernetes list or table")}
+	}
+	for _, entry := range entries {
+		markEntry(entry, response.target.Name)
+	}
+	metadata, _ := page["metadata"].(map[string]any)
+	next, _ := metadata["continue"].(string)
+	return page, entries, next, upstreamResponse{}
+}
+
+func aggregatePageRequest(r *http.Request, isCursorTarget bool, continueToken string, limit int, resourceVersion string) *http.Request {
+	request := r.Clone(r.Context())
+	url := *r.URL
+	query := url.Query()
+	query.Set("limit", strconv.Itoa(limit))
+	if isCursorTarget && continueToken != "" {
+		query.Set("continue", continueToken)
+		query.Del("resourceVersion")
+		query.Del("resourceVersionMatch")
+	} else {
+		query.Del("continue")
+		query.Set("resourceVersion", resourceVersion)
+		query.Set("resourceVersionMatch", "Exact")
+	}
+	url.RawQuery = query.Encode()
+	request.URL = &url
+	return request
+}
+
+func writeAggregatePageFailure(w http.ResponseWriter, response upstreamResponse) {
+	if response.err != nil && response.status == 0 {
+		writeStatus(w, http.StatusBadGateway, response.target.Name+": "+response.err.Error())
+		return
+	}
+	writeTargetFailure(w, response)
+}
+
+func aggregatePageLimit(r *http.Request) (int, error) {
+	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil || limit < 0 || limit > maxAggregatePageLimit {
+		return 0, fmt.Errorf("invalid list limit")
+	}
+	return limit, nil
+}
+
+func (p *Proxy) aggregateListWithoutPage(w http.ResponseWriter, r *http.Request) {
+	clone := r.Clone(r.Context())
+	url := *r.URL
+	query := url.Query()
+	query.Del("limit")
+	query.Del("continue")
+	url.RawQuery = query.Encode()
+	clone.URL = &url
+	responses := p.requestTargets(r.Context(), p.targets, clone, nil)
+	for _, response := range responses {
+		if response.err != nil || response.status < 200 || response.status >= 300 {
+			writeTargetFailure(w, response)
+			return
+		}
+	}
+	body, err := mergeLists(responses)
+	if err != nil {
+		writeStatus(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+func pageScope(r *http.Request) string {
+	query := r.URL.Query()
+	query.Del("limit")
+	query.Del("continue")
+	return r.URL.Path + "?" + query.Encode()
+}
+func (p *Proxy) decodeCursor(r *http.Request) (pageCursor, error) {
+	value := r.URL.Query().Get("continue")
+	if value == "" {
+		return pageCursor{Scope: pageScope(r), Targets: p.targetSet()}, nil
+	}
+	if !strings.HasPrefix(value, aggregateContinuePrefix) {
+		return pageCursor{}, fmt.Errorf("invalid aggregate continue token")
+	}
+	data, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, aggregateContinuePrefix))
+	if err != nil {
+		return pageCursor{}, err
+	}
+	var cursor pageCursor
+	if json.Unmarshal(data, &cursor) != nil || cursor.Scope != pageScope(r) || cursor.Targets != p.targetSet() || cursor.Target < 0 || cursor.Target >= len(p.targets) {
+		return pageCursor{}, fmt.Errorf("invalid aggregate continue token")
+	}
+	return cursor, nil
+}
+
+func (p *Proxy) targetSet() string {
+	names := make([]string, len(p.targets))
+	for index, target := range p.targets {
+		names[index] = target.Name
+	}
+	return strings.Join(names, "\x00")
+}
+func setCursor(payload map[string]any, cursor pageCursor) {
+	data, _ := json.Marshal(cursor)
+	metadata, ok := payload["metadata"].(map[string]any)
+	if !ok {
+		metadata = map[string]any{}
+		payload["metadata"] = metadata
+	}
+	metadata["continue"] = aggregateContinuePrefix + base64.RawURLEncoding.EncodeToString(data)
 }
 
 func mergeLists(responses []upstreamResponse) ([]byte, error) {
-	return mergeListsWithResourceVersions(responses, nil)
-}
-
-func mergeListsWithResourceVersions(responses []upstreamResponse, initialResourceVersions map[string]string) ([]byte, error) {
 	var merged map[string]any
-	resourceVersions := cloneStringMap(initialResourceVersions)
 	for _, response := range responses {
-		var payload map[string]any
-		if err := json.Unmarshal(response.body, &payload); err != nil {
+		var value map[string]any
+		if err := json.Unmarshal(response.body, &value); err != nil {
 			return nil, fmt.Errorf("%s: decode list response: %w", response.target.Name, err)
 		}
-		if resourceVersion := resourceVersionFromPayload(payload); resourceVersion != "" {
-			resourceVersions[response.target.Name] = resourceVersion
+		entries, entriesKey, ok := listEntries(value)
+		if !ok {
+			return nil, fmt.Errorf("%s: response is not a Kubernetes list or table", response.target.Name)
 		}
-
-		switch {
-		case hasArray(payload, "items"):
-			mergeArrayField(payload, &merged, "items", response.target.Name, ensureMetadataForListEntry)
-		case hasArray(payload, "rows"):
-			mergeArrayField(payload, &merged, "rows", response.target.Name, ensureMetadataForTableRow)
-		default:
-			return response.body, nil
+		for _, entry := range entries {
+			markEntry(entry, response.target.Name)
 		}
+		if merged == nil {
+			merged = value
+			merged[entriesKey] = entries
+			continue
+		}
+		_, mergedEntriesKey, mergedOK := listEntries(merged)
+		if !mergedOK || mergedEntriesKey != entriesKey {
+			return nil, fmt.Errorf("%s: response kind differs from previous target", response.target.Name)
+		}
+		current, _ := merged[mergedEntriesKey].([]any)
+		merged[mergedEntriesKey] = append(current, entries...)
 	}
-
 	if merged != nil {
-		metadata := ensureMap(merged, "metadata")
-		metadata["resourceVersion"] = encodeAggregateResourceVersion(resourceVersions)
+		setAggregateResourceVersion(merged, responses)
 	}
 	return json.Marshal(merged)
 }
 
-func cloneStringMap(source map[string]string) map[string]string {
-	cloned := make(map[string]string, len(source))
-	for key, value := range source {
-		cloned[key] = value
+func setAggregateResourceVersion(payload map[string]any, responses []upstreamResponse) {
+	versions := map[string]string{}
+	for _, response := range responses {
+		var value map[string]any
+		if json.Unmarshal(response.body, &value) == nil {
+			if metadata, ok := value["metadata"].(map[string]any); ok {
+				if version, ok := metadata["resourceVersion"].(string); ok {
+					versions[response.target.Name] = version
+				}
+			}
+		}
 	}
-	return cloned
+	setAggregateResourceVersionValues(payload, versions)
 }
 
-// ensureMetadataForListEntry returns the metadata map of a list item, creating it when absent.
-func ensureMetadataForListEntry(entry map[string]any) map[string]any {
-	return ensureMap(entry, "metadata")
-}
-
-// ensureMetadataForTableRow returns the metadata map of a table row's embedded object, creating it when absent.
-func ensureMetadataForTableRow(row map[string]any) map[string]any {
-	object, ok := row["object"].(map[string]any)
+func setAggregateResourceVersionValues(payload map[string]any, versions map[string]string) {
+	data, _ := json.Marshal(versions)
+	metadata, ok := payload["metadata"].(map[string]any)
 	if !ok {
+		metadata = map[string]any{}
+		payload["metadata"] = metadata
+	}
+	metadata["resourceVersion"] = aggregateResourceVersionPrefix + base64.RawURLEncoding.EncodeToString(data)
+}
+
+func aggregateResourceVersions(value string) map[string]string {
+	if !strings.HasPrefix(value, aggregateResourceVersionPrefix) {
 		return nil
 	}
-	return ensureMap(object, "metadata")
+	data, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, aggregateResourceVersionPrefix))
+	if err != nil {
+		return nil
+	}
+	versions := map[string]string{}
+	if json.Unmarshal(data, &versions) != nil {
+		return nil
+	}
+	return versions
 }
 
-func mergeArrayField(payload map[string]any, merged *map[string]any, key, contextName string, ensureMetadata func(map[string]any) map[string]any) {
-	entries, _ := payload[key].([]any)
-	for i := range entries {
-		entry, ok := entries[i].(map[string]any)
-		if !ok {
-			continue
-		}
-		if metadata := ensureMetadata(entry); metadata != nil {
-			markSourceContext(metadata, contextName)
-		}
+func listEntries(payload map[string]any) ([]any, string, bool) {
+	if entries, ok := payload["items"].([]any); ok {
+		return entries, "items", true
 	}
+	if entries, ok := payload["rows"].([]any); ok {
+		return entries, "rows", true
+	}
+	return nil, "", false
+}
 
-	if *merged == nil {
-		*merged = payload
-		(*merged)[key] = entries
+func markEntry(entry any, contextName string) {
+	object, ok := entry.(map[string]any)
+	if !ok {
 		return
 	}
-
-	mergedEntries, _ := (*merged)[key].([]any)
-	(*merged)[key] = append(mergedEntries, entries...)
-}
-
-func markSourceContext(metadata map[string]any, contextName string) {
-	annotations := ensureMap(metadata, "annotations")
-	annotations[sourceContextAnnotation] = contextName
-
-	labels := ensureMap(metadata, "labels")
-	labels[sourceContextLabel] = contextName
-}
-
-func markWatchEventSource(line []byte, contextName string) []byte {
-	trimmed := bytes.TrimSpace(line)
-	if len(trimmed) == 0 {
-		return line
-	}
-
-	var event map[string]any
-	if err := json.Unmarshal(trimmed, &event); err != nil {
-		return line
-	}
-	object, ok := event["object"].(map[string]any)
-	if !ok {
-		return line
+	if embedded, ok := object["object"].(map[string]any); ok {
+		object = embedded
 	}
 	metadata, ok := object["metadata"].(map[string]any)
 	if !ok {
-		return line
+		metadata = map[string]any{}
+		object["metadata"] = metadata
 	}
-	markSourceContext(metadata, contextName)
-
-	encoded, err := json.Marshal(event)
-	if err != nil {
-		return line
-	}
-	return append(encoded, '\n')
-}
-
-func ensureMap(parent map[string]any, key string) map[string]any {
-	child, ok := parent[key].(map[string]any)
+	annotations, ok := metadata["annotations"].(map[string]any)
 	if !ok {
-		child = map[string]any{}
-		parent[key] = child
+		annotations = map[string]any{}
+		metadata["annotations"] = annotations
 	}
-	return child
-}
-
-func hasArray(payload map[string]any, key string) bool {
-	_, ok := payload[key].([]any)
-	return ok
-}
-
-func resourceVersionFromPayload(payload map[string]any) string {
-	metadata, ok := payload["metadata"].(map[string]any)
+	annotations[sourceContextAnnotation] = contextName
+	labels, ok := metadata["labels"].(map[string]any)
 	if !ok {
-		return ""
+		labels = map[string]any{}
+		metadata["labels"] = labels
 	}
-	resourceVersion, _ := metadata["resourceVersion"].(string)
-	return resourceVersion
-}
-
-func encodeAggregateResourceVersion(resourceVersions map[string]string) string {
-	if len(resourceVersions) == 0 {
-		return ""
-	}
-	payload, err := json.Marshal(resourceVersions)
-	if err != nil {
-		return ""
-	}
-	return aggregateResourceVersionPrefix + base64.RawURLEncoding.EncodeToString(payload)
-}
-
-func decodeAggregateResourceVersion(resourceVersion string) (map[string]string, bool) {
-	if !strings.HasPrefix(resourceVersion, aggregateResourceVersionPrefix) {
-		return nil, false
-	}
-	encoded := strings.TrimPrefix(resourceVersion, aggregateResourceVersionPrefix)
-	payload, err := base64.RawURLEncoding.DecodeString(encoded)
-	if err != nil {
-		return nil, false
-	}
-	var resourceVersions map[string]string
-	if err := json.Unmarshal(payload, &resourceVersions); err != nil {
-		return nil, false
-	}
-	return resourceVersions, true
-}
-
-func applyAggregateResourceVersion(upstreamURL *url.URL, targetName string) {
-	query := upstreamURL.Query()
-	resourceVersions, ok := decodeAggregateResourceVersion(query.Get(aggregateResourceVersionQueryKey))
-	if !ok {
-		return
-	}
-	if resourceVersion := resourceVersions[targetName]; resourceVersion != "" {
-		query.Set(aggregateResourceVersionQueryKey, resourceVersion)
-	} else {
-		query.Del(aggregateResourceVersionQueryKey)
-	}
-	upstreamURL.RawQuery = query.Encode()
+	labels[sourceContextLabel] = contextName
 }

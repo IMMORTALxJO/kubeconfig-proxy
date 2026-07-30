@@ -4,51 +4,23 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"sync"
-	"time"
 )
 
 type watchStream struct {
 	target   Target
-	header   http.Header
 	response *http.Response
 	cancel   context.CancelFunc
 }
 
-type watchOpenResult struct {
-	stream   watchStream
-	response upstreamResponse
-	failed   bool
-}
-
 func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
-	isEmpty, failure := p.isNamedWatchEmptyAcrossTargets(r)
-	if failure != nil {
-		if failure.err != nil {
-			writeStatusError(w, http.StatusBadGateway, failure.err.Error())
-			return
-		}
-		writeUpstreamResponse(w, *failure)
-		return
-	}
-	if isEmpty {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	streams, failure := p.openWatchStreams(r.Context(), r)
-	if failure != nil {
+	streams, failure := p.openWatches(r.Context(), r)
+	if failure.err != nil || failure.status < 200 || failure.status >= 300 {
 		for _, stream := range streams {
 			closeWatchStream(stream)
 		}
-		if failure.err != nil {
-			writeStatusError(w, http.StatusBadGateway, failure.err.Error())
-			return
-		}
-		writeUpstreamResponse(w, *failure)
+		writeTargetFailure(w, failure)
 		return
 	}
 	defer func() {
@@ -56,183 +28,105 @@ func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
 			closeWatchStream(stream)
 		}
 	}()
-
-	if len(streams) == 0 {
-		writeStatusError(w, http.StatusBadGateway, "no watch streams opened")
-		return
-	}
-
-	copyHeaders(w.Header(), streams[0].header)
-	if w.Header().Get("Content-Type") == "" {
-		w.Header().Set("Content-Type", "application/json")
-	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-
-	flusher, _ := w.(http.Flusher)
 	var writeMu sync.Mutex
 	var wg sync.WaitGroup
 	for _, stream := range streams {
 		stream := stream
 		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			copyWatchStream(r.Context(), stream, w, flusher, &writeMu)
-		}()
+		go func() { defer wg.Done(); copyWatch(r.Context(), w, &writeMu, stream) }()
 	}
 	wg.Wait()
 }
 
-func (p *Proxy) isNamedWatchEmptyAcrossTargets(r *http.Request) (bool, *upstreamResponse) {
-	if !isNamedFieldSelector(r.URL.Query().Get("fieldSelector")) {
-		return false, nil
+func closeWatchStream(stream watchStream) {
+	if stream.response != nil {
+		_ = stream.response.Body.Close()
 	}
-
-	listURL := *r.URL
-	query := listURL.Query()
-	for _, key := range []string{"watch", "resourceVersion", "resourceVersionMatch", "allowWatchBookmarks", "timeoutSeconds", "sendInitialEvents"} {
-		query.Del(key)
+	if stream.cancel != nil {
+		stream.cancel()
 	}
-	listURL.RawQuery = query.Encode()
-
-	listRequest := r.Clone(r.Context())
-	listRequest.Method = http.MethodGet
-	listRequest.URL = &listURL
-	listRequest.Body = nil
-	listRequest.ContentLength = 0
-
-	responses := p.requestAllTargets(r.Context(), requestAcceptingJSONOnly(listRequest), nil)
-	for _, response := range responses {
-		if response.err != nil {
-			return false, &response
-		}
-		if response.status < 200 || response.status >= 300 {
-			return false, &response
-		}
-
-		var payload map[string]any
-		if err := json.Unmarshal(response.body, &payload); err != nil {
-			return false, &upstreamResponse{target: response.target, err: err}
-		}
-		items, ok := payload["items"].([]any)
-		if !ok || len(items) > 0 {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
-func (p *Proxy) openWatchStreams(ctx context.Context, original *http.Request) ([]watchStream, *upstreamResponse) {
-	results := make([]watchOpenResult, len(p.targets))
+func (p *Proxy) openWatches(ctx context.Context, original *http.Request) ([]watchStream, upstreamResponse) {
+	resourceVersions := aggregateResourceVersions(original.URL.Query().Get("resourceVersion"))
+	results := make([]watchStream, len(p.targets))
+	failures := make([]upstreamResponse, len(p.targets))
 	var wg sync.WaitGroup
 	for i, target := range p.targets {
 		i, target := i, target
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results[i] = p.openWatchStream(ctx, original, target)
+			requestCtx, cancel := context.WithCancel(ctx)
+			requestOriginal := original
+			if resourceVersions != nil {
+				requestOriginal = original.Clone(requestCtx)
+				url := *original.URL
+				query := url.Query()
+				query.Set("resourceVersion", resourceVersions[target.Name])
+				url.RawQuery = query.Encode()
+				requestOriginal.URL = &url
+			}
+			request, err := newRequest(requestCtx, target, requestOriginal, buildURL(target.Host, requestOriginal.URL), nil)
+			if err != nil {
+				cancel()
+				failures[i] = upstreamResponse{target: target, err: err}
+				return
+			}
+			response, err := target.Client.Do(request) // #nosec G704 -- target is selected from the configured kubeconfig contexts.
+			if err != nil {
+				cancel()
+				failures[i] = upstreamResponse{target: target, err: err}
+				return
+			}
+			if response.StatusCode < 200 || response.StatusCode >= 300 {
+				_ = response.Body.Close()
+				cancel()
+				failures[i] = upstreamResponse{target: target, status: response.StatusCode, header: response.Header.Clone()}
+				return
+			}
+			results[i] = watchStream{target: target, response: response, cancel: cancel}
 		}()
 	}
 	wg.Wait()
-
-	streams := make([]watchStream, 0, len(results))
-	for _, result := range results {
-		if result.failed {
-			return streams, &result.response
+	for _, failure := range failures {
+		if failure.err != nil || failure.status != 0 {
+			return results, failure
 		}
-		streams = append(streams, result.stream)
 	}
-	return streams, nil
+	return results, upstreamResponse{status: http.StatusOK}
 }
 
-func (p *Proxy) openWatchStream(ctx context.Context, original *http.Request, target Target) watchOpenResult {
-	requestCtx, cancel := context.WithCancel(ctx)
-	timer := (*time.Timer)(nil)
-	if p.options.RequestTimeout > 0 {
-		timer = time.AfterFunc(p.options.RequestTimeout, cancel)
-	}
-
-	upstreamURL := buildUpstreamURL(target.Host, original.URL)
-	applyAggregateResourceVersion(upstreamURL, target.Name)
-	request, err := newUpstreamRequest(requestCtx, target, requestAcceptingJSONOnly(original), upstreamURL, http.NoBody)
-	if err != nil {
-		cancel()
-		if timer != nil {
-			timer.Stop()
-		}
-		return failedWatchOpen(target, err)
-	}
-	response, err := target.Client.Do(request) // #nosec G704 -- proxying requests to selected kubeconfig targets is the purpose of this package.
-	if err != nil {
-		if requestCtx.Err() != nil && ctx.Err() == nil {
-			err = context.DeadlineExceeded
-		}
-		cancel()
-		if timer != nil {
-			timer.Stop()
-		}
-		return failedWatchOpen(target, err)
-	}
-	if timer != nil && !timer.Stop() {
-		_ = response.Body.Close()
-		cancel()
-		return failedWatchOpen(target, context.DeadlineExceeded)
-	}
-
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		body, readErr := readLimitedBody(response.Body, maxUpstreamResponseBodyBytes, "upstream watch error body")
-		_ = response.Body.Close()
-		cancel()
-		if readErr != nil {
-			return failedWatchOpen(target, readErr)
-		}
-		return watchOpenResult{
-			response: upstreamResponse{
-				target: target,
-				status: response.StatusCode,
-				header: response.Header.Clone(),
-				body:   body,
-			},
-			failed: true,
-		}
-	}
-
-	return watchOpenResult{
-		stream: watchStream{
-			target:   target,
-			header:   response.Header.Clone(),
-			response: response,
-			cancel:   cancel,
-		},
-	}
-}
-
-func failedWatchOpen(target Target, err error) watchOpenResult {
-	return watchOpenResult{
-		response: upstreamResponse{target: target, err: err},
-		failed:   true,
-	}
-}
-
-func closeWatchStream(stream watchStream) {
-	_ = stream.response.Body.Close()
-	stream.cancel()
-}
-
-func copyWatchStream(ctx context.Context, stream watchStream, w io.Writer, flusher http.Flusher, writeMu *sync.Mutex) {
+func copyWatch(ctx context.Context, w http.ResponseWriter, mu *sync.Mutex, stream watchStream) {
 	reader := bufio.NewReader(stream.response.Body)
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			line = markWatchEventSource(line, stream.target.Name)
-			writeMu.Lock()
+			line = markEvent(line, stream.target.Name)
+			mu.Lock()
 			_, _ = w.Write(line)
-			if flusher != nil {
+			if flusher, ok := w.(http.Flusher); ok {
 				flusher.Flush()
 			}
-			writeMu.Unlock()
+			mu.Unlock()
 		}
 		if err != nil || ctx.Err() != nil {
 			return
 		}
 	}
+}
+
+func markEvent(line []byte, contextName string) []byte {
+	var event map[string]any
+	if json.Unmarshal(line, &event) != nil {
+		return line
+	}
+	markEntry(event["object"], contextName)
+	result, err := json.Marshal(event)
+	if err != nil {
+		return line
+	}
+	return append(result, '\n')
 }

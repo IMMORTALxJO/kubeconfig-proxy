@@ -5,6 +5,8 @@ between its packages, and the design decisions that should remain explicit as
 the project evolves.
 
 The user-facing behavior and command reference live in [README.md](README.md).
+Routing: [ROUTING.md](ROUTING.md).
+
 This document is the source of truth for internal structure and architectural
 constraints.
 
@@ -22,7 +24,7 @@ kubeconfig context. Its main responsibilities are:
 
 The architecture is driven by several constraints:
 
-- routing is the core product contract and must remain explicit;
+- routing must remain explicit;
 - mutations across clusters are dangerous and must have predictable targets;
 - source kubeconfig authentication must be delegated to `client-go`;
 - secrets must stay in a local state file with restrictive permissions;
@@ -100,14 +102,14 @@ model.
 
 - `proxy.go` owns construction, invariants, and the top-level decision tree;
 - `routing.go` contains small request-classification predicates;
-- `forward.go` handles primary, named-object, and single streaming routes;
-- `mutation.go` owns mutation target selection and request-body rewriting;
-- `aggregate.go` merges ordinary lists and composite resource versions;
-- `pagination.go` implements cross-context pagination;
+- `handlers.go` handles primary, named-object, pod-stream, and mutation routes,
+  including mutation target selection and request-body rewriting;
+- `aggregate.go` merges ordinary lists, implements cross-context pagination, and
+  encodes composite resource versions;
 - `watch.go` opens and merges watch streams;
-- `upstream.go` owns buffered upstream calls, retries, and request construction;
-- `auth.go`, `body.go`, `response.go`, and `target.go` provide narrow shared
-  primitives.
+- `transport.go` owns buffered upstream calls, retries, request construction,
+  and bounded body reads;
+- `http.go` provides authentication and HTTP response primitives.
 
 New behavior should be added to the file that owns its routing concern. The
 top-level decision tree should stay readable from top to bottom. Shared helpers
@@ -182,31 +184,9 @@ The activity wrapper tracks active proxied requests and last activity. The
 readiness endpoint does not extend the idle TTL. A zero TTL disables idle
 shutdown.
 
-## Request routing contract
+## Routing
 
-Authentication and read-only enforcement happen before request
-classification. The routing order in `Proxy.ServeHTTP` is significant:
-
-| Priority | Request class | Behavior |
-| --- | --- | --- |
-| 1 | Invalid bearer token | Reject with `401` |
-| 2 | Mutation in read-only mode | Reject with `403` before any upstream call |
-| 3 | Helm storage watch in Helm mode | Stream only from the primary target |
-| 4 | Other watch | Open and merge streams from all targets |
-| 5 | Pod `log`, `exec`, `attach`, or `portforward` | Find the context containing the pod and stream there; fall back to primary |
-| 6 | Discovery, health, OpenAPI, or Helm storage list in Helm mode | Forward to primary |
-| 7 | Named resource `GET` | Find the context containing the object; fall back to primary |
-| 8 | Other non-watch `GET` | Aggregate lists from all targets |
-| 9 | `POST`, `PUT`, `PATCH`, or `DELETE` | Select mutation targets and fan out |
-| 10 | Any other request | Forward to primary |
-
-The primary target is a deliberate compatibility boundary. Kubernetes
-discovery is not merged, and Helm release storage can be forced to one linear
-history while ordinary resources still use all selected contexts.
-
-Routing predicates should remain small pure functions. Do not replace the
-ordered decision tree with registration, reflection, or implicit middleware
-rules.
+See [ROUTING.md](ROUTING.md).
 
 ## Reads, lists, pagination, and watches
 
@@ -229,8 +209,8 @@ its own resource version.
 
 Watch streams are opened concurrently and copied to the client as events
 arrive. Event writes are serialized, but ordering between clusters is
-intentionally not defined. Named-field-selector watches first issue list
-requests so an empty selection can return without opening unnecessary streams.
+intentionally not defined. Every collection watch opens one upstream stream per
+configured target; field selectors are forwarded unchanged.
 
 ### Cross-context pagination
 
@@ -252,8 +232,7 @@ containing:
 - the configured target names;
 - the current target;
 - that target's upstream continuation token;
-- the request path and query scope, excluding `limit`, `continue`,
-  `resourceVersion`, and `resourceVersionMatch`;
+- the request path and query scope, excluding `limit` and `continue`;
 - resource versions captured from all targets before the first page.
 
 The token is rejected if the target set or request scope changes. This prevents
@@ -262,19 +241,17 @@ both aggregate resource versions and continuation tokens as opaque values.
 
 ## Mutations
 
-Mutation routing is intentionally explicit:
+Mutation routing is intentionally explicit. The detailed precedence, including
+the distinction between persistent-resource changes and primary-only
+request/response APIs, is specified in [ROUTING.md](ROUTING.md). Routing
+annotations select one configured target; otherwise an existing named object
+can select its owning contexts, and ordinary persistent-resource mutations fan
+out.
 
-1. `kubeconfig-proxy.io/context-name` selects exactly the named configured
-   context.
-2. Otherwise `kubeconfig-proxy.io/single-context: "true"` selects the
-   alphabetically first configured context.
-3. Without either annotation, the request targets every configured context.
-
-For named `PATCH` and `DELETE`, the body may not contain annotations. The proxy
-looks up the existing object and uses its annotations or the set of contexts in
-which the object exists. Pod subresource mutations, including the
-`ephemeralcontainers` request used by `kubectl debug`, first look up the base
-Pod.
+Named mutations and object-associated subresource mutations can lack routing
+annotations in their bodies. They therefore look up the owning object before
+selecting targets. Pod `ephemeralcontainers`, used by `kubectl debug`, is one
+such subresource.
 
 Before a `PUT`, each target may be queried for the current object. The proxy
 preserves that target's `uid` and `resourceVersion` in the outgoing body so one
@@ -296,14 +273,15 @@ can manage response decompression consistently.
 
 Buffered upstream calls have a configurable request timeout and retry temporary
 transport failures plus HTTP `429`, `500`, `502`, `503`, and `504`. Long-running
-requests use streaming reverse-proxy or watch paths. A watch uses the request
-timeout only while opening its upstream stream; successful stream lifetimes are
-not bounded by the ordinary request timeout.
+requests use streaming reverse-proxy or watch paths. Watch streams are opened
+without the ordinary request timeout, and their lifetimes are bounded by the
+client connection or the upstream server rather than the buffered-request
+timeout.
 
 Memory is bounded for buffered traffic:
 
 - mutation request bodies: 16 MiB;
-- non-streaming upstream responses and watch-open error bodies: 64 MiB.
+- non-streaming upstream responses: 64 MiB.
 
 These limits do not apply to successful long-running streams because those
 bodies are copied incrementally.

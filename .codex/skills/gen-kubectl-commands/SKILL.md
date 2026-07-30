@@ -73,3 +73,21 @@ Do not parse `kubectl -v` output. It is diagnostic text rather than a stable
 machine interface and may omit or reformat request bodies. Continue after a
 command failure or a controlled stream timeout: preserve every request captured
 for that entry and report the failed command after the corpus completes.
+
+## Werf request corpus
+
+The same recorder captures the project example's Kubernetes API traffic in
+`werf-commands.yaml`. It uses a disposable kind cluster and an isolated
+`WERF_HOME`; `werf dismiss` is intentionally limited to five seconds after its
+initial requests have been captured.
+
+Run it from the repository root with the pinned kubectl client:
+
+```bash
+GOTOOLCHAIN=auto go run .codex/skills/gen-kubectl-commands/scripts/capture.go \
+  --output .codex/skills/gen-kubectl-commands/werf-commands.yaml \
+  --client werf \
+  --client-name werf \
+  --project-dir examples/werf \
+  --kubectl "${XDG_CACHE_HOME:-$HOME/.cache}/kubeconfig-proxy/kubectl/darwin/arm64/v1.36.1/kubectl-v1.36.1"
+```

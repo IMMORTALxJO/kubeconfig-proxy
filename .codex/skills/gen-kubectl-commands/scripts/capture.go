@@ -86,7 +86,7 @@ func (r *recorder) ServeHTTP(w http.ResponseWriter, incoming *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	response, err := r.client.Do(upstreamRequest)
+	response, err := r.client.Do(upstreamRequest) // #nosec G704 -- recorder forwards only to its temporary kind API server.
 	if err != nil {
 		http.Error(w, fmt.Sprintf("forward request: %v", err), http.StatusBadGateway)
 		return
@@ -94,7 +94,25 @@ func (r *recorder) ServeHTTP(w http.ResponseWriter, incoming *http.Request) {
 	defer response.Body.Close()
 	copyHeader(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(w, response.Body)
+	copyResponseBody(w, response.Body)
+}
+
+func copyResponseBody(w http.ResponseWriter, body io.Reader) {
+	buffer := make([]byte, 32<<10)
+	for {
+		count, err := body.Read(buffer)
+		if count > 0 {
+			if _, writeErr := w.Write(buffer[:count]); writeErr != nil {
+				return
+			}
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 func (r *recorder) record(incoming *http.Request, body []byte) {
@@ -150,17 +168,26 @@ func main() {
 	flags := flag.NewFlagSet("capture", flag.ExitOnError)
 	outputPath := flags.String("output", filepath.Join(".codex", "skills", "gen-kubectl-commands", "kubectl-commands.yaml"), "YAML command corpus to execute and update")
 	kubectlPath := flags.String("kubectl", "kubectl", "kubectl executable")
+	clientPath := flags.String("client", "kubectl", "client executable to capture")
+	clientName := flags.String("client-name", "kubectl", "command name expected in the corpus")
+	projectDir := flags.String("project-dir", ".", "working directory for captured commands")
 	kindPath := flags.String("kind", "kind", "kind executable")
-	flags.Parse(os.Args[1:])
+	if err := flags.Parse(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "parse flags:", err)
+		os.Exit(2)
+	}
 
-	if err := capture(*outputPath, *kubectlPath, *kindPath); err != nil {
+	if err := capture(*outputPath, *kubectlPath, *clientPath, *clientName, *projectDir, *kindPath); err != nil {
 		fmt.Fprintln(os.Stderr, "capture failed:", err)
 		os.Exit(1)
 	}
 }
 
-func capture(outputPath, kubectlPath, kindPath string) error {
+func capture(outputPath, kubectlPath, clientPath, clientName, projectDir, kindPath string) error {
 	if err := requireExecutable(kubectlPath); err != nil {
+		return err
+	}
+	if err := requireExecutable(clientPath); err != nil {
 		return err
 	}
 	if err := requireExecutable(kindPath); err != nil {
@@ -171,12 +198,21 @@ func capture(outputPath, kubectlPath, kindPath string) error {
 	if err != nil {
 		return fmt.Errorf("resolve output path: %w", err)
 	}
-	entries, err := loadEntries(absOutputPath)
+	entries, err := loadEntries(absOutputPath, clientName)
 	if err != nil {
 		return err
 	}
 	if len(entries) == 0 {
 		return errors.New("command corpus is empty")
+	}
+	absProjectDir, err := filepath.Abs(projectDir)
+	if err != nil {
+		return fmt.Errorf("resolve project directory: %w", err)
+	}
+	if info, err := os.Stat(absProjectDir); err != nil {
+		return fmt.Errorf("stat project directory: %w", err)
+	} else if !info.IsDir() {
+		return fmt.Errorf("project directory %q is not a directory", absProjectDir)
 	}
 
 	workDir, err := os.MkdirTemp("", "kcp-http-capture-")
@@ -237,7 +273,7 @@ func capture(outputPath, kubectlPath, kindPath string) error {
 	for index := range entries {
 		entries[index].Requests = nil
 		recorder.begin(index)
-		err := runKubectl(kubectlPath, captureKubeconfig, workDir, entries[index].Command)
+		err := runClient(clientPath, clientName, captureKubeconfig, workDir, absProjectDir, entries[index].Command)
 		recorder.end()
 		if writeErr := writeEntries(absOutputPath, entries); writeErr != nil {
 			return writeErr
@@ -263,8 +299,8 @@ func requireExecutable(name string) error {
 	return nil
 }
 
-func loadEntries(path string) ([]commandEntry, error) {
-	data, err := os.ReadFile(path)
+func loadEntries(path, clientName string) ([]commandEntry, error) {
+	data, err := os.ReadFile(path) // #nosec G304 -- caller explicitly selects the disposable corpus path.
 	if err != nil {
 		return nil, fmt.Errorf("read command corpus: %w", err)
 	}
@@ -273,8 +309,8 @@ func loadEntries(path string) ([]commandEntry, error) {
 		return nil, fmt.Errorf("parse command corpus: %w", err)
 	}
 	for index, entry := range entries {
-		if !strings.HasPrefix(entry.Command, "kubectl ") {
-			return nil, fmt.Errorf("entry %d command must start with kubectl", index+1)
+		if !strings.HasPrefix(entry.Command, clientName+" ") {
+			return nil, fmt.Errorf("entry %d command must start with %q", index+1, clientName+" ")
 		}
 	}
 	return entries, nil
@@ -422,15 +458,19 @@ func writeCaptureKubeconfig(config clientcmdapi.Config, contextName, recorderURL
 	return nil
 }
 
-func runKubectl(kubectlPath, kubeconfigPath, temporaryDirectory, command string) error {
+func runClient(clientPath, clientName, kubeconfigPath, temporaryDirectory, projectDir, command string) error {
 	timeout := commandTimeout
 	if isStreamCommand(command) {
 		timeout = streamTimeout
 	}
 	context, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	process := exec.CommandContext(context, "/bin/sh", "-c", shellQuote(kubectlPath)+strings.TrimPrefix(command, "kubectl"))
+	process := exec.CommandContext(context, "/bin/sh", "-c", shellQuote(clientPath)+strings.TrimPrefix(command, clientName)) // #nosec G204 -- commands are the reviewed disposable-cluster corpus.
+	process.Dir = projectDir
 	process.Env = append(os.Environ(), "KUBECONFIG="+kubeconfigPath, "TMPDIR="+temporaryDirectory)
+	if clientName == "werf" {
+		process.Env = append(process.Env, "WERF_HOME="+filepath.Join(temporaryDirectory, "werf-home"))
+	}
 	output, err := process.CombinedOutput()
 	if context.Err() != nil {
 		return fmt.Errorf("timed out after %s", timeout)
@@ -442,7 +482,7 @@ func runKubectl(kubectlPath, kubeconfigPath, temporaryDirectory, command string)
 }
 
 func isStreamCommand(command string) bool {
-	for _, name := range []string{" attach ", " port-forward ", " proxy ", " logs --follow", " logs -f"} {
+	for _, name := range []string{" attach ", " port-forward ", " proxy ", " logs --follow", " logs -f", "werf dismiss "} {
 		if strings.Contains(" "+command, name) {
 			return true
 		}
@@ -455,7 +495,7 @@ func shellQuote(value string) string {
 }
 
 func run(ctx context.Context, executable string, args ...string) error {
-	process := exec.CommandContext(ctx, executable, args...)
+	process := exec.CommandContext(ctx, executable, args...) // #nosec G204 -- executable and arguments are controlled collector inputs.
 	output, err := process.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
