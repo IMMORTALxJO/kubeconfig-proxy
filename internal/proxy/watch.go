@@ -85,7 +85,7 @@ func (p *Proxy) aggregateNamedWatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) aggregateWatchTargets(w http.ResponseWriter, r *http.Request, targets []Target) {
-	streams, failure := p.openWatches(r.Context(), r, targets)
+	streams, failure := openWatches(r.Context(), r, targets)
 	if failure.err != nil || failure.status < 200 || failure.status >= 300 {
 		for _, stream := range streams {
 			closeWatchStream(stream)
@@ -129,7 +129,7 @@ func closeWatchStream(stream watchStream) {
 	}
 }
 
-func (p *Proxy) openWatches(ctx context.Context, original *http.Request, targets []Target) ([]watchStream, upstreamResponse) {
+func openWatches(ctx context.Context, original *http.Request, targets []Target) ([]watchStream, upstreamResponse) {
 	resourceVersions := aggregateResourceVersions(original.URL.Query().Get("resourceVersion"))
 	results := make([]watchStream, len(targets))
 	failures := make([]upstreamResponse, len(targets))
