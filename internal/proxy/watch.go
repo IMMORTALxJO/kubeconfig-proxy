@@ -18,16 +18,14 @@ func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
 	streams, failure := p.openWatches(r.Context(), r)
 	if failure.err != nil || failure.status < 200 || failure.status >= 300 {
 		for _, stream := range streams {
-			_ = stream.response.Body.Close()
-			stream.cancel()
+			closeWatchStream(stream)
 		}
 		writeTargetFailure(w, failure)
 		return
 	}
 	defer func() {
 		for _, stream := range streams {
-			_ = stream.response.Body.Close()
-			stream.cancel()
+			closeWatchStream(stream)
 		}
 	}()
 	w.Header().Set("Content-Type", "application/json")
@@ -42,7 +40,17 @@ func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 }
 
+func closeWatchStream(stream watchStream) {
+	if stream.response != nil {
+		_ = stream.response.Body.Close()
+	}
+	if stream.cancel != nil {
+		stream.cancel()
+	}
+}
+
 func (p *Proxy) openWatches(ctx context.Context, original *http.Request) ([]watchStream, upstreamResponse) {
+	resourceVersions := aggregateResourceVersions(original.URL.Query().Get("resourceVersion"))
 	results := make([]watchStream, len(p.targets))
 	failures := make([]upstreamResponse, len(p.targets))
 	var wg sync.WaitGroup
@@ -52,7 +60,16 @@ func (p *Proxy) openWatches(ctx context.Context, original *http.Request) ([]watc
 		go func() {
 			defer wg.Done()
 			requestCtx, cancel := context.WithCancel(ctx)
-			request, err := newRequest(requestCtx, target, original, buildURL(target.Host, original.URL), nil)
+			requestOriginal := original
+			if resourceVersions != nil {
+				requestOriginal = original.Clone(requestCtx)
+				url := *original.URL
+				query := url.Query()
+				query.Set("resourceVersion", resourceVersions[target.Name])
+				url.RawQuery = query.Encode()
+				requestOriginal.URL = &url
+			}
+			request, err := newRequest(requestCtx, target, requestOriginal, buildURL(target.Host, requestOriginal.URL), nil)
 			if err != nil {
 				cancel()
 				failures[i] = upstreamResponse{target: target, err: err}
@@ -74,9 +91,9 @@ func (p *Proxy) openWatches(ctx context.Context, original *http.Request) ([]watc
 		}()
 	}
 	wg.Wait()
-	for i, failure := range failures {
+	for _, failure := range failures {
 		if failure.err != nil || failure.status != 0 {
-			return results[:i], failure
+			return results, failure
 		}
 	}
 	return results, upstreamResponse{status: http.StatusOK}

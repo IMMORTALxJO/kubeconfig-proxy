@@ -10,14 +10,16 @@ import (
 )
 
 const (
-	aggregateContinuePrefix = "kubeconfig-proxy-continue:"
-	maxAggregatePageLimit   = 10000
+	aggregateContinuePrefix        = "kubeconfig-proxy-continue:"
+	aggregateResourceVersionPrefix = "kubeconfig-proxy:"
+	maxAggregatePageLimit          = 10000
 )
 
 type pageCursor struct {
 	Target   int    `json:"target"`
 	Continue string `json:"continue,omitempty"`
 	Scope    string `json:"scope"`
+	Targets  string `json:"targets"`
 }
 
 func (p *Proxy) aggregateList(w http.ResponseWriter, r *http.Request) {
@@ -68,11 +70,11 @@ func (p *Proxy) aggregatePage(w http.ResponseWriter, r *http.Request) {
 		items = append(items, entries...)
 		template = page
 		if next != "" {
-			setCursor(template, pageCursor{Target: index, Continue: next, Scope: pageScope(r)})
+			setCursor(template, pageCursor{Target: index, Continue: next, Scope: pageScope(r), Targets: p.targetSet()})
 			break
 		}
 		if len(items) == limit && index+1 < len(p.targets) {
-			setCursor(template, pageCursor{Target: index + 1, Scope: pageScope(r)})
+			setCursor(template, pageCursor{Target: index + 1, Scope: pageScope(r), Targets: p.targetSet()})
 			break
 		}
 	}
@@ -177,7 +179,7 @@ func pageScope(r *http.Request) string {
 func (p *Proxy) decodeCursor(r *http.Request) (pageCursor, error) {
 	value := r.URL.Query().Get("continue")
 	if value == "" {
-		return pageCursor{Scope: pageScope(r)}, nil
+		return pageCursor{Scope: pageScope(r), Targets: p.targetSet()}, nil
 	}
 	if !strings.HasPrefix(value, aggregateContinuePrefix) {
 		return pageCursor{}, fmt.Errorf("invalid aggregate continue token")
@@ -187,10 +189,18 @@ func (p *Proxy) decodeCursor(r *http.Request) (pageCursor, error) {
 		return pageCursor{}, err
 	}
 	var cursor pageCursor
-	if json.Unmarshal(data, &cursor) != nil || cursor.Scope != pageScope(r) || cursor.Target < 0 || cursor.Target >= len(p.targets) {
+	if json.Unmarshal(data, &cursor) != nil || cursor.Scope != pageScope(r) || cursor.Targets != p.targetSet() || cursor.Target < 0 || cursor.Target >= len(p.targets) {
 		return pageCursor{}, fmt.Errorf("invalid aggregate continue token")
 	}
 	return cursor, nil
+}
+
+func (p *Proxy) targetSet() string {
+	names := make([]string, len(p.targets))
+	for index, target := range p.targets {
+		names[index] = target.Name
+	}
+	return strings.Join(names, "\x00")
 }
 func setCursor(payload map[string]any, cursor pageCursor) {
 	data, _ := json.Marshal(cursor)
@@ -228,7 +238,46 @@ func mergeLists(responses []upstreamResponse) ([]byte, error) {
 		current, _ := merged[mergedEntriesKey].([]any)
 		merged[mergedEntriesKey] = append(current, entries...)
 	}
+	if merged != nil {
+		setAggregateResourceVersion(merged, responses)
+	}
 	return json.Marshal(merged)
+}
+
+func setAggregateResourceVersion(payload map[string]any, responses []upstreamResponse) {
+	versions := map[string]string{}
+	for _, response := range responses {
+		var value map[string]any
+		if json.Unmarshal(response.body, &value) == nil {
+			if metadata, ok := value["metadata"].(map[string]any); ok {
+				if version, ok := metadata["resourceVersion"].(string); ok {
+					versions[response.target.Name] = version
+				}
+			}
+		}
+	}
+	data, _ := json.Marshal(versions)
+	metadata, ok := payload["metadata"].(map[string]any)
+	if !ok {
+		metadata = map[string]any{}
+		payload["metadata"] = metadata
+	}
+	metadata["resourceVersion"] = aggregateResourceVersionPrefix + base64.RawURLEncoding.EncodeToString(data)
+}
+
+func aggregateResourceVersions(value string) map[string]string {
+	if !strings.HasPrefix(value, aggregateResourceVersionPrefix) {
+		return nil
+	}
+	data, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, aggregateResourceVersionPrefix))
+	if err != nil {
+		return nil
+	}
+	versions := map[string]string{}
+	if json.Unmarshal(data, &versions) != nil {
+		return nil
+	}
+	return versions
 }
 
 func listEntries(payload map[string]any) ([]any, string, bool) {

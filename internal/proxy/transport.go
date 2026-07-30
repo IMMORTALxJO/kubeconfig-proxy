@@ -82,8 +82,23 @@ func newRequest(ctx context.Context, target Target, original *http.Request, targ
 	}
 	request.Header.Del("Authorization")
 	request.Header.Del("Accept-Encoding")
+	request.Header.Set("Accept", jsonAcceptHeader(original.Header.Get("Accept")))
 	request.Host = target.Host.Host
 	return request, nil
+}
+
+func jsonAcceptHeader(value string) string {
+	if value == "" || !strings.Contains(value, "application/vnd.kubernetes.protobuf") {
+		return value
+	}
+	values := strings.Split(value, ",")
+	jsonValues := make([]string, 0, len(values))
+	for _, mediaType := range values {
+		if !strings.Contains(mediaType, "application/vnd.kubernetes.protobuf") {
+			jsonValues = append(jsonValues, strings.TrimSpace(mediaType))
+		}
+	}
+	return strings.Join(jsonValues, ", ")
 }
 
 func buildURL(host, requestURL *url.URL) *url.URL {

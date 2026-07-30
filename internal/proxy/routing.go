@@ -108,7 +108,7 @@ func isRequestResponseAPI(r *http.Request) bool {
 		return false
 	}
 	path := r.URL.Path
-	return strings.Contains(path, "selfsubjectreview") || strings.Contains(path, "accessreview") || strings.HasSuffix(path, "/serviceaccounts/token") || strings.Contains(path, "/serviceaccounts/") && strings.HasSuffix(path, "/token")
+	return strings.Contains(path, "selfsubjectreview") || strings.Contains(path, "accessreview") || strings.Contains(path, "tokenreviews") || strings.HasSuffix(path, "/serviceaccounts/token") || strings.Contains(path, "/serviceaccounts/") && strings.HasSuffix(path, "/token")
 }
 
 func isHelmStorageList(r *http.Request) bool {
