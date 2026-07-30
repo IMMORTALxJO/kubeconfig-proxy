@@ -287,6 +287,74 @@ func TestNamedCollectionWatchUsesOnlyFoundContexts(t *testing.T) {
 	}
 }
 
+func TestNamedWatchRequest(t *testing.T) {
+	namedObject := httptest.NewRequest(http.MethodGet, "/api/v1/configmaps/demo?watch=true", http.NoBody)
+	if request, ok := namedWatchRequest(namedObject, parseResourcePath(namedObject.URL.Path)); !ok || request != namedObject {
+		t.Fatalf("named object request = %v, %t; want original request", request, ok)
+	}
+
+	collection := httptest.NewRequest(http.MethodGet, "/api/v1/configmaps?fieldSelector=metadata.name%3Ddemo&watch=true", http.NoBody)
+	request, ok := namedWatchRequest(collection, parseResourcePath(collection.URL.Path))
+	if !ok {
+		t.Fatal("collection watch was not classified as named")
+	}
+	if request.URL.Path != "/api/v1/configmaps/demo" || request.URL.Query().Get("fieldSelector") != "" {
+		t.Fatalf("named collection request = %s, %t", request.URL.String(), ok)
+	}
+
+	for _, path := range []string{
+		"/api/v1/configmaps?fieldSelector=metadata.namespace%3Ddefault&watch=true",
+		"/api/v1/configmaps?fieldSelector=metadata.name&watch=true",
+		"/api/v1/configmaps/demo/status?watch=true",
+	} {
+		request := httptest.NewRequest(http.MethodGet, path, http.NoBody)
+		if named, ok := namedWatchRequest(request, parseResourcePath(request.URL.Path)); ok || named != nil {
+			t.Fatalf("request %q = %v, %t; want not named", path, named, ok)
+		}
+	}
+}
+
+func TestNamedWatchProbeFailures(t *testing.T) {
+	t.Run("all contexts absent", func(t *testing.T) {
+		p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+			"one": func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) },
+			"two": func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) },
+		})
+		defer cleanup()
+
+		response := serve(p, http.MethodGet, "/api/v1/configmaps/demo?watch=true", "")
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", response.Code, http.StatusNotFound)
+		}
+	})
+
+	t.Run("unexpected probe status", func(t *testing.T) {
+		p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+			"one": func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) },
+			"two": func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) },
+		})
+		defer cleanup()
+
+		response := serve(p, http.MethodGet, "/api/v1/configmaps/demo?watch=true", "")
+		if response.Code != http.StatusBadGateway || !contains(response.Body.String(), "existing object returned HTTP 500") {
+			t.Fatalf("response = %d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("object has no resource version", func(t *testing.T) {
+		p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+			"one": func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"metadata":{"name":"demo"}}`)) },
+			"two": func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) },
+		})
+		defer cleanup()
+
+		response := serve(p, http.MethodGet, "/api/v1/configmaps/demo?watch=true", "")
+		if response.Code != http.StatusBadGateway || !contains(response.Body.String(), "list response has no resource version") {
+			t.Fatalf("response = %d %s", response.Code, response.Body.String())
+		}
+	})
+}
+
 func resourceVersionHandler(name, resourceVersion string, mu *sync.Mutex, watchResourceVersions map[string]string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("watch") == "true" {
