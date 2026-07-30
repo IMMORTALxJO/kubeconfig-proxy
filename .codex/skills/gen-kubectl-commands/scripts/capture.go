@@ -86,7 +86,7 @@ func (r *recorder) ServeHTTP(w http.ResponseWriter, incoming *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	response, err := r.client.Do(upstreamRequest)
+	response, err := r.client.Do(upstreamRequest) // #nosec G704 -- recorder forwards only to its temporary kind API server.
 	if err != nil {
 		http.Error(w, fmt.Sprintf("forward request: %v", err), http.StatusBadGateway)
 		return
@@ -151,7 +151,10 @@ func main() {
 	outputPath := flags.String("output", filepath.Join(".codex", "skills", "gen-kubectl-commands", "kubectl-commands.yaml"), "YAML command corpus to execute and update")
 	kubectlPath := flags.String("kubectl", "kubectl", "kubectl executable")
 	kindPath := flags.String("kind", "kind", "kind executable")
-	flags.Parse(os.Args[1:])
+	if err := flags.Parse(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "parse flags:", err)
+		os.Exit(2)
+	}
 
 	if err := capture(*outputPath, *kubectlPath, *kindPath); err != nil {
 		fmt.Fprintln(os.Stderr, "capture failed:", err)
@@ -264,7 +267,7 @@ func requireExecutable(name string) error {
 }
 
 func loadEntries(path string) ([]commandEntry, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- caller explicitly selects the disposable corpus path.
 	if err != nil {
 		return nil, fmt.Errorf("read command corpus: %w", err)
 	}
@@ -429,7 +432,7 @@ func runKubectl(kubectlPath, kubeconfigPath, temporaryDirectory, command string)
 	}
 	context, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	process := exec.CommandContext(context, "/bin/sh", "-c", shellQuote(kubectlPath)+strings.TrimPrefix(command, "kubectl"))
+	process := exec.CommandContext(context, "/bin/sh", "-c", shellQuote(kubectlPath)+strings.TrimPrefix(command, "kubectl")) // #nosec G204 -- commands are the reviewed disposable-cluster corpus.
 	process.Env = append(os.Environ(), "KUBECONFIG="+kubeconfigPath, "TMPDIR="+temporaryDirectory)
 	output, err := process.CombinedOutput()
 	if context.Err() != nil {
@@ -455,7 +458,7 @@ func shellQuote(value string) string {
 }
 
 func run(ctx context.Context, executable string, args ...string) error {
-	process := exec.CommandContext(ctx, executable, args...)
+	process := exec.CommandContext(ctx, executable, args...) // #nosec G204 -- executable and arguments are controlled collector inputs.
 	output, err := process.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
