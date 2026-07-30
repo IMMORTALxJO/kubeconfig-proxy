@@ -5,7 +5,8 @@ between its packages, and the design decisions that should remain explicit as
 the project evolves.
 
 The user-facing behavior and command reference live in [README.md](README.md).
-This document is the source of truth for internal structure and architectural
+The detailed HTTP routing matrix lives in [ROUTING.md](ROUTING.md). This
+document is the source of truth for internal structure and architectural
 constraints.
 
 ## Goals and constraints
@@ -184,6 +185,11 @@ shutdown.
 
 ## Request routing contract
 
+[ROUTING.md](ROUTING.md) is the normative matrix for request classes,
+target-selection rules, response choice, and failure semantics. This section
+documents the implementation's architectural decision order and must remain
+consistent with that matrix.
+
 Authentication and read-only enforcement happen before request
 classification. The routing order in `Proxy.ServeHTTP` is significant:
 
@@ -191,14 +197,15 @@ classification. The routing order in `Proxy.ServeHTTP` is significant:
 | --- | --- | --- |
 | 1 | Invalid bearer token | Reject with `401` |
 | 2 | Mutation in read-only mode | Reject with `403` before any upstream call |
-| 3 | Helm storage watch in Helm mode | Stream only from the primary target |
-| 4 | Other watch | Open and merge streams from all targets |
-| 5 | Pod `log`, `exec`, `attach`, or `portforward` | Find the context containing the pod and stream there; fall back to primary |
-| 6 | Discovery, health, OpenAPI, or Helm storage list in Helm mode | Forward to primary |
-| 7 | Named resource `GET` | Find the context containing the object; fall back to primary |
-| 8 | Other non-watch `GET` | Aggregate lists from all targets |
-| 9 | `POST`, `PUT`, `PATCH`, or `DELETE` | Select mutation targets and fan out |
-| 10 | Any other request | Forward to primary |
+| 3 | Discovery, health, OpenAPI, or other non-resource compatibility endpoint | Forward to primary |
+| 4 | Authentication, authorization, or token request API | Forward to primary |
+| 5 | Helm storage watch in Helm mode | Stream only from the primary target |
+| 6 | Other watch | Open and merge streams from all targets |
+| 7 | Pod `log`, `exec`, `attach`, or `portforward` | Locate the pod across contexts, prefer primary, then stream one target; fall back to primary when absent everywhere |
+| 8 | Named resource `GET` | Probe all contexts concurrently; return primary when found, otherwise a deterministic found target |
+| 9 | Other non-watch collection `GET` | Aggregate lists from all targets |
+| 10 | Persistent-resource `POST`, `PUT`, `PATCH`, or `DELETE` | Select mutation targets from annotations or the existing object, then fan out when appropriate |
+| 11 | Any other request | Forward to primary |
 
 The primary target is a deliberate compatibility boundary. Kubernetes
 discovery is not merged, and Helm release storage can be forced to one linear
@@ -262,19 +269,17 @@ both aggregate resource versions and continuation tokens as opaque values.
 
 ## Mutations
 
-Mutation routing is intentionally explicit:
+Mutation routing is intentionally explicit. The detailed precedence, including
+the distinction between persistent-resource changes and primary-only
+request/response APIs, is specified in [ROUTING.md](ROUTING.md). Routing
+annotations select one configured target; otherwise an existing named object
+can select its owning contexts, and ordinary persistent-resource mutations fan
+out.
 
-1. `kubeconfig-proxy.io/context-name` selects exactly the named configured
-   context.
-2. Otherwise `kubeconfig-proxy.io/single-context: "true"` selects the
-   alphabetically first configured context.
-3. Without either annotation, the request targets every configured context.
-
-For named `PATCH` and `DELETE`, the body may not contain annotations. The proxy
-looks up the existing object and uses its annotations or the set of contexts in
-which the object exists. Pod subresource mutations, including the
-`ephemeralcontainers` request used by `kubectl debug`, first look up the base
-Pod.
+Named mutations and object-associated subresource mutations can lack routing
+annotations in their bodies. They therefore look up the owning object before
+selecting targets. Pod `ephemeralcontainers`, used by `kubectl debug`, is one
+such subresource.
 
 Before a `PUT`, each target may be queried for the current object. The proxy
 preserves that target's `uid` and `resourceVersion` in the outgoing body so one
