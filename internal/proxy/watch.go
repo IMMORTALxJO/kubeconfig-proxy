@@ -24,7 +24,7 @@ func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
 		p.aggregateNamedWatch(w, namedWatch)
 		return
 	}
-	p.aggregateWatchTargets(w, r, p.targets)
+	aggregateWatchTargets(w, r, p.targets)
 }
 
 func namedWatchRequest(original *http.Request, resource resourcePath) (*http.Request, bool) {
@@ -81,10 +81,10 @@ func (p *Proxy) aggregateNamedWatch(w http.ResponseWriter, r *http.Request) {
 		}
 		versions[response.target.Name] = version
 	}
-	p.aggregateWatchTargets(w, withAggregateResourceVersions(r, versions), targets)
+	aggregateWatchTargets(w, withAggregateResourceVersions(r, versions), targets)
 }
 
-func (p *Proxy) aggregateWatchTargets(w http.ResponseWriter, r *http.Request, targets []Target) {
+func aggregateWatchTargets(w http.ResponseWriter, r *http.Request, targets []Target) {
 	streams, failure := openWatches(r.Context(), r, targets)
 	if failure.err != nil || failure.status < 200 || failure.status >= 300 {
 		for _, stream := range streams {
