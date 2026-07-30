@@ -1,12 +1,20 @@
 package state
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+type failingTemporaryFile struct{ writeErr, chmodErr, closeErr error }
+
+func (f failingTemporaryFile) Name() string              { return filepath.Join(os.TempDir(), "state-test.tmp") }
+func (f failingTemporaryFile) Write([]byte) (int, error) { return 0, f.writeErr }
+func (f failingTemporaryFile) Chmod(os.FileMode) error   { return f.chmodErr }
+func (f failingTemporaryFile) Close() error              { return f.closeErr }
 
 func TestSaveAndLoadRoundTripWithPrivatePermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "proxy.yaml")
@@ -145,6 +153,29 @@ func TestSaveReturnsDirectoryCreationError(t *testing.T) {
 	err := Save(path, validTestProfile())
 	if err == nil {
 		t.Fatal("Save returned nil error")
+	}
+}
+
+func TestSaveReturnsTemporaryFileErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		file      temporaryFile
+		createErr error
+	}{
+		{name: "create", createErr: errors.New("create")},
+		{name: "write", file: failingTemporaryFile{writeErr: errors.New("write")}},
+		{name: "chmod", file: failingTemporaryFile{chmodErr: errors.New("chmod")}},
+		{name: "close", file: failingTemporaryFile{closeErr: errors.New("close")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := createTemporaryFile
+			createTemporaryFile = func(string, string) (temporaryFile, error) { return tt.file, tt.createErr }
+			t.Cleanup(func() { createTemporaryFile = original })
+			if err := Save(filepath.Join(t.TempDir(), "state.yaml"), validTestProfile()); err == nil || !strings.Contains(err.Error(), tt.name) {
+				t.Fatalf("Save error = %v", err)
+			}
+		})
 	}
 }
 

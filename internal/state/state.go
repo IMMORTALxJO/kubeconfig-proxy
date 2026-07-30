@@ -11,6 +11,17 @@ import (
 
 const Version = 1
 
+type temporaryFile interface {
+	Name() string
+	Write([]byte) (int, error)
+	Chmod(os.FileMode) error
+	Close() error
+}
+
+var createTemporaryFile = func(dir, pattern string) (temporaryFile, error) {
+	return os.CreateTemp(dir, pattern)
+}
+
 type Profile struct {
 	Version          int          `json:"version"`
 	Name             string       `json:"name"`
@@ -81,7 +92,7 @@ func Save(path string, profile *Profile) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".state-*.tmp")
+	tmp, err := createTemporaryFile(dir, ".state-*.tmp")
 	if err != nil {
 		return err
 	}
