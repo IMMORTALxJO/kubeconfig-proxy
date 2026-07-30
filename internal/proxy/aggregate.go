@@ -16,10 +16,11 @@ const (
 )
 
 type pageCursor struct {
-	Target   int    `json:"target"`
-	Continue string `json:"continue,omitempty"`
-	Scope    string `json:"scope"`
-	Targets  string `json:"targets"`
+	Target           int               `json:"target"`
+	Continue         string            `json:"continue,omitempty"`
+	Scope            string            `json:"scope"`
+	Targets          string            `json:"targets"`
+	ResourceVersions map[string]string `json:"resourceVersions,omitempty"`
 }
 
 func (p *Proxy) aggregateList(w http.ResponseWriter, r *http.Request) {
@@ -59,10 +60,15 @@ func (p *Proxy) aggregatePage(w http.ResponseWriter, r *http.Request) {
 		writeStatus(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	resourceVersions, failure := p.pageResourceVersions(r, cursor)
+	if failure.err != nil || failure.status != 0 {
+		writeAggregatePageFailure(w, failure)
+		return
+	}
 	items := make([]any, 0)
 	var template map[string]any
 	for index := cursor.Target; index < len(p.targets) && len(items) < limit; index++ {
-		page, entries, next, failure := p.readAggregatePage(r, index, cursor, limit-len(items))
+		page, entries, next, failure := p.readAggregatePage(r, index, cursor, limit-len(items), resourceVersions[p.targets[index].Name])
 		if failure.err != nil || failure.status != 0 {
 			writeAggregatePageFailure(w, failure)
 			return
@@ -70,11 +76,11 @@ func (p *Proxy) aggregatePage(w http.ResponseWriter, r *http.Request) {
 		items = append(items, entries...)
 		template = page
 		if next != "" {
-			setCursor(template, pageCursor{Target: index, Continue: next, Scope: pageScope(r), Targets: p.targetSet()})
+			setCursor(template, pageCursor{Target: index, Continue: next, Scope: pageScope(r), Targets: p.targetSet(), ResourceVersions: resourceVersions})
 			break
 		}
 		if len(items) == limit && index+1 < len(p.targets) {
-			setCursor(template, pageCursor{Target: index + 1, Scope: pageScope(r), Targets: p.targetSet()})
+			setCursor(template, pageCursor{Target: index + 1, Scope: pageScope(r), Targets: p.targetSet(), ResourceVersions: resourceVersions})
 			break
 		}
 	}
@@ -86,14 +92,71 @@ func (p *Proxy) aggregatePage(w http.ResponseWriter, r *http.Request) {
 	} else {
 		template["items"] = items
 	}
+	setAggregateResourceVersionValues(template, resourceVersions)
 	result, _ := json.Marshal(template)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(result)
 }
 
-func (p *Proxy) readAggregatePage(r *http.Request, index int, cursor pageCursor, limit int) (map[string]any, []any, string, upstreamResponse) {
-	request := aggregatePageRequest(r, index == cursor.Target, cursor.Continue, limit)
+func (p *Proxy) pageResourceVersions(r *http.Request, cursor pageCursor) (map[string]string, upstreamResponse) {
+	if len(cursor.ResourceVersions) != 0 {
+		versions := make(map[string]string, len(p.targets))
+		for _, target := range p.targets {
+			version := cursor.ResourceVersions[target.Name]
+			if version == "" {
+				return nil, upstreamResponse{target: target, err: fmt.Errorf("missing page resource version")}
+			}
+			versions[target.Name] = version
+		}
+		return versions, upstreamResponse{}
+	}
+
+	responses := p.requestTargets(r.Context(), p.targets, aggregatePageVersionRequest(r), nil)
+	versions := make(map[string]string, len(responses))
+	for _, response := range responses {
+		if response.err != nil || response.status < 200 || response.status >= 300 {
+			return nil, response
+		}
+		version, err := listResourceVersion(response.body)
+		if err != nil {
+			return nil, upstreamResponse{target: response.target, err: err}
+		}
+		versions[response.target.Name] = version
+	}
+	return versions, upstreamResponse{}
+}
+
+func aggregatePageVersionRequest(r *http.Request) *http.Request {
+	request := r.Clone(r.Context())
+	url := *r.URL
+	query := url.Query()
+	query.Set("limit", "1")
+	query.Del("continue")
+	query.Del("resourceVersion")
+	query.Del("resourceVersionMatch")
+	url.RawQuery = query.Encode()
+	request.URL = &url
+	return request
+}
+
+func listResourceVersion(body []byte) (string, error) {
+	var payload struct {
+		Metadata struct {
+			ResourceVersion string `json:"resourceVersion"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", fmt.Errorf("decode list response: %w", err)
+	}
+	if payload.Metadata.ResourceVersion == "" {
+		return "", fmt.Errorf("list response has no resource version")
+	}
+	return payload.Metadata.ResourceVersion, nil
+}
+
+func (p *Proxy) readAggregatePage(r *http.Request, index int, cursor pageCursor, limit int, resourceVersion string) (map[string]any, []any, string, upstreamResponse) {
+	request := aggregatePageRequest(r, index == cursor.Target, cursor.Continue, limit, resourceVersion)
 	response := p.requestTarget(r.Context(), p.targets[index], request, nil)
 	if response.err != nil || response.status < 200 || response.status >= 300 {
 		return nil, nil, "", response
@@ -114,15 +177,19 @@ func (p *Proxy) readAggregatePage(r *http.Request, index int, cursor pageCursor,
 	return page, entries, next, upstreamResponse{}
 }
 
-func aggregatePageRequest(r *http.Request, isCursorTarget bool, continueToken string, limit int) *http.Request {
+func aggregatePageRequest(r *http.Request, isCursorTarget bool, continueToken string, limit int, resourceVersion string) *http.Request {
 	request := r.Clone(r.Context())
 	url := *r.URL
 	query := url.Query()
 	query.Set("limit", strconv.Itoa(limit))
 	if isCursorTarget && continueToken != "" {
 		query.Set("continue", continueToken)
+		query.Del("resourceVersion")
+		query.Del("resourceVersionMatch")
 	} else {
 		query.Del("continue")
+		query.Set("resourceVersion", resourceVersion)
+		query.Set("resourceVersionMatch", "Exact")
 	}
 	url.RawQuery = query.Encode()
 	request.URL = &url
@@ -256,6 +323,10 @@ func setAggregateResourceVersion(payload map[string]any, responses []upstreamRes
 			}
 		}
 	}
+	setAggregateResourceVersionValues(payload, versions)
+}
+
+func setAggregateResourceVersionValues(payload map[string]any, versions map[string]string) {
 	data, _ := json.Marshal(versions)
 	metadata, ok := payload["metadata"].(map[string]any)
 	if !ok {

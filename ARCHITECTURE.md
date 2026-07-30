@@ -102,14 +102,14 @@ model.
 
 - `proxy.go` owns construction, invariants, and the top-level decision tree;
 - `routing.go` contains small request-classification predicates;
-- `forward.go` handles primary, named-object, and single streaming routes;
-- `mutation.go` owns mutation target selection and request-body rewriting;
-- `aggregate.go` merges ordinary lists and composite resource versions;
-- `pagination.go` implements cross-context pagination;
+- `handlers.go` handles primary, named-object, pod-stream, and mutation routes,
+  including mutation target selection and request-body rewriting;
+- `aggregate.go` merges ordinary lists, implements cross-context pagination, and
+  encodes composite resource versions;
 - `watch.go` opens and merges watch streams;
-- `upstream.go` owns buffered upstream calls, retries, and request construction;
-- `auth.go`, `body.go`, `response.go`, and `target.go` provide narrow shared
-  primitives.
+- `transport.go` owns buffered upstream calls, retries, request construction,
+  and bounded body reads;
+- `http.go` provides authentication and HTTP response primitives.
 
 New behavior should be added to the file that owns its routing concern. The
 top-level decision tree should stay readable from top to bottom. Shared helpers
@@ -209,8 +209,8 @@ its own resource version.
 
 Watch streams are opened concurrently and copied to the client as events
 arrive. Event writes are serialized, but ordering between clusters is
-intentionally not defined. Named-field-selector watches first issue list
-requests so an empty selection can return without opening unnecessary streams.
+intentionally not defined. Every collection watch opens one upstream stream per
+configured target; field selectors are forwarded unchanged.
 
 ### Cross-context pagination
 
@@ -232,8 +232,7 @@ containing:
 - the configured target names;
 - the current target;
 - that target's upstream continuation token;
-- the request path and query scope, excluding `limit`, `continue`,
-  `resourceVersion`, and `resourceVersionMatch`;
+- the request path and query scope, excluding `limit` and `continue`;
 - resource versions captured from all targets before the first page.
 
 The token is rejected if the target set or request scope changes. This prevents
@@ -274,14 +273,15 @@ can manage response decompression consistently.
 
 Buffered upstream calls have a configurable request timeout and retry temporary
 transport failures plus HTTP `429`, `500`, `502`, `503`, and `504`. Long-running
-requests use streaming reverse-proxy or watch paths. A watch uses the request
-timeout only while opening its upstream stream; successful stream lifetimes are
-not bounded by the ordinary request timeout.
+requests use streaming reverse-proxy or watch paths. Watch streams are opened
+without the ordinary request timeout, and their lifetimes are bounded by the
+client connection or the upstream server rather than the buffered-request
+timeout.
 
 Memory is bounded for buffered traffic:
 
 - mutation request bodies: 16 MiB;
-- non-streaming upstream responses and watch-open error bodies: 64 MiB.
+- non-streaming upstream responses: 64 MiB.
 
 These limits do not apply to successful long-running streams because those
 bodies are copied incrementally.

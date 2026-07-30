@@ -16,6 +16,11 @@ Treat routing behavior as the core product contract. Small changes in request cl
 - Do not log bearer tokens, private keys, kubeconfig contents, or full state files.
 - Work with user changes already present in the tree. Do not revert unrelated edits.
 
+## Development Workflow
+
+- Follow TDD: write or update focused unit tests before implementing the production code.
+- After the implementation and tests are complete, run a code review and fix all identified issues before handing off the change.
+
 ## Go Practices
 
 - Use the Go version declared in `go.mod`; project commands set `GOTOOLCHAIN` through the `Makefile`.

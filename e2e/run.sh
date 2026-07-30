@@ -574,9 +574,10 @@ cleanup_test_resources() {
     kubectl_ctx "$ctx" -n "$NS" delete pod kcp-debug-pod kcp-subresource-pod --ignore-not-found >/dev/null 2>&1 || true
     kubectl_ctx "$ctx" -n "$NS" delete deployment kcp-rollout --ignore-not-found >/dev/null 2>&1 || true
     kubectl_ctx "$ctx" -n "$NS" delete configmap \
-    kcp-only-a kcp-only-b kcp-page-a-{1..9} kcp-page-b-{1..9} kcp-fanout kcp-target-b kcp-single kcp-delete-a kcp-readonly kcp-watch-a kcp-watch-b \
+    kcp-only-a kcp-only-b kcp-page-a-{1..9} kcp-page-b-{1..9} kcp-fanout kcp-target-b kcp-single kcp-delete-a kcp-readonly kcp-watch-a kcp-watch-b kcp-watch-named kcp-page-watch-event \
       --ignore-not-found >/dev/null 2>&1 || true
     kubectl_ctx "$ctx" -n "$NS" delete configmap --selector="$AGGREGATION_TEST_SELECTOR" --ignore-not-found >/dev/null 2>&1 || true
+    kubectl_ctx "$ctx" -n "$NS" delete configmap --selector='kubeconfig-proxy.io/e2e-paginated-watch=true' --ignore-not-found >/dev/null 2>&1 || true
     kubectl_ctx "$ctx" -n "$NS" delete secret sh.helm.release.v1.kcp.v1 --ignore-not-found >/dev/null 2>&1 || true
   done
 }

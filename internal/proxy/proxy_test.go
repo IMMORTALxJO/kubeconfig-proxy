@@ -180,6 +180,45 @@ func TestAggregateResourceVersionRoutesWatchPerTarget(t *testing.T) {
 	}
 }
 
+func TestAggregatePaginatedResourceVersionRoutesWatchPerTarget(t *testing.T) {
+	var mu sync.Mutex
+	watchResourceVersions := map[string]string{}
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": resourceVersionHandler("one", "10", &mu, watchResourceVersions),
+		"two": resourceVersionHandler("two", "20", &mu, watchResourceVersions),
+	})
+	defer cleanup()
+
+	list := serve(p, http.MethodGet, "/api/v1/configmaps?limit=500&resourceVersion=0", "")
+	if list.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", list.Code, list.Body.String())
+	}
+	var listResponse struct {
+		Metadata struct {
+			ResourceVersion string `json:"resourceVersion"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &listResponse); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(listResponse.Metadata.ResourceVersion, aggregateResourceVersionPrefix) {
+		t.Fatalf("resourceVersion = %q, want aggregate resource version", listResponse.Metadata.ResourceVersion)
+	}
+
+	watch := serve(p, http.MethodGet, "/api/v1/configmaps?watch=true&resourceVersion="+url.QueryEscape(listResponse.Metadata.ResourceVersion), "")
+	if watch.Code != http.StatusOK {
+		t.Fatalf("watch status = %d: %s", watch.Code, watch.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := watchResourceVersions["one"], "10"; got != want {
+		t.Fatalf("one resourceVersion = %q, want %q", got, want)
+	}
+	if got, want := watchResourceVersions["two"], "20"; got != want {
+		t.Fatalf("two resourceVersion = %q, want %q", got, want)
+	}
+}
+
 func resourceVersionHandler(name, resourceVersion string, mu *sync.Mutex, watchResourceVersions map[string]string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("watch") == "true" {
@@ -196,10 +235,10 @@ func resourceVersionHandler(name, resourceVersion string, mu *sync.Mutex, watchR
 func TestAggregatePageSupportsTableResponses(t *testing.T) {
 	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
 		"one": func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"kind":"Table","metadata":{},"rows":[{"object":{"metadata":{"name":"one"}}}]}`))
+			_, _ = w.Write([]byte(`{"kind":"Table","metadata":{"resourceVersion":"10"},"rows":[{"object":{"metadata":{"name":"one"}}}]}`))
 		},
 		"two": func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"kind":"Table","metadata":{},"rows":[{"object":{"metadata":{"name":"two"}}}]}`))
+			_, _ = w.Write([]byte(`{"kind":"Table","metadata":{"resourceVersion":"20"},"rows":[{"object":{"metadata":{"name":"two"}}}]}`))
 		},
 	})
 	defer cleanup()
