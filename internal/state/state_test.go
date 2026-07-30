@@ -136,6 +136,18 @@ func TestSaveRejectsInvalidProfile(t *testing.T) {
 	}
 }
 
+func TestSaveReturnsDirectoryCreationError(t *testing.T) {
+	parentFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(parentFile, []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parentFile, "proxy.yaml")
+	err := Save(path, validTestProfile())
+	if err == nil {
+		t.Fatal("Save returned nil error")
+	}
+}
+
 func TestValidateRejectsNegativeRuntimeOptions(t *testing.T) {
 	tests := []struct {
 		name            string
