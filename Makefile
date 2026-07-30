@@ -25,7 +25,7 @@ SHELL_FILES := install.sh e2e/run.sh e2e/run-upstream-kubectl-e2e.sh $(wildcard 
 GOTOOLCHAIN_ENV := GOTOOLCHAIN=$(GO_TOOLCHAIN)
 E2E_VARIANT_GOALS := $(filter local kubectl kind,$(MAKECMDGOALS))
 
-.PHONY: help fmt fmt-check yamlfmt yamlfmt-check vet staticcheck actionlint shellcheck gosec vuln test race build build-cover check e2e-selection-test clean e2e local kubectl kind
+.PHONY: help fmt fmt-check yamlfmt yamlfmt-check vet staticcheck actionlint shellcheck gosec vuln test race build build-cover check e2e-selection-test e2e-prefix-test clean e2e local kubectl kind
 
 ifneq ($(strip $(E2E_VARIANT_GOALS)),)
 ifneq ($(words $(E2E_VARIANT_GOALS)),1)
@@ -97,10 +97,13 @@ build-cover:
 	mkdir -p $(BUILD_DIR)
 	$(GOTOOLCHAIN_ENV) $(GO) build -cover -covermode=atomic -coverpkg=$(COVER_PACKAGES) -trimpath -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PACKAGE)
 
-check: fmt-check vet staticcheck actionlint shellcheck gosec vuln test race build e2e-selection-test
+check: fmt-check vet staticcheck actionlint shellcheck gosec vuln test race build e2e-selection-test e2e-prefix-test
 
 e2e-selection-test:
 	bash e2e/checks/selection_test.sh
+
+e2e-prefix-test:
+	bash e2e/checks/prefix_test.sh
 
 ifeq ($(strip $(E2E_VARIANT_GOALS)),)
 e2e:

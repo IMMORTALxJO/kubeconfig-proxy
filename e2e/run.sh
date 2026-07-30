@@ -16,9 +16,9 @@ SAFE_PROXY_CONTEXT="kind_proxy-state"
 DUPLICATE_PROXY_CONTEXT="kind-proxy-duplicate"
 CTX_A="kind-kubeconfig-proxy-a"
 CTX_B="kind-kubeconfig-proxy-b"
-NS="default"
-AGGREGATION_TEST_SELECTOR="kubeconfig-proxy.io/e2e-aggregation=true"
-WERF_NS="${KCP_WERF_NAMESPACE:-kcp-werf-$$}"
+NS=""
+AGGREGATION_TEST_SELECTOR=""
+WERF_NS=""
 TIMEOUT="${KCP_TEST_TIMEOUT:-30s}"
 CLUSTER_READY_TIMEOUT="${KCP_CLUSTER_READY_TIMEOUT:-120s}"
 WERF_TIMEOUT="${KCP_WERF_TIMEOUT:-180}"
@@ -38,7 +38,6 @@ COVERAGE_REPORT=""
 declare -a RESULT_STATUS=()
 declare -a RESULT_NAME=()
 declare -a RESULT_DETAILS=()
-declare -a CREATED_CLUSTERS=()
 declare -a COVERAGE_PROXY_PIDS=()
 HAD_FAILURE=0
 
@@ -252,13 +251,10 @@ cleanup() {
     if [[ "$TOUCHED_TEST_RESOURCES" == "1" && -n "${KUBECTL_BIN:-}" && -f "$KUBECONFIG_FILE" ]]; then
       KUBECONFIG="$KUBECONFIG_FILE" "$KUBECTL_BIN" --request-timeout="$TIMEOUT" --context "$CTX_A" delete namespace "$WERF_NS" --ignore-not-found >/dev/null 2>&1 || true
       KUBECONFIG="$KUBECONFIG_FILE" "$KUBECTL_BIN" --request-timeout="$TIMEOUT" --context "$CTX_B" delete namespace "$WERF_NS" --ignore-not-found >/dev/null 2>&1 || true
-    fi
-
-    local cluster
-    if [[ "${#CREATED_CLUSTERS[@]}" -gt 0 ]]; then
-      for cluster in "${CREATED_CLUSTERS[@]}"; do
-        kind delete cluster --name "$cluster" >/dev/null 2>&1 || true
-      done
+      if [[ "$WERF_NS" != "$NS" ]]; then
+        KUBECONFIG="$KUBECONFIG_FILE" "$KUBECTL_BIN" --request-timeout="$TIMEOUT" --context "$CTX_A" delete namespace "$NS" --ignore-not-found >/dev/null 2>&1 || true
+        KUBECONFIG="$KUBECONFIG_FILE" "$KUBECTL_BIN" --request-timeout="$TIMEOUT" --context "$CTX_B" delete namespace "$NS" --ignore-not-found >/dev/null 2>&1 || true
+      fi
     fi
   fi
 
@@ -518,7 +514,14 @@ check_cluster_version() {
   local cluster="$1"
   local ctx="$2"
   local version
-  if ! version="$(cluster_server_version "$ctx")" || [[ -z "$version" ]]; then
+  local attempt
+  for ((attempt = 0; attempt < 30; attempt++)); do
+    if version="$(cluster_server_version "$ctx")" && [[ -n "$version" ]]; then
+      break
+    fi
+    sleep 1
+  done
+  if [[ -z "${version:-}" ]]; then
     add_result "FAIL" "kind cluster $cluster Kubernetes version" "could not read server version for $ctx"
     return 1
   fi
@@ -547,6 +550,7 @@ check_cluster_ready() {
 ensure_cluster() {
   local cluster="$1"
   local ctx="kind-$cluster"
+  local create_output
   if cluster_exists "$cluster"; then
     if [[ "${KCP_RECREATE_KIND:-0}" == "1" ]]; then
       run_cmd "delete existing kind cluster $cluster" kind delete cluster --name "$cluster" || return 1
@@ -559,26 +563,29 @@ ensure_cluster() {
     fi
   fi
 
-  if run_cmd "create kind cluster $cluster" kind create cluster --name "$cluster" --image "$KIND_NODE_IMAGE" --kubeconfig "$KUBECONFIG_FILE"; then
-    CREATED_CLUSTERS+=("$cluster")
+  if create_output="$(kind create cluster --name "$cluster" --image "$KIND_NODE_IMAGE" --kubeconfig "$KUBECONFIG_FILE" 2>&1)"; then
+    add_result "PASS" "create kind cluster $cluster" "ok"
     check_cluster_version "$cluster" "$ctx" || return 1
     check_cluster_ready "$cluster" "$ctx" || return 1
     return 0
   fi
+  if cluster_exists "$cluster"; then
+    add_result "PASS" "create kind cluster $cluster" "another e2e run created it"
+    run_cmd "export concurrently created kind cluster $cluster" kind export kubeconfig --name "$cluster" --kubeconfig "$KUBECONFIG_FILE" || return 1
+    check_cluster_version "$cluster" "$ctx" || return 1
+    check_cluster_ready "$cluster" "$ctx" || return 1
+    add_result "PASS" "kind cluster $cluster" "reused concurrently created cluster"
+    return 0
+  fi
+  add_result "FAIL" "create kind cluster $cluster" "$create_output"
   return 1
 }
 
-cleanup_test_resources() {
+prepare_test_namespace() {
   local ctx
   for ctx in "$CTX_A" "$CTX_B"; do
-    kubectl_ctx "$ctx" -n "$NS" delete pod kcp-debug-pod kcp-subresource-pod --ignore-not-found >/dev/null 2>&1 || true
-    kubectl_ctx "$ctx" -n "$NS" delete deployment kcp-rollout --ignore-not-found >/dev/null 2>&1 || true
-    kubectl_ctx "$ctx" -n "$NS" delete configmap \
-    kcp-only-a kcp-only-b kcp-page-a-{1..9} kcp-page-b-{1..9} kcp-fanout kcp-target-b kcp-single kcp-delete-a kcp-readonly kcp-watch-a kcp-watch-b kcp-watch-named kcp-page-watch-event \
-      --ignore-not-found >/dev/null 2>&1 || true
-    kubectl_ctx "$ctx" -n "$NS" delete configmap --selector="$AGGREGATION_TEST_SELECTOR" --ignore-not-found >/dev/null 2>&1 || true
-    kubectl_ctx "$ctx" -n "$NS" delete configmap --selector='kubeconfig-proxy.io/e2e-paginated-watch=true' --ignore-not-found >/dev/null 2>&1 || true
-    kubectl_ctx "$ctx" -n "$NS" delete secret sh.helm.release.v1.kcp.v1 --ignore-not-found >/dev/null 2>&1 || true
+    run_cmd "remove stale e2e namespace $NS in $ctx" kubectl_ctx "$ctx" delete namespace "$NS" --ignore-not-found --wait=true --timeout=120s
+    run_cmd "create e2e namespace $NS in $ctx" kubectl_ctx "$ctx" create namespace "$NS"
   done
 }
 
@@ -598,6 +605,14 @@ source "$ROOT/e2e/checks/watch.sh"
 source "$ROOT/e2e/checks/werf.sh"
 # shellcheck source=e2e/checks/selection.sh
 source "$ROOT/e2e/checks/selection.sh"
+# shellcheck source=e2e/checks/prefix.sh
+source "$ROOT/e2e/checks/prefix.sh"
+
+if ! configure_e2e_prefix; then
+  add_result "FAIL" "configure e2e resource prefix" "set KCP_E2E_PREFIX to a lowercase DNS label no longer than 32 characters"
+  exit 2
+fi
+WERF_NS="${KCP_WERF_NAMESPACE:-$NS}"
 
 if ! parse_selected_checks; then
   add_result "FAIL" "select e2e checks" "set KCP_E2E_CHECKS to a comma-separated list of known checks"
@@ -650,7 +665,7 @@ if [[ "$HAD_FAILURE" -ne 0 ]]; then
 fi
 
 TOUCHED_TEST_RESOURCES=1
-cleanup_test_resources
+prepare_test_namespace
 
 run_cmd "add proxy context" "$BINARY" add-context "$PROXY_CONTEXT" \
   --kubeconfig "$KUBECONFIG_FILE" \

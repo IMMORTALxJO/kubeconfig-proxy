@@ -272,6 +272,13 @@ by `e2e/run.sh`. Keep routing assertions there so each run uses the runner's
 temporary kubeconfig, coverage-instrumented proxy, structured result table,
 and cleanup.
 
+The e2e runner reuses the `kubeconfig-proxy-a` and `kubeconfig-proxy-b` kind
+clusters. Each run derives a DNS-safe prefix from `KCP_E2E_BRANCH` (or the local
+Git branch) and uses it in every test resource name and namespace, so different
+branches can test in parallel without sharing resources. Set `KCP_E2E_PREFIX`
+to explicitly select a prefix; it must be a lowercase DNS label no longer than
+32 characters.
+
 Run e2e suites through Make:
 
 ```bash

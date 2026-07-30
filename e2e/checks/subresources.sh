@@ -5,11 +5,13 @@
 # Invoked indirectly through run_cmd.
 # shellcheck disable=SC2329
 apply_subresource_pod() {
+  local pod_name="$1"
+
   kubectl_ctx "$CTX_B" -n "$NS" apply -f - <<EOF_POD
 apiVersion: v1
 kind: Pod
 metadata:
-  name: kcp-subresource-pod
+  name: $pod_name
 spec:
   restartPolicy: Never
   containers:
@@ -49,26 +51,29 @@ run_subresource_checks() {
   local exec_output
   local port_forward_output=""
   local pid
+  local pod_name
 
-  run_cmd "seed pod for pod subresources in kubeconfig-proxy-b" apply_subresource_pod
-  run_cmd "wait for pod subresources readiness" kubectl_ctx "$CTX_B" -n "$NS" wait --for=condition=Ready pod/kcp-subresource-pod --timeout=90s
-  expect_not_found "subresource pod absent from kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get pod kcp-subresource-pod
+  pod_name="$(e2e_resource_name subresource-pod)"
 
-  logs_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" logs kcp-subresource-pod -c web 2>&1)"
+  run_cmd "seed pod for pod subresources in kubeconfig-proxy-b" apply_subresource_pod "$pod_name"
+  run_cmd "wait for pod subresources readiness" kubectl_ctx "$CTX_B" -n "$NS" wait --for=condition=Ready "pod/$pod_name" --timeout=90s
+  expect_not_found "subresource pod absent from kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get pod "$pod_name"
+
+  logs_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" logs "$pod_name" -c web 2>&1)"
   if [[ "$logs_output" == *"logs-from-$CTX_B"* ]]; then
     add_result "PASS" "kubectl logs routes to cluster containing pod" "read kubeconfig-proxy-b pod logs"
   else
     add_result "FAIL" "kubectl logs routes to cluster containing pod" "$logs_output"
   fi
 
-  exec_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" exec kcp-subresource-pod -c web -- cat /www/index.html 2>&1)"
+  exec_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" exec "$pod_name" -c web -- cat /www/index.html 2>&1)"
   if [[ "$exec_output" == *"web-from-$CTX_B"* ]]; then
     add_result "PASS" "kubectl exec routes to cluster containing pod" "executed command in kubeconfig-proxy-b pod"
   else
     add_result "FAIL" "kubectl exec routes to cluster containing pod" "$exec_output"
   fi
 
-  kubectl_ctx "$PROXY_CONTEXT" -n "$NS" attach kcp-subresource-pod -c attach >"$attach_log" 2>&1 &
+  kubectl_ctx "$PROXY_CONTEXT" -n "$NS" attach "$pod_name" -c attach >"$attach_log" 2>&1 &
   attach_pid=$!
   if wait_for_file_pattern "attach-from-$CTX_B" "$attach_log"; then
     add_result "PASS" "kubectl attach routes to cluster containing pod" "received kubeconfig-proxy-b container output"
@@ -76,7 +81,7 @@ run_subresource_checks() {
     add_result "FAIL" "kubectl attach routes to cluster containing pod" "$(tail -n 20 "$attach_log" 2>/dev/null || true)"
   fi
 
-  kubectl_ctx "$PROXY_CONTEXT" -n "$NS" port-forward pod/kcp-subresource-pod "$port:8080" >"$port_forward_log" 2>&1 &
+  kubectl_ctx "$PROXY_CONTEXT" -n "$NS" port-forward "pod/$pod_name" "$port:8080" >"$port_forward_log" 2>&1 &
   port_forward_pid=$!
   for ((pid = 0; pid < 50; pid++)); do
     if port_forward_output="$(curl --fail --silent --show-error --max-time 1 "http://127.0.0.1:$port" 2>/dev/null)"; then

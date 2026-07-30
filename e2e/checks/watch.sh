@@ -23,18 +23,25 @@ run_watch_checks() {
   local watch_pid=""
   local named_watch_pid=""
   local paginated_watch_pid=""
-  local watch_a="kcp-watch-a"
-  local watch_b="kcp-watch-b"
-  local named_watch="kcp-watch-named"
-  local paginated_seed_a="kcp-page-watch-seed-a"
-  local paginated_seed_b="kcp-page-watch-seed-b"
-  local paginated_watch="kcp-page-watch-event"
-  local paginated_label="kubeconfig-proxy.io/e2e-paginated-watch=true"
+  local watch_a
+  local watch_b
+  local named_watch
+  local paginated_seed_a
+  local paginated_seed_b
+  local paginated_watch
+  local paginated_label="kubeconfig-proxy.io/e2e-paginated-watch=$E2E_RESOURCE_PREFIX"
   local paginated_list
   local paginated_resource_version
   local source_a_resource_version
   local source_b_resource_version
   local attempt
+
+  watch_a="$(e2e_resource_name watch-a)"
+  watch_b="$(e2e_resource_name watch-b)"
+  named_watch="$(e2e_resource_name watch-named)"
+  paginated_seed_a="$(e2e_resource_name page-watch-seed-a)"
+  paginated_seed_b="$(e2e_resource_name page-watch-seed-b)"
+  paginated_watch="$(e2e_resource_name page-watch-event)"
 
   kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmaps -w >"$watch_log" 2>&1 &
   watch_pid=$!
@@ -88,22 +95,22 @@ run_watch_checks() {
   run_cmd "seed paginated watch configmap in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" create configmap "$paginated_seed_b" --from-literal=value=b
   run_cmd "label paginated watch configmap in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" label configmap "$paginated_seed_b" "$paginated_label"
 
-  source_a_resource_version="$(kubectl_ctx "$CTX_A" get --raw "/api/v1/namespaces/$NS/configmaps?labelSelector=kubeconfig-proxy.io%2Fe2e-paginated-watch%3Dtrue&limit=1&resourceVersion=0" | sed -n 's/.*"metadata":{"resourceVersion":"\([^"]*\)".*/\1/p')"
-  source_b_resource_version="$(kubectl_ctx "$CTX_B" get --raw "/api/v1/namespaces/$NS/configmaps?labelSelector=kubeconfig-proxy.io%2Fe2e-paginated-watch%3Dtrue&limit=1&resourceVersion=0" | sed -n 's/.*"metadata":{"resourceVersion":"\([^"]*\)".*/\1/p')"
+  source_a_resource_version="$(kubectl_ctx "$CTX_A" get --raw "/api/v1/namespaces/$NS/configmaps?labelSelector=kubeconfig-proxy.io%2Fe2e-paginated-watch%3D$E2E_RESOURCE_PREFIX&limit=1&resourceVersion=0" | sed -n 's/.*"metadata":{"resourceVersion":"\([^"]*\)".*/\1/p')"
+  source_b_resource_version="$(kubectl_ctx "$CTX_B" get --raw "/api/v1/namespaces/$NS/configmaps?labelSelector=kubeconfig-proxy.io%2Fe2e-paginated-watch%3D$E2E_RESOURCE_PREFIX&limit=1&resourceVersion=0" | sed -n 's/.*"metadata":{"resourceVersion":"\([^"]*\)".*/\1/p')"
   if [[ ! "$source_a_resource_version" =~ ^[0-9]+$ || ! "$source_b_resource_version" =~ ^[0-9]+$ ]]; then
     add_result "FAIL" "prepare paginated watch resource versions" "kubeconfig-proxy-a: $source_a_resource_version; kubeconfig-proxy-b: $source_b_resource_version"
     return
   fi
   for ((attempt = 1; attempt <= 200 && source_b_resource_version <= source_a_resource_version + 10; attempt++)); do
     kubectl_ctx "$CTX_B" -n "$NS" annotate configmap "$paginated_seed_b" kubeconfig-proxy.io/e2e-paginated-watch-revision="$attempt" --overwrite >/dev/null
-    source_b_resource_version="$(kubectl_ctx "$CTX_B" get --raw "/api/v1/namespaces/$NS/configmaps?labelSelector=kubeconfig-proxy.io%2Fe2e-paginated-watch%3Dtrue&limit=1&resourceVersion=0" | sed -n 's/.*"metadata":{"resourceVersion":"\([^"]*\)".*/\1/p')"
+    source_b_resource_version="$(kubectl_ctx "$CTX_B" get --raw "/api/v1/namespaces/$NS/configmaps?labelSelector=kubeconfig-proxy.io%2Fe2e-paginated-watch%3D$E2E_RESOURCE_PREFIX&limit=1&resourceVersion=0" | sed -n 's/.*"metadata":{"resourceVersion":"\([^"]*\)".*/\1/p')"
   done
   if ((source_b_resource_version <= source_a_resource_version + 10)); then
     add_result "FAIL" "prepare paginated watch resource versions" "kubeconfig-proxy-a: $source_a_resource_version; kubeconfig-proxy-b: $source_b_resource_version"
     return
   fi
 
-  paginated_list="$(kubectl_ctx "$PROXY_CONTEXT" get --raw "/api/v1/namespaces/$NS/configmaps?labelSelector=kubeconfig-proxy.io%2Fe2e-paginated-watch%3Dtrue&limit=500&resourceVersion=0" 2>&1)"
+  paginated_list="$(kubectl_ctx "$PROXY_CONTEXT" get --raw "/api/v1/namespaces/$NS/configmaps?labelSelector=kubeconfig-proxy.io%2Fe2e-paginated-watch%3D$E2E_RESOURCE_PREFIX&limit=500&resourceVersion=0" 2>&1)"
   paginated_resource_version="$(printf '%s' "$paginated_list" | sed -n 's/.*"metadata":{"resourceVersion":"\([^"]*\)".*/\1/p')"
   if [[ "$paginated_resource_version" == kubeconfig-proxy:* ]]; then
     add_result "PASS" "paginated list returns aggregate resource version for watch" "$paginated_resource_version"
