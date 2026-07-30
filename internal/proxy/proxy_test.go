@@ -308,6 +308,33 @@ func TestPutUsesExistingObjectIdentity(t *testing.T) {
 	}
 }
 
+func TestAggregateAndWatchFailures(t *testing.T) {
+	t.Run("invalid cursor", func(t *testing.T) {
+		p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{"one": func(http.ResponseWriter, *http.Request) {}, "two": func(http.ResponseWriter, *http.Request) {}})
+		defer cleanup()
+		response := serve(p, http.MethodGet, "/api/v1/configmaps?limit=1&continue=foreign", "")
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d", response.Code)
+		}
+	})
+	t.Run("invalid list", func(t *testing.T) {
+		p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{"one": func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{}`)) }, "two": func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{}`)) }})
+		defer cleanup()
+		response := serve(p, http.MethodGet, "/api/v1/configmaps", "")
+		if response.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d", response.Code)
+		}
+	})
+	t.Run("watch open failure", func(t *testing.T) {
+		p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{"one": func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }, "two": func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("{}\n")) }})
+		defer cleanup()
+		response := serve(p, http.MethodGet, "/api/v1/configmaps?watch=true", "")
+		if response.Code != http.StatusServiceUnavailable || !contains(response.Body.String(), "one") {
+			t.Fatalf("response = %d %s", response.Code, response.Body.String())
+		}
+	})
+}
+
 type callLog struct {
 	mu     sync.Mutex
 	values []string
