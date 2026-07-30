@@ -51,6 +51,8 @@ Treat routing behavior as the core product contract. Small changes in request cl
 
 ## Testing
 
+- Do not modify e2e tests unless the user explicitly requests it.
+
 Run the smallest relevant test first, then broaden:
 
 ```bash
