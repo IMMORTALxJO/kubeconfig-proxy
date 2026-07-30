@@ -11,7 +11,7 @@ import (
 
 type failingTemporaryFile struct{ writeErr, chmodErr, closeErr error }
 
-func (f failingTemporaryFile) Name() string              { return filepath.Join(os.TempDir(), "state-test.tmp") }
+func (failingTemporaryFile) Name() string                { return filepath.Join(os.TempDir(), "state-test.tmp") }
 func (f failingTemporaryFile) Write([]byte) (int, error) { return 0, f.writeErr }
 func (f failingTemporaryFile) Chmod(os.FileMode) error   { return f.chmodErr }
 func (f failingTemporaryFile) Close() error              { return f.closeErr }

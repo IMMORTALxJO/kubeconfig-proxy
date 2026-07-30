@@ -299,7 +299,7 @@ func TestPutUsesExistingObjectIdentity(t *testing.T) {
 			putBody = string(data)
 			_, _ = w.Write([]byte(`{"metadata":{"name":"demo"}}`))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) },
+		"two": func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) },
 	})
 	defer cleanup()
 	response := serve(p, http.MethodPut, "/api/v1/configmaps/demo", `{"metadata":{"name":"demo"}}`)
@@ -375,7 +375,7 @@ func TestNamedAndPodFallbackToPrimary(t *testing.T) {
 			}
 			_, _ = w.Write([]byte("primary"))
 		},
-		"two": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) },
+		"two": func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) },
 	})
 	defer cleanup()
 	if got := serve(p, http.MethodGet, "/api/v1/configmaps/demo", ""); got.Code != http.StatusNotFound {
@@ -417,7 +417,7 @@ func TestMutationExistingObjectErrors(t *testing.T) {
 				}
 				t.Fatal("mutation must not be sent")
 			},
-			"two": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) },
+			"two": func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) },
 		})
 		defer cleanup()
 		response := serve(p, http.MethodPatch, "/api/v1/configmaps/demo", `{}`)
