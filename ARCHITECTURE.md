@@ -5,8 +5,9 @@ between its packages, and the design decisions that should remain explicit as
 the project evolves.
 
 The user-facing behavior and command reference live in [README.md](README.md).
-The detailed HTTP routing matrix lives in [ROUTING.md](ROUTING.md). This
-document is the source of truth for internal structure and architectural
+Routing: [ROUTING.md](ROUTING.md).
+
+This document is the source of truth for internal structure and architectural
 constraints.
 
 ## Goals and constraints
@@ -23,7 +24,7 @@ kubeconfig context. Its main responsibilities are:
 
 The architecture is driven by several constraints:
 
-- routing is the core product contract and must remain explicit;
+- routing must remain explicit;
 - mutations across clusters are dangerous and must have predictable targets;
 - source kubeconfig authentication must be delegated to `client-go`;
 - secrets must stay in a local state file with restrictive permissions;
@@ -183,37 +184,9 @@ The activity wrapper tracks active proxied requests and last activity. The
 readiness endpoint does not extend the idle TTL. A zero TTL disables idle
 shutdown.
 
-## Request routing contract
+## Routing
 
-[ROUTING.md](ROUTING.md) is the normative matrix for request classes,
-target-selection rules, response choice, and failure semantics. This section
-documents the implementation's architectural decision order and must remain
-consistent with that matrix.
-
-Authentication and read-only enforcement happen before request
-classification. The routing order in `Proxy.ServeHTTP` is significant:
-
-| Priority | Request class | Behavior |
-| --- | --- | --- |
-| 1 | Invalid bearer token | Reject with `401` |
-| 2 | Mutation in read-only mode | Reject with `403` before any upstream call |
-| 3 | Discovery, health, OpenAPI, or other non-resource compatibility endpoint | Forward to primary |
-| 4 | Authentication, authorization, or token request API | Forward to primary |
-| 5 | Helm storage watch in Helm mode | Stream only from the primary target |
-| 6 | Other watch | Open and merge streams from all targets |
-| 7 | Pod `log`, `exec`, `attach`, or `portforward` | Locate the pod across contexts, prefer primary, then stream one target; fall back to primary when absent everywhere |
-| 8 | Named resource `GET` | Probe all contexts concurrently; return primary when found, otherwise a deterministic found target |
-| 9 | Other non-watch collection `GET` | Aggregate lists from all targets |
-| 10 | Persistent-resource `POST`, `PUT`, `PATCH`, or `DELETE` | Select mutation targets from annotations or the existing object, then fan out when appropriate |
-| 11 | Any other request | Forward to primary |
-
-The primary target is a deliberate compatibility boundary. Kubernetes
-discovery is not merged, and Helm release storage can be forced to one linear
-history while ordinary resources still use all selected contexts.
-
-Routing predicates should remain small pure functions. Do not replace the
-ordered decision tree with registration, reflection, or implicit middleware
-rules.
+See [ROUTING.md](ROUTING.md).
 
 ## Reads, lists, pagination, and watches
 
