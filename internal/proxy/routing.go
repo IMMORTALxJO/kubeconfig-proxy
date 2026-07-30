@@ -30,7 +30,7 @@ func classifyRequest(r *http.Request, helmMode bool) routeClass {
 		return routePrimary
 	}
 	resource := parseResourcePath(r.URL.Path)
-	if isWatch(r) && resource.isCollection {
+	if isWatch(r) && resource.isResource {
 		return routeWatch
 	}
 	if r.Method == http.MethodGet && resource.isPod && isPodConnection(resource.subresource) {

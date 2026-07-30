@@ -5,7 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	neturl "net/url"
+	"strings"
 	"sync"
+
+	"k8s.io/apimachinery/pkg/fields"
 )
 
 type watchStream struct {
@@ -15,7 +19,73 @@ type watchStream struct {
 }
 
 func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
-	streams, failure := p.openWatches(r.Context(), r)
+	resource := parseResourcePath(r.URL.Path)
+	if namedWatch, ok := namedWatchRequest(r, resource); ok {
+		p.aggregateNamedWatch(w, namedWatch)
+		return
+	}
+	aggregateWatchTargets(w, r, p.targets)
+}
+
+func namedWatchRequest(original *http.Request, resource resourcePath) (*http.Request, bool) {
+	if resource.isObject && resource.subresource == "" {
+		return original, true
+	}
+	if !resource.isCollection {
+		return nil, false
+	}
+	name, ok := namedFieldSelector(original.URL.Query().Get("fieldSelector"))
+	if !ok {
+		return nil, false
+	}
+	request := original.Clone(original.Context())
+	url := *original.URL
+	url.Path = strings.TrimSuffix(url.Path, "/") + "/" + neturl.PathEscape(name)
+	query := url.Query()
+	query.Del("fieldSelector")
+	url.RawQuery = query.Encode()
+	request.URL = &url
+	return request, true
+}
+
+func namedFieldSelector(value string) (string, bool) {
+	selector, err := fields.ParseSelector(value)
+	if err != nil {
+		return "", false
+	}
+	name, ok := selector.RequiresExactMatch("metadata.name")
+	return name, ok && name != ""
+}
+
+func (p *Proxy) aggregateNamedWatch(w http.ResponseWriter, r *http.Request) {
+	resource := parseResourcePath(r.URL.Path)
+	responses := p.probe(r.Context(), r, resource.ownerPath)
+	targets, err := foundTargets(responses)
+	if err != nil {
+		writeStatus(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if len(targets) == 0 {
+		writeTargetFailure(w, firstFailure(responses))
+		return
+	}
+	versions := make(map[string]string, len(targets))
+	for _, response := range responses {
+		if response.status < 200 || response.status >= 300 {
+			continue
+		}
+		version, err := listResourceVersion(response.body)
+		if err != nil {
+			writeStatus(w, http.StatusBadGateway, response.target.Name+": "+err.Error())
+			return
+		}
+		versions[response.target.Name] = version
+	}
+	aggregateWatchTargets(w, withAggregateResourceVersions(r, versions), targets)
+}
+
+func aggregateWatchTargets(w http.ResponseWriter, r *http.Request, targets []Target) {
+	streams, failure := openWatches(r.Context(), r, targets)
 	if failure.err != nil || failure.status < 200 || failure.status >= 300 {
 		for _, stream := range streams {
 			closeWatchStream(stream)
@@ -40,6 +110,16 @@ func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 }
 
+func withAggregateResourceVersions(original *http.Request, versions map[string]string) *http.Request {
+	request := original.Clone(original.Context())
+	url := *original.URL
+	query := url.Query()
+	query.Set("resourceVersion", encodeAggregateResourceVersions(versions))
+	url.RawQuery = query.Encode()
+	request.URL = &url
+	return request
+}
+
 func closeWatchStream(stream watchStream) {
 	if stream.response != nil {
 		_ = stream.response.Body.Close()
@@ -49,12 +129,12 @@ func closeWatchStream(stream watchStream) {
 	}
 }
 
-func (p *Proxy) openWatches(ctx context.Context, original *http.Request) ([]watchStream, upstreamResponse) {
+func openWatches(ctx context.Context, original *http.Request, targets []Target) ([]watchStream, upstreamResponse) {
 	resourceVersions := aggregateResourceVersions(original.URL.Query().Get("resourceVersion"))
-	results := make([]watchStream, len(p.targets))
-	failures := make([]upstreamResponse, len(p.targets))
+	results := make([]watchStream, len(targets))
+	failures := make([]upstreamResponse, len(targets))
 	var wg sync.WaitGroup
-	for i, target := range p.targets {
+	for i, target := range targets {
 		i, target := i, target
 		wg.Add(1)
 		go func() {

@@ -98,7 +98,7 @@ not silently return a partial list.
 | Request pattern | Target | Result |
 | --- | --- | --- |
 | `GET {collection-path}?watch=true` | All contexts concurrently | Open one watch per context and forward events as they arrive.  Add the source annotation and virtual label to event objects.  Ordering between contexts is intentionally undefined. |
-| Named-field-selector watch | All contexts | First locate matching objects; do not open a needless stream when none exists. |
+| Named object watch (`GET {object-path}?watch=true`) or collection watch with `fieldSelector=metadata.name={name}` | Contexts containing the named object | First locate the object in every context.  Open one watch only for each found object, using its context-local resource version.  A `404` is an expected absence during the lookup. |
 | Helm release-storage watch in Helm compatibility mode | Primary | Stream one release history only. |
 
 The initial upstream-open failure must identify its context.  Successful streams
