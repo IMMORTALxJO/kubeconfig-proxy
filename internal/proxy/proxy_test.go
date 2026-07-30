@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -35,6 +36,23 @@ func TestRequestResponsePostUsesPrimary(t *testing.T) {
 	defer cleanup()
 	recorder := serve(p, http.MethodPost, "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", `{}`)
 	if recorder.Code != http.StatusOK || !json.Valid(recorder.Body.Bytes()) {
+		t.Fatalf("response = %d %s", recorder.Code, recorder.Body.String())
+	}
+	if got := calls.names(); len(got) != 1 || got[0] != "two" {
+		t.Fatalf("calls = %v, want [two]", got)
+	}
+}
+
+func TestTokenReviewUsesPrimary(t *testing.T) {
+	calls := &callLog{}
+	p, cleanup := newProxy(t, "two", map[string]http.HandlerFunc{
+		"one": calls.handler("one", `{"status":{"authenticated":false}}`),
+		"two": calls.handler("two", `{"status":{"authenticated":true}}`),
+	})
+	defer cleanup()
+
+	recorder := serve(p, http.MethodPost, "/apis/authentication.k8s.io/v1/tokenreviews", `{"spec":{"token":"sensitive-token"}}`)
+	if recorder.Code != http.StatusOK || !contains(recorder.Body.String(), `"authenticated":true`) {
 		t.Fatalf("response = %d %s", recorder.Code, recorder.Body.String())
 	}
 	if got := calls.names(); len(got) != 1 || got[0] != "two" {
@@ -86,6 +104,92 @@ func TestAggregateListMarksSourceContext(t *testing.T) {
 	recorder := serve(p, http.MethodGet, "/api/v1/configmaps", "")
 	if recorder.Code != http.StatusOK || !contains(recorder.Body.String(), `kubeconfig-proxy.io/context`) {
 		t.Fatalf("response = %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAggregateListRequestsJSONInsteadOfProtobuf(t *testing.T) {
+	protobufMediaType := "application/vnd.kubernetes.protobuf"
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": jsonOnlyListHandler(protobufMediaType),
+		"two": jsonOnlyListHandler(protobufMediaType),
+	})
+	defer cleanup()
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/configmaps", http.NoBody)
+	request.Header.Set("Authorization", "Bearer test")
+	request.Header.Set("Accept", "application/json;as=Table;g=meta.k8s.io;v=v1, "+protobufMediaType+";as=Table;g=meta.k8s.io;v=v1, application/json, "+protobufMediaType)
+	recorder := httptest.NewRecorder()
+	p.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+}
+
+func jsonOnlyListHandler(protobufMediaType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("Accept"), protobufMediaType) {
+			w.Header().Set("Content-Type", protobufMediaType)
+			_, _ = w.Write([]byte("not-json"))
+			return
+		}
+		if !strings.Contains(r.Header.Get("Accept"), "application/json;as=Table;g=meta.k8s.io;v=v1") {
+			http.Error(w, "JSON Table media range was removed", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"items":[]}`))
+	}
+}
+
+func TestAggregateResourceVersionRoutesWatchPerTarget(t *testing.T) {
+	var mu sync.Mutex
+	watchResourceVersions := map[string]string{}
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": resourceVersionHandler("one", "10", &mu, watchResourceVersions),
+		"two": resourceVersionHandler("two", "20", &mu, watchResourceVersions),
+	})
+	defer cleanup()
+
+	list := serve(p, http.MethodGet, "/api/v1/configmaps", "")
+	if list.Code != http.StatusOK {
+		t.Fatalf("list status = %d: %s", list.Code, list.Body.String())
+	}
+	var listResponse struct {
+		Metadata struct {
+			ResourceVersion string `json:"resourceVersion"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &listResponse); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(listResponse.Metadata.ResourceVersion, "kubeconfig-proxy:") {
+		t.Fatalf("resourceVersion = %q, want aggregate resource version", listResponse.Metadata.ResourceVersion)
+	}
+
+	watch := serve(p, http.MethodGet, "/api/v1/configmaps?watch=true&resourceVersion="+url.QueryEscape(listResponse.Metadata.ResourceVersion), "")
+	if watch.Code != http.StatusOK {
+		t.Fatalf("watch status = %d: %s", watch.Code, watch.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := watchResourceVersions["one"], "10"; got != want {
+		t.Fatalf("one resourceVersion = %q, want %q", got, want)
+	}
+	if got, want := watchResourceVersions["two"], "20"; got != want {
+		t.Fatalf("two resourceVersion = %q, want %q", got, want)
+	}
+}
+
+func resourceVersionHandler(name, resourceVersion string, mu *sync.Mutex, watchResourceVersions map[string]string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("watch") == "true" {
+			mu.Lock()
+			watchResourceVersions[name] = r.URL.Query().Get("resourceVersion")
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"type":"BOOKMARK","object":{"metadata":{}}}` + "\n"))
+			return
+		}
+		_, _ = w.Write([]byte(`{"metadata":{"resourceVersion":"` + resourceVersion + `"},"items":[]}`))
 	}
 }
 
@@ -236,6 +340,25 @@ func TestAggregateHelpers(t *testing.T) {
 	}
 }
 
+func TestAggregateCursorRejectsChangedTargetSet(t *testing.T) {
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": func(http.ResponseWriter, *http.Request) {},
+		"two": func(http.ResponseWriter, *http.Request) {},
+	})
+	defer cleanup()
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/configmaps?limit=1", http.NoBody)
+	payload := map[string]any{"items": []any{}}
+	setCursor(payload, pageCursor{Target: 0, Continue: "context-one-token", Scope: pageScope(request)})
+	continueToken := payload["metadata"].(map[string]any)["continue"].(string)
+
+	p.targets[0].Name = "replacement"
+	continued := httptest.NewRequest(http.MethodGet, "/api/v1/configmaps?limit=1&continue="+url.QueryEscape(continueToken), http.NoBody)
+	if _, err := p.decodeCursor(continued); err == nil {
+		t.Fatal("decodeCursor accepted a token from a different configured target set")
+	}
+}
+
 func TestResponseHelpers(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	request.Header.Set("Authorization", "Bearer token")
@@ -333,6 +456,53 @@ func TestAggregateAndWatchFailures(t *testing.T) {
 			t.Fatalf("response = %d %s", response.Code, response.Body.String())
 		}
 	})
+}
+
+func TestAggregateWatchClosesStreamsOpenedAfterFailure(t *testing.T) {
+	openedStream := make(chan struct{})
+	streamClosed := make(chan struct{})
+	failureHost, err := url.Parse("https://failure.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamHost, err := url.Parse("https://stream.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := []Target{
+		{
+			Name: "failure",
+			Host: failureHost,
+			Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				<-openedStream
+				return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader("unavailable")), Header: make(http.Header)}, nil
+			})},
+		},
+		{
+			Name: "stream",
+			Host: streamHost,
+			Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				close(openedStream)
+				return &http.Response{StatusCode: http.StatusOK, Body: &closeTrackingBody{Reader: strings.NewReader("event\n"), closed: streamClosed}, Header: make(http.Header)}, nil
+			})},
+		},
+	}
+	p, err := NewWithOptions(targets, targets[0], Options{BearerToken: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/configmaps?watch=true", http.NoBody)
+	p.aggregateWatch(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	select {
+	case <-streamClosed:
+	default:
+		t.Fatal("stream opened after another target failed was not closed")
+	}
 }
 
 func TestAggregateListWithoutPageAndNamedFallbacks(t *testing.T) {
@@ -443,6 +613,23 @@ func TestMutationExistingObjectErrors(t *testing.T) {
 type callLog struct {
 	mu     sync.Mutex
 	values []string
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type closeTrackingBody struct {
+	io.Reader
+	closed chan<- struct{}
+	once   sync.Once
+}
+
+func (b *closeTrackingBody) Close() error {
+	b.once.Do(func() { close(b.closed) })
+	return nil
 }
 
 func (c *callLog) handler(name, body string) http.HandlerFunc {
