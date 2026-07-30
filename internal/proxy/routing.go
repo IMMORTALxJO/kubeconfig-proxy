@@ -21,7 +21,6 @@ type resourcePath struct {
 	isCollection bool
 	isObject     bool
 	isPod        bool
-	name         string
 	subresource  string
 	ownerPath    string
 }
@@ -89,7 +88,6 @@ func parseResourcePath(path string) resourcePath {
 		resourceIndex = base - 1
 	}
 	result.isPod = parts[resourceIndex] == "pods"
-	result.name = parts[resourceIndex]
 	return result
 }
 

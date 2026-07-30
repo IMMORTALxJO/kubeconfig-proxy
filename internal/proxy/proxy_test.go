@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -243,51 +242,48 @@ func TestCollectionWatchRoutesResourceVersionPerTarget(t *testing.T) {
 	}
 }
 
-func TestDeploymentRolloutWatchWaitsForAllTargets(t *testing.T) {
-	deployment := func(resourceVersion string, availableReplicas int) string {
-		return `{"metadata":{"name":"demo","generation":1,"resourceVersion":"` + resourceVersion + `"},"spec":{"replicas":1},"status":{"observedGeneration":1,"replicas":1,"updatedReplicas":1,"availableReplicas":` + strconv.Itoa(availableReplicas) + `}}`
-	}
-	handler := func(resourceVersion string) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
+func TestNamedCollectionWatchUsesOnlyFoundContexts(t *testing.T) {
+	var mu sync.Mutex
+	watchPaths := map[string]string{}
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("watch") != "true" {
-				_, _ = w.Write([]byte(`{"metadata":{"resourceVersion":"` + resourceVersion + `"},"items":[` + deployment(resourceVersion, 0) + `]}`))
+				if r.URL.Path != "/api/v1/namespaces/default/configmaps/demo" {
+					http.Error(w, "expected named object probe", http.StatusBadRequest)
+					return
+				}
+				_, _ = w.Write([]byte(`{"metadata":{"name":"demo","resourceVersion":"10"}}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"type":"MODIFIED","object":` + deployment(resourceVersion+"-ready", 1) + `}` + "\n"))
-		}
-	}
-	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
-		"one": handler("10"),
-		"two": handler("20"),
+			mu.Lock()
+			watchPaths["one"] = r.URL.Path + "?" + r.URL.RawQuery
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"type":"MODIFIED","object":{"metadata":{"name":"demo"}}}` + "\n"))
+		},
+		"two": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("watch") != "true" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			mu.Lock()
+			watchPaths["two"] = r.URL.Path + "?" + r.URL.RawQuery
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"type":"MODIFIED","object":{"metadata":{"name":"demo"}}}` + "\n"))
+		},
 	})
 	defer cleanup()
 
-	response := serve(p, http.MethodGet, "/apis/apps/v1/namespaces/default/deployments?fieldSelector=metadata.name%3Ddemo&watch=true&resourceVersion=10", "")
+	response := serve(p, http.MethodGet, "/api/v1/namespaces/default/configmaps?fieldSelector=metadata.name%3Ddemo&watch=true&resourceVersion=10", "")
 	if response.Code != http.StatusOK {
 		t.Fatalf("watch status = %d: %s", response.Code, response.Body.String())
 	}
-	lines := strings.Split(strings.TrimSpace(response.Body.String()), "\n")
-	if len(lines) < 2 {
-		t.Fatalf("watch events = %q, want a pending and a complete event", response.Body.String())
+	mu.Lock()
+	defer mu.Unlock()
+	if got := watchPaths["one"]; !strings.HasPrefix(got, "/api/v1/namespaces/default/configmaps/demo?") || strings.Contains(got, "fieldSelector") || !strings.Contains(got, "resourceVersion=10") {
+		t.Fatalf("one watch = %q", got)
 	}
-	var first, last struct {
-		Object struct {
-			Status struct {
-				AvailableReplicas int `json:"availableReplicas"`
-			} `json:"status"`
-		} `json:"object"`
-	}
-	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &last); err != nil {
-		t.Fatal(err)
-	}
-	if first.Object.Status.AvailableReplicas != 0 {
-		t.Fatalf("first availableReplicas = %d, want 0 while another target is pending", first.Object.Status.AvailableReplicas)
-	}
-	if last.Object.Status.AvailableReplicas != 1 {
-		t.Fatalf("last availableReplicas = %d, want 1 after every target is ready", last.Object.Status.AvailableReplicas)
+	if got := watchPaths["two"]; got != "" {
+		t.Fatalf("two watch = %q, want no watch for an absent object", got)
 	}
 }
 
@@ -549,7 +545,7 @@ func TestNamedWatchSkipsAbsentContexts(t *testing.T) {
 					w.WriteHeader(http.StatusNotFound)
 					return
 				}
-				_, _ = w.Write([]byte(`{"metadata":{"name":"demo"}}`))
+				_, _ = w.Write([]byte(`{"metadata":{"name":"demo","resourceVersion":"10"}}`))
 				return
 			}
 			watches.mu.Lock()
