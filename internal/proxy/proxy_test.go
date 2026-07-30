@@ -247,6 +247,67 @@ func TestResponseHelpers(t *testing.T) {
 	}
 }
 
+func TestAggregateWatchForwardsAndMarksEvents(t *testing.T) {
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("{\"type\":\"ADDED\",\"object\":{\"metadata\":{\"name\":\"one\"}}}\n"))
+		},
+		"two": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("{\"type\":\"ADDED\",\"object\":{\"metadata\":{\"name\":\"two\"}}}\n"))
+		},
+	})
+	defer cleanup()
+	response := serve(p, http.MethodGet, "/api/v1/configmaps?watch=true", "")
+	if response.Code != http.StatusOK || !contains(response.Body.String(), `"one"`) || !contains(response.Body.String(), `"two"`) || !contains(response.Body.String(), sourceContextAnnotation) {
+		t.Fatalf("watch response = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestPodStreamUsesOwningTarget(t *testing.T) {
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/namespaces/default/pods/demo" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_, _ = w.Write([]byte("wrong"))
+		},
+		"two": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/namespaces/default/pods/demo" {
+				_, _ = w.Write([]byte(`{"metadata":{"name":"demo"}}`))
+				return
+			}
+			_, _ = w.Write([]byte("pod logs"))
+		},
+	})
+	defer cleanup()
+	response := serve(p, http.MethodGet, "/api/v1/namespaces/default/pods/demo/log", "")
+	if response.Code != http.StatusOK || response.Body.String() != "pod logs" {
+		t.Fatalf("pod stream = %d %q", response.Code, response.Body.String())
+	}
+}
+
+func TestPutUsesExistingObjectIdentity(t *testing.T) {
+	var putBody string
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet {
+				_, _ = w.Write([]byte(`{"metadata":{"uid":"uid-one","resourceVersion":"7"}}`))
+				return
+			}
+			data, _ := readBody(r.Body, maxBodyBytes)
+			putBody = string(data)
+			_, _ = w.Write([]byte(`{"metadata":{"name":"demo"}}`))
+		},
+		"two": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) },
+	})
+	defer cleanup()
+	response := serve(p, http.MethodPut, "/api/v1/configmaps/demo", `{"metadata":{"name":"demo"}}`)
+	if response.Code != http.StatusOK || !contains(putBody, `"uid":"uid-one"`) || !contains(putBody, `"resourceVersion":"7"`) {
+		t.Fatalf("PUT response = %d body = %s", response.Code, putBody)
+	}
+}
+
 type callLog struct {
 	mu     sync.Mutex
 	values []string
