@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -219,6 +220,77 @@ func TestAggregatePaginatedResourceVersionRoutesWatchPerTarget(t *testing.T) {
 	}
 }
 
+func TestCollectionWatchRoutesResourceVersionPerTarget(t *testing.T) {
+	var mu sync.Mutex
+	watchResourceVersions := map[string]string{}
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": resourceVersionHandler("one", "10", &mu, watchResourceVersions),
+		"two": resourceVersionHandler("two", "20", &mu, watchResourceVersions),
+	})
+	defer cleanup()
+
+	watch := serve(p, http.MethodGet, "/api/v1/namespaces/default/configmaps?fieldSelector=metadata.name%3Ddemo&watch=true&resourceVersion=10", "")
+	if watch.Code != http.StatusOK {
+		t.Fatalf("watch status = %d: %s", watch.Code, watch.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := watchResourceVersions["one"], "10"; got != want {
+		t.Fatalf("one resourceVersion = %q, want %q", got, want)
+	}
+	if got, want := watchResourceVersions["two"], "20"; got != want {
+		t.Fatalf("two resourceVersion = %q, want %q", got, want)
+	}
+}
+
+func TestDeploymentRolloutWatchWaitsForAllTargets(t *testing.T) {
+	deployment := func(resourceVersion string, availableReplicas int) string {
+		return `{"metadata":{"name":"demo","generation":1,"resourceVersion":"` + resourceVersion + `"},"spec":{"replicas":1},"status":{"observedGeneration":1,"replicas":1,"updatedReplicas":1,"availableReplicas":` + strconv.Itoa(availableReplicas) + `}}`
+	}
+	handler := func(resourceVersion string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("watch") != "true" {
+				_, _ = w.Write([]byte(`{"metadata":{"resourceVersion":"` + resourceVersion + `"},"items":[` + deployment(resourceVersion, 0) + `]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"type":"MODIFIED","object":` + deployment(resourceVersion+"-ready", 1) + `}` + "\n"))
+		}
+	}
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": handler("10"),
+		"two": handler("20"),
+	})
+	defer cleanup()
+
+	response := serve(p, http.MethodGet, "/apis/apps/v1/namespaces/default/deployments?fieldSelector=metadata.name%3Ddemo&watch=true&resourceVersion=10", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("watch status = %d: %s", response.Code, response.Body.String())
+	}
+	lines := strings.Split(strings.TrimSpace(response.Body.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("watch events = %q, want a pending and a complete event", response.Body.String())
+	}
+	var first, last struct {
+		Object struct {
+			Status struct {
+				AvailableReplicas int `json:"availableReplicas"`
+			} `json:"status"`
+		} `json:"object"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &last); err != nil {
+		t.Fatal(err)
+	}
+	if first.Object.Status.AvailableReplicas != 0 {
+		t.Fatalf("first availableReplicas = %d, want 0 while another target is pending", first.Object.Status.AvailableReplicas)
+	}
+	if last.Object.Status.AvailableReplicas != 1 {
+		t.Fatalf("last availableReplicas = %d, want 1 after every target is ready", last.Object.Status.AvailableReplicas)
+	}
+}
+
 func resourceVersionHandler(name, resourceVersion string, mu *sync.Mutex, watchResourceVersions map[string]string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("watch") == "true" {
@@ -284,6 +356,7 @@ func TestClassifyRequest(t *testing.T) {
 		{name: "discovery", method: http.MethodGet, path: "/api", want: routePrimary},
 		{name: "request response", method: http.MethodPost, path: "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", want: routePrimary},
 		{name: "watch", method: http.MethodGet, path: "/api/v1/configmaps?watch=true", want: routeWatch},
+		{name: "named watch", method: http.MethodGet, path: "/apis/apps/v1/namespaces/default/deployments/demo?watch=true", want: routeWatch},
 		{name: "pod log", method: http.MethodGet, path: "/api/v1/namespaces/default/pods/demo/log", want: routePodStream},
 		{name: "named object", method: http.MethodGet, path: "/api/v1/configmaps/demo", want: routeNamedGet},
 		{name: "collection", method: http.MethodGet, path: "/api/v1/configmaps", want: routeList},
@@ -422,6 +495,81 @@ func TestAggregateWatchForwardsAndMarksEvents(t *testing.T) {
 	response := serve(p, http.MethodGet, "/api/v1/configmaps?watch=true", "")
 	if response.Code != http.StatusOK || !contains(response.Body.String(), `"one"`) || !contains(response.Body.String(), `"two"`) || !contains(response.Body.String(), sourceContextAnnotation) {
 		t.Fatalf("watch response = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestNamedWatchOpensAllContexts(t *testing.T) {
+	watches := &callLog{}
+	var mu sync.Mutex
+	watchResourceVersions := map[string]string{}
+	namedWatchHandler := func(name, resourceVersion string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("watch") != "true" {
+				_, _ = w.Write([]byte(`{"metadata":{"name":"demo","resourceVersion":"` + resourceVersion + `"}}`))
+				return
+			}
+			mu.Lock()
+			watchResourceVersions[name] = r.URL.Query().Get("resourceVersion")
+			mu.Unlock()
+			watches.mu.Lock()
+			watches.values = append(watches.values, name)
+			watches.mu.Unlock()
+			_, _ = w.Write([]byte(`{"type":"MODIFIED","object":{"metadata":{"name":"demo"}}}` + "\n"))
+		}
+	}
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": namedWatchHandler("one", "10"),
+		"two": namedWatchHandler("two", "20"),
+	})
+	defer cleanup()
+
+	response := serve(p, http.MethodGet, "/apis/apps/v1/namespaces/default/deployments/demo?watch=true&resourceVersion=10", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
+	if got := watches.names(); len(got) != 2 || !contains(strings.Join(got, ","), "one") || !contains(strings.Join(got, ","), "two") {
+		t.Fatalf("watch calls = %v, want both contexts", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := watchResourceVersions["one"], "10"; got != want {
+		t.Fatalf("one resourceVersion = %q, want %q", got, want)
+	}
+	if got, want := watchResourceVersions["two"], "20"; got != want {
+		t.Fatalf("two resourceVersion = %q, want %q", got, want)
+	}
+}
+
+func TestNamedWatchSkipsAbsentContexts(t *testing.T) {
+	watches := &callLog{}
+	namedWatchHandler := func(name string, exists bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("watch") != "true" {
+				if !exists {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write([]byte(`{"metadata":{"name":"demo"}}`))
+				return
+			}
+			watches.mu.Lock()
+			watches.values = append(watches.values, name)
+			watches.mu.Unlock()
+			_, _ = w.Write([]byte(`{"type":"MODIFIED","object":{"metadata":{"name":"demo"}}}` + "\n"))
+		}
+	}
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": namedWatchHandler("one", true),
+		"two": namedWatchHandler("two", false),
+	})
+	defer cleanup()
+
+	response := serve(p, http.MethodGet, "/apis/apps/v1/namespaces/default/deployments/demo?watch=true", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
+	if got := watches.names(); len(got) != 1 || got[0] != "one" {
+		t.Fatalf("watch calls = %v, want [one]", got)
 	}
 }
 

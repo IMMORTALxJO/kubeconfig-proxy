@@ -327,13 +327,17 @@ func setAggregateResourceVersion(payload map[string]any, responses []upstreamRes
 }
 
 func setAggregateResourceVersionValues(payload map[string]any, versions map[string]string) {
-	data, _ := json.Marshal(versions)
 	metadata, ok := payload["metadata"].(map[string]any)
 	if !ok {
 		metadata = map[string]any{}
 		payload["metadata"] = metadata
 	}
-	metadata["resourceVersion"] = aggregateResourceVersionPrefix + base64.RawURLEncoding.EncodeToString(data)
+	metadata["resourceVersion"] = encodeAggregateResourceVersions(versions)
+}
+
+func encodeAggregateResourceVersions(versions map[string]string) string {
+	data, _ := json.Marshal(versions)
+	return aggregateResourceVersionPrefix + base64.RawURLEncoding.EncodeToString(data)
 }
 
 func aggregateResourceVersions(value string) map[string]string {

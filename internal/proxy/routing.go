@@ -21,6 +21,7 @@ type resourcePath struct {
 	isCollection bool
 	isObject     bool
 	isPod        bool
+	name         string
 	subresource  string
 	ownerPath    string
 }
@@ -30,7 +31,7 @@ func classifyRequest(r *http.Request, helmMode bool) routeClass {
 		return routePrimary
 	}
 	resource := parseResourcePath(r.URL.Path)
-	if isWatch(r) && resource.isCollection {
+	if isWatch(r) && resource.isResource {
 		return routeWatch
 	}
 	if r.Method == http.MethodGet && resource.isPod && isPodConnection(resource.subresource) {
@@ -88,6 +89,7 @@ func parseResourcePath(path string) resourcePath {
 		resourceIndex = base - 1
 	}
 	result.isPod = parts[resourceIndex] == "pods"
+	result.name = parts[resourceIndex]
 	return result
 }
 
