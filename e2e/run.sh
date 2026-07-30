@@ -596,6 +596,14 @@ source "$ROOT/e2e/checks/subresources.sh"
 source "$ROOT/e2e/checks/watch.sh"
 # shellcheck source=e2e/checks/werf.sh
 source "$ROOT/e2e/checks/werf.sh"
+# shellcheck source=e2e/checks/selection.sh
+source "$ROOT/e2e/checks/selection.sh"
+
+if ! parse_selected_checks; then
+  add_result "FAIL" "select e2e checks" "set KCP_E2E_CHECKS to a comma-separated list of known checks"
+  exit 2
+fi
+add_result "PASS" "select e2e checks" "${KCP_E2E_CHECKS:-all}"
 
 if [[ "${KCP_SKIP_MAKE_CHECK:-0}" == "1" ]]; then
   add_result "SKIP" "make check" "KCP_SKIP_MAKE_CHECK=1"
@@ -614,7 +622,9 @@ fi
 require_cmd kind
 setup_kubectl
 require_cmd curl
-if [[ "${KCP_SKIP_WERF:-0}" == "1" ]]; then
+if ! is_check_selected werf; then
+  add_result "SKIP" "required tool: werf" "werf check is not selected"
+elif [[ "${KCP_SKIP_WERF:-0}" == "1" ]]; then
   add_result "SKIP" "required tool: werf" "KCP_SKIP_WERF=1"
 else
   require_cmd werf
@@ -663,35 +673,56 @@ if [[ "$COVERAGE_ENABLED" == "1" ]]; then
 fi
 run_cmd "proxy discovery through exec credential" kubectl_ctx "$PROXY_CONTEXT" version
 
-run_cmd "add read-only proxy context" "$BINARY" add-context "$RO_PROXY_CONTEXT" \
-  --kubeconfig "$KUBECONFIG_FILE" \
-  --state "$RO_STATE_FILE" \
-  --contexts "$CTX_A,$CTX_B" \
-  --primary-context "$CTX_A" \
-  --listen "127.0.0.1:0" \
-  --proxy-ttl "2m" \
-  --request-timeout "$TIMEOUT" \
-  --read-only \
-  --logs-enabled \
-  --exec-command "$BINARY"
+if is_check_selected aggregation || is_check_selected routing; then
+  run_cmd "add read-only proxy context" "$BINARY" add-context "$RO_PROXY_CONTEXT" \
+    --kubeconfig "$KUBECONFIG_FILE" \
+    --state "$RO_STATE_FILE" \
+    --contexts "$CTX_A,$CTX_B" \
+    --primary-context "$CTX_A" \
+    --listen "127.0.0.1:0" \
+    --proxy-ttl "2m" \
+    --request-timeout "$TIMEOUT" \
+    --read-only \
+    --logs-enabled \
+    --exec-command "$BINARY"
 
-if [[ "$COVERAGE_ENABLED" == "1" ]]; then
-  if start_coverage_proxy "$RO_STATE_FILE"; then
-    add_result "PASS" "start read-only coverage proxy" "ok"
-  else
-    add_result "FAIL" "start read-only coverage proxy" "could not start $RO_STATE_FILE"
+  if [[ "$COVERAGE_ENABLED" == "1" ]]; then
+    if start_coverage_proxy "$RO_STATE_FILE"; then
+      add_result "PASS" "start read-only coverage proxy" "ok"
+    else
+      add_result "FAIL" "start read-only coverage proxy" "could not start $RO_STATE_FILE"
+    fi
   fi
 fi
 
-run_context_checks
-run_aggregation_checks
+if is_check_selected context; then
+  run_context_checks
+fi
+if is_check_selected aggregation; then
+  run_aggregation_checks
+fi
 check_proxy_log "$STATE_FILE"
-check_proxy_log "$RO_STATE_FILE"
-run_routing_checks
-run_rollout_checks
-run_subresource_checks
-run_watch_checks
-run_werf_checks
+if is_check_selected aggregation || is_check_selected routing; then
+  check_proxy_log "$RO_STATE_FILE"
+fi
+if is_check_selected routing; then
+  run_routing_checks
+fi
+if is_check_selected rollout; then
+  run_rollout_checks
+fi
+if is_check_selected subresources; then
+  run_subresource_checks
+fi
+if is_check_selected watch; then
+  run_watch_checks
+fi
+if is_check_selected helm; then
+  run_helm_checks
+fi
+if is_check_selected werf; then
+  run_werf_checks
+fi
 
 cleanup_test_resources
 

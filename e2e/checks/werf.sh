@@ -2,7 +2,7 @@
 
 # Sourced by e2e/run.sh after both proxy contexts have started.
 
-run_werf_checks() {
+run_helm_checks() {
   local helm_output
   local helm_count
 
@@ -21,6 +21,9 @@ run_werf_checks() {
     add_result "FAIL" "helm-release-proxy reads release storage from primary only" "$helm_output"
   fi
 
+}
+
+run_werf_checks() {
   if [[ "${KCP_SKIP_WERF:-0}" == "1" ]]; then
     add_result "SKIP" "werf example converge and dismiss" "KCP_SKIP_WERF=1"
     return

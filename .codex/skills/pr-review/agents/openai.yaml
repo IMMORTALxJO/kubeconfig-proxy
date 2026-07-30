@@ -1,0 +1,4 @@
+interface:
+  display_name: "PR review loop"
+  short_description: "Create a PR and resolve review feedback"
+  default_prompt: "Use $pr-review to create a PR, resolve its reviews, and wait for green CI."

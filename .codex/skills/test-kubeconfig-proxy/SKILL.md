@@ -17,6 +17,43 @@ Equivalent Make targets are `make e2e` for all suites, `make e2e kind` for the
 two-cluster runner, `make e2e kubectl` for upstream compatibility, and
 `make e2e local` for the built-in kind checks without `make check` or werf.
 
+## Targeted two-cluster checks
+
+While developing a proxy change or repairing an e2e check, run only the
+affected two-cluster category with `KCP_E2E_CHECKS`. Always run the smallest
+related Go unit test first; then use this command for a fast integration rerun:
+
+```bash
+KCP_E2E_CHECKS=<check> KCP_SKIP_MAKE_CHECK=1 e2e/run.sh
+```
+
+The runner does not require `werf` unless the `werf` check is selected. For
+example:
+
+```bash
+GOTOOLCHAIN=auto go test ./internal/proxy
+KCP_E2E_CHECKS=routing KCP_SKIP_MAKE_CHECK=1 KCP_SKIP_WERF=1 e2e/run.sh
+```
+
+`KCP_E2E_CHECKS` accepts a comma-separated list. The default is `all`:
+
+- `context` — proxy-context validation and default state-path collisions.
+- `aggregation` — aggregated list responses and pagination.
+- `routing` — mutation routing, named reads, read-only mode, and `kubectl debug`.
+- `rollout` — `kubectl rollout restart` and `status` routing.
+- `subresources` — logs, exec, attach, and port-forward.
+- `watch` — multi-cluster and paginated watch behavior.
+- `helm` — primary-only Helm release-storage reads.
+- `werf` — the `examples/werf` converge/dismiss flow.
+
+For example, use `KCP_E2E_CHECKS=routing,subresources` when a change touches
+both mutation routing and pod subresources. Unknown or empty values fail before
+the runner builds binaries or touches kind clusters. A targeted run still
+creates or reuses the two pinned kind clusters, builds the coverage-instrumented
+binary, creates the required proxy contexts, captures coverage, and cleans up;
+it only skips unrelated behavior checks. Run the full `e2e/run.sh` and
+`make check` before handing off a meaningful change.
+
 The script runs `make check`, rebuilds `bin/kubeconfig-proxy` with Go coverage
 instrumentation, creates or reuses local kind clusters named
 `kubeconfig-proxy-a` and `kubeconfig-proxy-b`, builds a temporary kubeconfig,
@@ -146,6 +183,9 @@ Use environment variables only when needed:
 - `KCP_RECREATE_KIND=1` deletes existing `kubeconfig-proxy-a`/`kubeconfig-proxy-b` kind clusters before testing.
 - `KCP_SKIP_MAKE_CHECK=1` skips `make check`; the coverage-instrumented binary
   is still rebuilt.
+- `KCP_E2E_CHECKS=<list>` runs only selected two-cluster check categories.
+  Valid values are `all`, `context`, `aggregation`, `routing`, `rollout`,
+  `subresources`, `watch`, `helm`, and `werf`; combine categories with commas.
 - `KCP_SKIP_WERF=1` skips the werf example when `werf` or image pulls are not available locally.
 - `KCP_WERF_NAMESPACE=<name>` sets the werf example namespace; by default the runner uses a unique temporary namespace.
 - `KCP_TEST_TIMEOUT=<duration>` sets kubectl request timeout, default `30s`.
@@ -164,7 +204,7 @@ The two-cluster runner sources category files from `e2e/checks/`:
 - `rollout.sh` covers Deployment restart and status routing.
 - `subresources.sh` covers logs, exec, attach, and port-forward.
 - `watch.sh` covers multi-cluster watch events.
-- `werf.sh` covers Helm storage and the werf example.
+- `werf.sh` covers Helm storage (`helm`) and the werf example (`werf`).
 
 Keep checks as functions that use the runner's helpers (`run_cmd`,
 `kubectl_ctx`, `expect_exists`, and `expect_not_found`) so failures remain in
