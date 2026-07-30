@@ -192,6 +192,61 @@ func TestListEntriesAndMarkEvent(t *testing.T) {
 	}
 }
 
+func TestMutationRoutingAndReadOnly(t *testing.T) {
+	calls := &callLog{}
+	p, cleanup := newProxy(t, "two", map[string]http.HandlerFunc{
+		"one": calls.handler("one", `{"metadata":{"name":"demo"}}`),
+		"two": calls.handler("two", `{"metadata":{"name":"demo"}}`),
+	})
+	defer cleanup()
+	response := serve(p, http.MethodPost, "/api/v1/configmaps", `{"metadata":{"annotations":{"kubeconfig-proxy.io/context-name":"one"}}}`)
+	if response.Code != http.StatusOK || len(calls.names()) != 1 || calls.names()[0] != "one" {
+		t.Fatalf("context-name response = %d, calls = %v", response.Code, calls.names())
+	}
+	response = serve(p, http.MethodPost, "/api/v1/configmaps", `{"metadata":{"annotations":{"kubeconfig-proxy.io/context-name":"missing"}}}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unknown context response = %d", response.Code)
+	}
+	p.options.ReadOnly = true
+	response = serve(p, http.MethodDelete, "/api/v1/configmaps/demo", "")
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("read-only response = %d", response.Code)
+	}
+}
+
+func TestAggregateHelpers(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/configmaps?labelSelector=x&limit=3", http.NoBody)
+	if limit, err := aggregatePageLimit(request); err != nil || limit != 3 {
+		t.Fatalf("aggregatePageLimit() = %d, %v", limit, err)
+	}
+	if pageScope(request) != "/api/v1/configmaps?labelSelector=x" {
+		t.Fatalf("pageScope() = %q", pageScope(request))
+	}
+	payload := map[string]any{"items": []any{}}
+	setCursor(payload, pageCursor{Target: 1, Scope: pageScope(request)})
+	if !contains(payload["metadata"].(map[string]any)["continue"].(string), aggregateContinuePrefix) {
+		t.Fatal("setCursor() did not create aggregate token")
+	}
+	merged, err := mergeLists([]upstreamResponse{
+		{target: Target{Name: "one"}, body: []byte(`{"items":[{"metadata":{"name":"one"}}]}`)},
+		{target: Target{Name: "two"}, body: []byte(`{"items":[{"metadata":{"name":"two"}}]}`)},
+	})
+	if err != nil || !contains(string(merged), `"two"`) || !contains(string(merged), sourceContextLabel) {
+		t.Fatalf("mergeLists() = %s, %v", merged, err)
+	}
+}
+
+func TestResponseHelpers(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	request.Header.Set("Authorization", "Bearer token")
+	if !AuthorizedWithToken(request, "token") || AuthorizedWithToken(request, "other") || AuthorizedWithToken(httptest.NewRequest(http.MethodGet, "/", http.NoBody), "token") {
+		t.Fatal("authorization token comparison is incorrect")
+	}
+	if !isHopHeader("Connection") || isHopHeader("Content-Type") {
+		t.Fatal("hop header classification is incorrect")
+	}
+}
+
 type callLog struct {
 	mu     sync.Mutex
 	values []string
