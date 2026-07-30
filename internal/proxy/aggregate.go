@@ -9,7 +9,10 @@ import (
 	"strings"
 )
 
-const aggregateContinuePrefix = "kubeconfig-proxy-continue:"
+const (
+	aggregateContinuePrefix = "kubeconfig-proxy-continue:"
+	maxAggregatePageLimit   = 10000
+)
 
 type pageCursor struct {
 	Target   int    `json:"target"`
@@ -40,8 +43,8 @@ func (p *Proxy) aggregateList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) aggregatePage(w http.ResponseWriter, r *http.Request) {
-	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
-	if err != nil || limit < 0 {
+	limit, err := aggregatePageLimit(r)
+	if err != nil {
 		writeStatus(w, http.StatusBadRequest, "invalid list limit")
 		return
 	}
@@ -54,42 +57,16 @@ func (p *Proxy) aggregatePage(w http.ResponseWriter, r *http.Request) {
 		writeStatus(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	items := make([]any, 0, limit)
+	items := make([]any, 0)
 	var template map[string]any
 	for index := cursor.Target; index < len(p.targets) && len(items) < limit; index++ {
-		request := r.Clone(r.Context())
-		url := *r.URL
-		query := url.Query()
-		query.Set("limit", strconv.Itoa(limit-len(items)))
-		if index == cursor.Target && cursor.Continue != "" {
-			query.Set("continue", cursor.Continue)
-		} else {
-			query.Del("continue")
-		}
-		url.RawQuery = query.Encode()
-		request.URL = &url
-		response := p.requestTarget(r.Context(), p.targets[index], request, nil)
-		if response.err != nil || response.status < 200 || response.status >= 300 {
-			writeTargetFailure(w, response)
+		page, entries, next, failure := p.readAggregatePage(r, index, cursor, limit-len(items))
+		if failure.err != nil || failure.status != 0 {
+			writeAggregatePageFailure(w, failure)
 			return
-		}
-		var page map[string]any
-		if json.Unmarshal(response.body, &page) != nil {
-			writeStatus(w, http.StatusBadGateway, p.targets[index].Name+": decode list response")
-			return
-		}
-		entries, _, ok := listEntries(page)
-		if !ok {
-			writeStatus(w, http.StatusBadGateway, p.targets[index].Name+": response is not a Kubernetes list or table")
-			return
-		}
-		for _, entry := range entries {
-			markEntry(entry, p.targets[index].Name)
 		}
 		items = append(items, entries...)
 		template = page
-		metadata, _ := page["metadata"].(map[string]any)
-		next, _ := metadata["continue"].(string)
 		if next != "" {
 			setCursor(template, pageCursor{Target: index, Continue: next, Scope: pageScope(r)})
 			break
@@ -111,6 +88,59 @@ func (p *Proxy) aggregatePage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(result)
+}
+
+func (p *Proxy) readAggregatePage(r *http.Request, index int, cursor pageCursor, limit int) (map[string]any, []any, string, upstreamResponse) {
+	request := aggregatePageRequest(r, index == cursor.Target, cursor.Continue, limit)
+	response := p.requestTarget(r.Context(), p.targets[index], request, nil)
+	if response.err != nil || response.status < 200 || response.status >= 300 {
+		return nil, nil, "", response
+	}
+	var page map[string]any
+	if json.Unmarshal(response.body, &page) != nil {
+		return nil, nil, "", upstreamResponse{target: response.target, err: fmt.Errorf("decode list response")}
+	}
+	entries, _, ok := listEntries(page)
+	if !ok {
+		return nil, nil, "", upstreamResponse{target: response.target, err: fmt.Errorf("response is not a Kubernetes list or table")}
+	}
+	for _, entry := range entries {
+		markEntry(entry, response.target.Name)
+	}
+	metadata, _ := page["metadata"].(map[string]any)
+	next, _ := metadata["continue"].(string)
+	return page, entries, next, upstreamResponse{}
+}
+
+func aggregatePageRequest(r *http.Request, isCursorTarget bool, continueToken string, limit int) *http.Request {
+	request := r.Clone(r.Context())
+	url := *r.URL
+	query := url.Query()
+	query.Set("limit", strconv.Itoa(limit))
+	if isCursorTarget && continueToken != "" {
+		query.Set("continue", continueToken)
+	} else {
+		query.Del("continue")
+	}
+	url.RawQuery = query.Encode()
+	request.URL = &url
+	return request
+}
+
+func writeAggregatePageFailure(w http.ResponseWriter, response upstreamResponse) {
+	if response.err != nil && response.status == 0 {
+		writeStatus(w, http.StatusBadGateway, response.target.Name+": "+response.err.Error())
+		return
+	}
+	writeTargetFailure(w, response)
+}
+
+func aggregatePageLimit(r *http.Request) (int, error) {
+	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil || limit < 0 || limit > maxAggregatePageLimit {
+		return 0, fmt.Errorf("invalid list limit")
+	}
+	return limit, nil
 }
 
 func (p *Proxy) aggregateListWithoutPage(w http.ResponseWriter, r *http.Request) {

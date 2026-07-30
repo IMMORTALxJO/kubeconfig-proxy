@@ -34,14 +34,14 @@ func (p *Proxy) forwardPodStream(w http.ResponseWriter, r *http.Request) {
 	owner := parseResourcePath(r.URL.Path).ownerPath
 	responses := p.probe(r.Context(), r, owner)
 	if response, ok := p.firstSuccess(responses); ok {
-		p.stream(w, r, response.target)
+		stream(w, r, response.target)
 		return
 	}
 	if failure := firstFailure(responses); failure.err != nil || failure.status != http.StatusNotFound {
 		writeTargetFailure(w, failure)
 		return
 	}
-	p.stream(w, r, p.primary)
+	stream(w, r, p.primary)
 }
 
 func (p *Proxy) probe(ctx context.Context, original *http.Request, path string) []upstreamResponse {
@@ -75,7 +75,7 @@ func firstFailure(responses []upstreamResponse) upstreamResponse {
 	return responses[0]
 }
 
-func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, target Target) {
+func stream(w http.ResponseWriter, r *http.Request, target Target) {
 	proxy := &httputil.ReverseProxy{Transport: target.Client.Transport, FlushInterval: -1, Rewrite: func(request *httputil.ProxyRequest) {
 		request.Out.URL = buildURL(target.Host, request.In.URL)
 		request.Out.Host = target.Host.Host
@@ -148,52 +148,74 @@ func (p *Proxy) requestMutationTargets(ctx context.Context, targets []Target, r 
 }
 
 func (p *Proxy) mutationTargets(ctx context.Context, r *http.Request, body []byte) ([]Target, error) {
-	requestAnnotations := annotations(body)
-	if name := requestAnnotations[contextNameAnnotation]; name != "" {
-		target, ok := p.target(name)
-		if !ok {
-			return nil, fmt.Errorf("context %q is not configured", name)
-		}
-		return []Target{target}, nil
-	}
-	if strings.EqualFold(requestAnnotations[singleContextAnnotation], "true") {
-		return []Target{p.primary}, nil
-	}
 	resource := parseResourcePath(r.URL.Path)
-	if resource.isObject && (r.Method == http.MethodPut || r.Method == http.MethodPatch || r.Method == http.MethodDelete) {
-		responses := p.probe(ctx, r, resource.ownerPath)
-		for _, response := range responses {
-			if response.err != nil || response.status < 200 || response.status >= 300 {
-				continue
-			}
-			existing := annotations(response.body)
-			if name := existing[contextNameAnnotation]; name != "" {
-				target, configured := p.target(name)
-				if !configured {
-					return nil, fmt.Errorf("context %q on existing object is not configured", name)
-				}
-				return []Target{target}, nil
-			}
-			if strings.EqualFold(existing[singleContextAnnotation], "true") {
-				return []Target{p.primary}, nil
-			}
-		}
-		found := make([]Target, 0, len(responses))
-		for _, response := range responses {
-			if response.err != nil {
-				return nil, fmt.Errorf("%s: %w", response.target.Name, response.err)
-			}
-			if response.status >= 200 && response.status < 300 {
-				found = append(found, response.target)
-			} else if response.status != http.StatusNotFound {
-				return nil, fmt.Errorf("%s: existing object returned HTTP %d", response.target.Name, response.status)
-			}
-		}
-		if len(found) > 0 {
-			return found, nil
-		}
+	if targets, handled, err := p.annotationTargets(annotations(body), false); handled {
+		return targets, err
+	}
+	if !needsExistingObject(r.Method, resource) {
+		return p.targets, nil
+	}
+	responses := p.probe(ctx, r, resource.ownerPath)
+	if targets, handled, err := p.existingAnnotationTargets(responses); handled {
+		return targets, err
+	}
+	if targets, err := foundTargets(responses); err != nil {
+		return nil, err
+	} else if len(targets) > 0 {
+		return targets, nil
 	}
 	return p.targets, nil
+}
+
+func needsExistingObject(method string, resource resourcePath) bool {
+	return resource.isObject && (method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete)
+}
+
+func (p *Proxy) annotationTargets(values map[string]string, existing bool) ([]Target, bool, error) {
+	if name := values[contextNameAnnotation]; name != "" {
+		target, ok := p.target(name)
+		if !ok {
+			prefix := ""
+			if existing {
+				prefix = " on existing object"
+			}
+			return nil, true, fmt.Errorf("context %q%s is not configured", name, prefix)
+		}
+		return []Target{target}, true, nil
+	}
+	if strings.EqualFold(values[singleContextAnnotation], "true") {
+		return []Target{p.primary}, true, nil
+	}
+	return nil, false, nil
+}
+
+func (p *Proxy) existingAnnotationTargets(responses []upstreamResponse) ([]Target, bool, error) {
+	for _, response := range responses {
+		if response.err != nil || response.status < 200 || response.status >= 300 {
+			continue
+		}
+		if targets, handled, err := p.annotationTargets(annotations(response.body), true); handled {
+			return targets, true, err
+		}
+	}
+	return nil, false, nil
+}
+
+func foundTargets(responses []upstreamResponse) ([]Target, error) {
+	found := make([]Target, 0, len(responses))
+	for _, response := range responses {
+		if response.err != nil {
+			return nil, fmt.Errorf("%s: %w", response.target.Name, response.err)
+		}
+		if response.status >= 200 && response.status < 300 {
+			found = append(found, response.target)
+			continue
+		}
+		if response.status != http.StatusNotFound {
+			return nil, fmt.Errorf("%s: existing object returned HTTP %d", response.target.Name, response.status)
+		}
+	}
+	return found, nil
 }
 
 func (p *Proxy) target(name string) (Target, bool) {

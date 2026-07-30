@@ -26,7 +26,7 @@ type resourcePath struct {
 }
 
 func classifyRequest(r *http.Request, helmMode bool) routeClass {
-	if isDiscoveryPath(r.URL.Path) || isRequestResponseAPI(r) || helmMode && isHelmStorageList(r) {
+	if isPrimaryRequest(r, helmMode) {
 		return routePrimary
 	}
 	resource := parseResourcePath(r.URL.Path)
@@ -46,6 +46,13 @@ func classifyRequest(r *http.Request, helmMode bool) routeClass {
 		return routeMutation
 	}
 	return routePrimary
+}
+
+func isPrimaryRequest(r *http.Request, helmMode bool) bool {
+	if isDiscoveryPath(r.URL.Path) || isRequestResponseAPI(r) {
+		return true
+	}
+	return helmMode && isHelmStorageList(r)
 }
 
 func parseResourcePath(path string) resourcePath {

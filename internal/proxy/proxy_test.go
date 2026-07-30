@@ -89,6 +89,109 @@ func TestAggregateListMarksSourceContext(t *testing.T) {
 	}
 }
 
+func TestAggregatePageSupportsTableResponses(t *testing.T) {
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"kind":"Table","metadata":{},"rows":[{"object":{"metadata":{"name":"one"}}}]}`))
+		},
+		"two": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"kind":"Table","metadata":{},"rows":[{"object":{"metadata":{"name":"two"}}}]}`))
+		},
+	})
+	defer cleanup()
+
+	first := serve(p, http.MethodGet, "/api/v1/configmaps?limit=1", "")
+	if first.Code != http.StatusOK || !contains(first.Body.String(), `"rows"`) || !contains(first.Body.String(), `"one"`) {
+		t.Fatalf("first page = %d %s", first.Code, first.Body.String())
+	}
+	var firstPage struct {
+		Metadata struct {
+			Continue string `json:"continue"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &firstPage); err != nil || firstPage.Metadata.Continue == "" {
+		t.Fatalf("first page continuation = %q, err = %v", firstPage.Metadata.Continue, err)
+	}
+	second := serve(p, http.MethodGet, "/api/v1/configmaps?limit=1&continue="+firstPage.Metadata.Continue, "")
+	if second.Code != http.StatusOK || !contains(second.Body.String(), `"two"`) || !contains(second.Body.String(), sourceContextAnnotation) {
+		t.Fatalf("second page = %d %s", second.Code, second.Body.String())
+	}
+}
+
+func TestAggregatePageRejectsExcessiveLimit(t *testing.T) {
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": func(http.ResponseWriter, *http.Request) {},
+		"two": func(http.ResponseWriter, *http.Request) {},
+	})
+	defer cleanup()
+	recorder := serve(p, http.MethodGet, "/api/v1/configmaps?limit=10001", "")
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestClassifyRequest(t *testing.T) {
+	tests := []struct {
+		name     string
+		method   string
+		path     string
+		helmMode bool
+		want     routeClass
+	}{
+		{name: "discovery", method: http.MethodGet, path: "/api", want: routePrimary},
+		{name: "request response", method: http.MethodPost, path: "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", want: routePrimary},
+		{name: "watch", method: http.MethodGet, path: "/api/v1/configmaps?watch=true", want: routeWatch},
+		{name: "pod log", method: http.MethodGet, path: "/api/v1/namespaces/default/pods/demo/log", want: routePodStream},
+		{name: "named object", method: http.MethodGet, path: "/api/v1/configmaps/demo", want: routeNamedGet},
+		{name: "collection", method: http.MethodGet, path: "/api/v1/configmaps", want: routeList},
+		{name: "mutation", method: http.MethodPost, path: "/api/v1/configmaps", want: routeMutation},
+		{name: "helm list", method: http.MethodGet, path: "/api/v1/secrets?labelSelector=owner%3Dhelm", helmMode: true, want: routePrimary},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, nil)
+			if got := classifyRequest(request, test.helmMode); got != test.want {
+				t.Fatalf("classifyRequest() = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAnnotationTargets(t *testing.T) {
+	p, cleanup := newProxy(t, "two", map[string]http.HandlerFunc{
+		"one": func(http.ResponseWriter, *http.Request) {},
+		"two": func(http.ResponseWriter, *http.Request) {},
+	})
+	defer cleanup()
+
+	targets, handled, err := p.annotationTargets(map[string]string{contextNameAnnotation: "one"}, false)
+	if err != nil || !handled || len(targets) != 1 || targets[0].Name != "one" {
+		t.Fatalf("context-name targets = %#v, handled = %t, err = %v", targets, handled, err)
+	}
+	targets, handled, err = p.annotationTargets(map[string]string{singleContextAnnotation: "true"}, false)
+	if err != nil || !handled || len(targets) != 1 || targets[0].Name != "two" {
+		t.Fatalf("single-context targets = %#v, handled = %t, err = %v", targets, handled, err)
+	}
+	_, handled, err = p.annotationTargets(map[string]string{contextNameAnnotation: "missing"}, true)
+	if !handled || err == nil || !contains(err.Error(), "existing object") {
+		t.Fatalf("unknown target handled = %t, err = %v", handled, err)
+	}
+}
+
+func TestListEntriesAndMarkEvent(t *testing.T) {
+	entries, key, ok := listEntries(map[string]any{"rows": []any{map[string]any{}}})
+	if !ok || key != "rows" || len(entries) != 1 {
+		t.Fatalf("listEntries() = %#v, %q, %t", entries, key, ok)
+	}
+	if _, _, ok := listEntries(map[string]any{}); ok {
+		t.Fatal("listEntries() accepted non-list payload")
+	}
+	event := markEvent([]byte(`{"type":"ADDED","object":{"metadata":{"name":"demo"}}}`), "two")
+	if !contains(string(event), sourceContextAnnotation) || !contains(string(event), `"two"`) {
+		t.Fatalf("event = %s", event)
+	}
+}
+
 type callLog struct {
 	mu     sync.Mutex
 	values []string
