@@ -57,17 +57,17 @@ func isPrimaryRequest(r *http.Request, helmMode bool) bool {
 
 func parseResourcePath(path string) resourcePath {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	base, namespaced := 0, false
+	base := 0
 	switch {
 	case len(parts) >= 3 && parts[0] == "api":
 		base = 3
 		if len(parts) >= 5 && parts[2] == "namespaces" {
-			base, namespaced = 5, true
+			base = 5
 		}
 	case len(parts) >= 4 && parts[0] == "apis":
 		base = 4
 		if len(parts) >= 6 && parts[3] == "namespaces" {
-			base, namespaced = 6, true
+			base = 6
 		}
 	default:
 		return resourcePath{}
@@ -83,11 +83,7 @@ func parseResourcePath(path string) resourcePath {
 	if len(parts) > base+1 {
 		result.subresource = parts[base+1]
 	}
-	resourceIndex := base - 1
-	if namespaced {
-		resourceIndex = base - 1
-	}
-	result.isPod = parts[resourceIndex] == "pods"
+	result.isPod = parts[base-1] == "pods"
 	return result
 }
 

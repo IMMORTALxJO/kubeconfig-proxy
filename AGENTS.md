@@ -47,8 +47,8 @@ Treat routing behavior as the core product contract. Small changes in request cl
   - annotation: `kubeconfig-proxy.io/source-context`
   - virtual label: `kcp-context`
 - Mutations are dangerous. Tests should cover where a request is sent, not only the final HTTP status.
-- `kubeconfig-proxy.io/target-context` must route mutations to the named configured context.
-- `kubeconfig-proxy.io/single-context` must route mutations to the alphabetically first configured context unless `target-context` is present.
+- `kubeconfig-proxy.io/target-context` must route mutations to the named configured contexts.
+- `kubeconfig-proxy.io/single-context` must route mutations to the primary context unless `target-context` is present.
 - Named `PATCH` and `DELETE` must consider the existing object when request bodies do not carry routing annotations.
 - Read-only proxy contexts must reject `POST`, `PUT`, `PATCH`, and `DELETE` before upstream calls.
 - Discovery and primary-only behavior must stay predictable, especially for Helm/werf release storage compatibility.
@@ -100,9 +100,11 @@ Useful options:
 - Update `README.md` or examples when user-visible CLI behavior changes.
 - Keep examples executable and aligned with the current binary name, context names, and flags.
 - When adding a feature, document the expected routing semantics and the safety boundary.
-- Treat `ARCHITECTURE.md` as the source of truth for package responsibilities,
-  dependency direction, runtime lifecycle, routing ownership, state boundaries,
-  and repository layout.
+- Treat the source code and tests as the source of truth for package
+  responsibilities, dependency direction, runtime lifecycle, routing ownership,
+  state boundaries, and repository layout.
+- Keep `ARCHITECTURE.md` synchronized with those implemented architectural
+  decisions.
 - Update `ARCHITECTURE.md` in the same change whenever those architectural
   decisions or the documented layout change. Do not leave architecture changes
   documented only in code, a pull request, or `README.md`.

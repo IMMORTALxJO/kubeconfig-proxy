@@ -1,4 +1,4 @@
 interface:
   display_name: "Generate Routing Doc"
-  short_description: "Generate the Kubernetes routing contract"
-  default_prompt: "Use $generate-routing-doc to update ROUTING.md from the captured kubectl request corpus."
+  short_description: "Document implemented Kubernetes routing"
+  default_prompt: "Use $generate-routing-doc to synchronize ROUTING.md with the current proxy code and tests."

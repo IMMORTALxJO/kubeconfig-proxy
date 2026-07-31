@@ -14,7 +14,7 @@ The chart contains:
 
 The nginx resources are deployed to both clusters. The Job has
 `kubeconfig-proxy.io/single-context: "true"`, so `kubeconfig-proxy` creates it only
-in the first selected context by alphabetical name.
+in the configured primary context.
 
 ## Prerequisites
 
@@ -91,8 +91,8 @@ kubectl --context kind-kubeconfig-proxy-b \
 
 ## Validate single-context Job
 
-The Job should exist only in `kind-kubeconfig-proxy-a`, because
-`kind-kubeconfig-proxy-a` is the first selected context by alphabetical name:
+The Job should exist only in `kind-kubeconfig-proxy-a`, because it is the
+configured primary context:
 
 ```bash
 kubectl --context kind-proxy \
