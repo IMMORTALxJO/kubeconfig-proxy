@@ -54,7 +54,7 @@ Work through the proxy context:
 kubectl get pods -A -L kcp-context --context proxy-context
 ```
 
-If you no longer need it, remove the context and its state artifacts:
+If you no longer need it, remove the managed kubeconfig entries:
 
 ```bash
 kubeconfig-proxy delete-context proxy-context
@@ -70,9 +70,12 @@ failure semantics, is in [ROUTING.md](ROUTING.md).
 
 - list requests are aggregated from all selected contexts;
 - paginated lists honor one global `limit` and use an opaque proxy continuation
-  token to advance across contexts without duplicates or omissions;
-- watch requests are streamed from all selected contexts;
-- create, update, patch, and delete requests are sent to all selected contexts;
+  token to advance across contexts without duplicates or omissions; every
+  continuation request must include a positive `limit`;
+- ordinary collection watches are streamed from all selected contexts; named
+  watches use only contexts where the object exists;
+- create, update, patch, and delete requests are sent to all selected contexts
+  unless routing annotations or an existing object select specific targets;
 - discovery requests use the primary context;
 - named pod subresources such as `logs`, `exec`, `attach`, and `port-forward`
   are routed to the context that contains the pod;
@@ -138,9 +141,15 @@ kubeconfig-proxy add-context prod-proxy \
   --primary-context prod-a
 ```
 
-If `--contexts` is omitted, all contexts from the source kubeconfig are used. If
-`--primary-context` is omitted, the source kubeconfig current context is used;
-when there is no current context, the first selected context is used.
+The CLI reads and updates one kubeconfig file. `--kubeconfig` selects it
+explicitly. When the flag is omitted, the first existing file from the ordinary
+Kubernetes precedence list is selected: entries in `KUBECONFIG` are considered
+from left to right, or `~/.kube/config` is used when the environment variable is
+unset. Multiple `KUBECONFIG` files are not merged.
+
+If `--contexts` is omitted, all contexts from the selected file are used. If
+`--primary-context` is omitted, that file's current context is used; when there
+is no current context, the first selected context is used.
 
 ## Resource Routing Annotations
 
@@ -153,9 +162,9 @@ metadata:
     kubeconfig-proxy.io/target-context: dev, prod
 ```
 
-Context names are comma-separated; surrounding whitespace is ignored and a
-repeated name is sent only once. An unknown or empty name causes a local `400`
-without any upstream call.
+Context names in the request body are comma-separated; surrounding whitespace
+is ignored and a repeated name is sent only once. An unknown or empty name
+causes a local `400` without any upstream call.
 
 `kubeconfig-proxy.io/source-context` on aggregated objects is a source-context marker
 only; it does not affect mutation routing.
@@ -192,9 +201,10 @@ kubeconfig-proxy add-context dev-stage-proxy \
   --helm-release-proxy
 ```
 
-With this mode enabled, Helm release storage list/watch requests are read only
-from the primary context, while ordinary application resources are still fanned
-out to all selected contexts.
+With this mode enabled, matching Secret and ConfigMap list/watch requests are
+read only from the primary context, while ordinary application resources are
+still fanned out to all selected contexts. A request matches when its decoded
+`labelSelector` contains the literal text `owner=helm` or `owner==helm`.
 
 See [examples/werf/README.md](examples/werf/README.md) for a complete local
 werf example.
@@ -202,8 +212,10 @@ werf example.
 ## Commands And Flags
 
 - `add-context <name>` adds an auto-started proxy context to a kubeconfig.
-- `--kubeconfig ~/.kube/config` selects the source kubeconfig. If omitted,
-  standard Kubernetes kubeconfig loading rules are used.
+- `--kubeconfig ~/.kube/config` selects the single source kubeconfig file to
+  read and update. If omitted, the first file in the normal Kubernetes
+  precedence list is selected; multiple `KUBECONFIG` files are not merged.
+- `--state /path/to/proxy.yaml` overrides the generated state file path.
 - `--contexts dev,stage,prod` limits the proxy to specific source contexts.
   Repeating a context name is rejected so mutations cannot be sent to the same
   cluster twice.
@@ -220,8 +232,13 @@ werf example.
 - `--helm-release-proxy` enables Helm/werf release-history compatibility mode.
 - `--read-only` rejects create, update, patch, and delete requests with `403`.
 - `--logs-enabled` writes auto-started `serve` output to `<state>.log`.
+- `--exec-command /path/to/kubeconfig-proxy` overrides the command stored in
+  kubeconfig exec authentication.
 - `delete-context <name>` removes the generated kubeconfig context, cluster,
-  auth info, state file, and log file.
+  auth info, state file, and log file. An existing `<state>.lock`
+  synchronization file is retained.
+- `delete-context <name> --state <path>` removes an additional explicit state
+  and log file when no managed kubeconfig entry records that path.
 - `credential --state <path>` is the kubeconfig exec credential entrypoint.
 - `serve --state <path>` runs a state-backed proxy process.
 - `version` prints the CLI version. Local builds print `dev`; release
@@ -271,7 +288,7 @@ Build the binary:
 make build
 ```
 
-Run the full local check suite used by CI:
+Run the comprehensive local check suite (a superset of the checks run by CI):
 
 ```bash
 make check

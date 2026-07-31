@@ -56,14 +56,6 @@ type RuntimeProfile struct {
 	RetryBackoff   time.Duration
 }
 
-func Load(path string) (*Profile, error) {
-	runtime, err := LoadRuntime(path)
-	if err != nil {
-		return nil, err
-	}
-	return runtime.Profile, nil
-}
-
 func LoadRuntime(path string) (*RuntimeProfile, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- state path is an explicit local CLI input or a path recorded in the generated kubeconfig.
 	if err != nil {

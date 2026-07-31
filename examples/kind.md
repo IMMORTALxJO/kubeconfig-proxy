@@ -167,8 +167,8 @@ kubectl --context kind-kubeconfig-proxy-a get configmap single-context-demo
 kubectl --context kind-kubeconfig-proxy-b get configmap single-context-demo
 ```
 
-Expected result: `single-context-demo` exists only in `kind-kubeconfig-proxy-a`, because
-`kind-kubeconfig-proxy-a` is the first selected context by alphabetical context name.
+Expected result: `single-context-demo` exists only in
+`kind-kubeconfig-proxy-a`, because it is the configured primary context.
 
 ## Cleanup
 

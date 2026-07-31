@@ -173,14 +173,20 @@ func TestAddContextWritesStateAndKubeconfigExecContext(t *testing.T) {
 func assertMainTestProxyState(t *testing.T, statePath string) *proxystate.Profile {
 	t.Helper()
 
-	profile, err := proxystate.Load(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	profile := loadMainTestProfile(t, statePath)
 	assertMainTestProxyStateCore(t, profile)
 	assertMainTestProxyStateDefaults(t, profile)
 	assertFileMode(t, statePath, 0o600)
 	return profile
+}
+
+func loadMainTestProfile(t *testing.T, statePath string) *proxystate.Profile {
+	t.Helper()
+	runtime, err := proxystate.LoadRuntime(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return runtime.Profile
 }
 
 func assertMainTestProxyStateCore(t *testing.T, profile *proxystate.Profile) {
@@ -300,10 +306,7 @@ func TestAddContextWritesLogsEnabledState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	profile, err := proxystate.Load(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	profile := loadMainTestProfile(t, statePath)
 	if !profile.LogsEnabled {
 		t.Fatal("profile logsEnabled = false, want true")
 	}
@@ -329,10 +332,7 @@ func TestAddContextWritesReadOnlyState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	profile, err := proxystate.Load(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	profile := loadMainTestProfile(t, statePath)
 	if !profile.Options.ReadOnly {
 		t.Fatal("profile readOnly = false, want true")
 	}
@@ -357,10 +357,7 @@ func TestAddContextResolvesExplicitZeroListenPort(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	profile, err := proxystate.Load(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	profile := loadMainTestProfile(t, statePath)
 	host, port, err := net.SplitHostPort(profile.Listen)
 	if err != nil {
 		t.Fatal(err)
@@ -405,10 +402,7 @@ func TestAddContextAcceptsContextNameAfterFlagsAndDefaultStatePath(t *testing.T)
 	}
 
 	statePath := mustDefaultStatePath(t, "flag-first-proxy")
-	profile, err := proxystate.Load(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	profile := loadMainTestProfile(t, statePath)
 	if profile.Name != "flag-first-proxy" {
 		t.Fatalf("profile name = %q, want flag-first-proxy", profile.Name)
 	}

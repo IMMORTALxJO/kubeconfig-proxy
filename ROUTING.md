@@ -1,22 +1,22 @@
 # Routing Contract
 
-This document is the normative routing matrix for `kubeconfig-proxy`.  It
-defines the intended behaviour of the proxy as an HTTP API in front of several
-Kubernetes contexts.  `kubectl` compatibility is the first constraint: a
-request must have an explicit class, target-selection rule, and response rule
-before it is implemented.
+This document records the routing matrix implemented by `kubeconfig-proxy` as
+an HTTP API in front of several Kubernetes contexts.  The source code and its
+tests are authoritative; this document must be updated whenever their behaviour
+changes.  `kubectl` compatibility is the first constraint: each implemented
+request class has an explicit target-selection and response rule.
 
-The captured corpus in
-`.codex/skills/gen-kubectl-commands/kubectl-commands.yaml` is the evidence for
-the initial matrix.  It currently covers 120 `kubectl` command variants and
-137 observed HTTP exchanges.  The rules below are path-pattern rules, not a
-closed list of the resources seen in that corpus, so they also apply to custom
-resources and API groups not yet present in it.
+The locally generated corpus at
+`.codex/skills/gen-kubectl-commands/kubectl-commands.yaml` is a workflow input
+for refreshing the matrix.  It is intentionally ignored by Git and may be
+absent from a clean checkout.  The rules below are path-pattern rules, not a
+closed list of resources from one captured corpus, so they also apply to custom
+resources and API groups not present in the latest local capture.
 
-This is a target contract.  Documentation alone does not change proxy
-behaviour; every row that changes the implementation must be delivered with
-unit tests that assert the exact upstream contexts and with an update to the
-real-cluster compatibility checks.
+Documentation alone does not change proxy behaviour.  Every implementation
+change must be delivered with unit tests that assert the exact upstream
+contexts, an update to this matrix, and an update to the real-cluster
+compatibility checks when user-visible behaviour changes.
 
 ## Terms
 
@@ -47,10 +47,10 @@ earlier one.
 | 1 | Missing or invalid local bearer token | None | `401 Unauthorized`. |
 | 2 | `POST`, `PUT`, `PATCH`, or `DELETE` with a read-only proxy | None | `403 Forbidden` before any upstream call. |
 | 3 | Discovery and non-resource compatibility endpoints | Primary context | Forward its response unchanged. |
-| 4 | Authentication, authorization, and token request APIs | Primary context | Forward its response unchanged. |
-| 5 | Helm release-storage list or watch when Helm compatibility mode is enabled | Primary context | Forward or stream only the primary response. |
-| 6 | Watch | Every configured context | Open and merge streams. |
-| 7 | Pod connection subresource | Context containing the Pod | Stream one upstream connection. |
+| 4 | Recognized authentication, authorization, and token request APIs | Primary context | Forward its response unchanged. |
+| 5 | Matching Helm storage list or watch when Helm compatibility mode is enabled | Primary context | Forward or stream only the primary response. |
+| 6 | Watch | Every configured context, or only contexts containing a named object | Open and merge the selected streams. |
+| 7 | Pod connection subresource | Context containing the Pod, or primary when it is absent everywhere | Stream one upstream connection. |
 | 8 | Named object `GET` | Every configured context | Return a found object, preferring primary. |
 | 9 | Collection `GET` without `watch=true` | Every configured context | Aggregate the collection. |
 | 10 | Persistent-resource mutation | Annotation, existing object, or every configured context | Complete the mutation according to the mutation rules. |
@@ -70,24 +70,25 @@ multi-context class requires a matrix row and target-selection tests first.
 | `/version`, `/openapi/*`, `/swagger/*`, `/healthz`, `/livez`, `/readyz` | Primary | `kubectl explain`, discovery caches, and health clients receive a coherent answer. |
 | Any unclassified non-resource path | Primary | Safe compatibility fallback. |
 
-### Authentication, authorization, and ephemeral credentials
+### Recognized request/response and token APIs
 
 | Path examples | Target | Reason |
 | --- | --- | --- |
-| `POST /apis/authentication.k8s.io/{version}/selfsubjectreviews` | Primary | A response describes the primary credential's identity; there is no Kubernetes aggregate response type. |
-| `POST /apis/authorization.k8s.io/{version}/selfsubjectaccessreviews` and other access-review APIs | Primary | `kubectl auth can-i` expects one boolean response. |
-| `POST .../serviceaccounts/{name}/token` and TokenRequest APIs | Primary | A token is cluster-specific and must not be minted in every context or returned arbitrarily. |
+| Any `POST` path containing `selfsubjectreview`, `accessreview`, or `tokenreviews` | Primary | These path substrings are recognized before generic resource mutation routing. |
+| `POST` ending in `/serviceaccounts/token` or containing `/serviceaccounts/` and ending in `/token` | Primary | These paths are treated as cluster-specific token requests. |
 
-These are request/response operations, not ordinary persistent-resource
-creation.  They must not use generic mutation fan-out.
+Matching is intentionally the literal path-substring and suffix logic above.
+For example, `SelfSubjectRulesReview` does not contain any recognized substring
+and therefore follows the generic persistent-resource mutation route.
 
 ### Lists and pagination
 
 | Request pattern | Target | Result |
 | --- | --- | --- |
 | `GET {collection-path}` without `watch=true`, `limit`, or a proxy continuation token | All contexts concurrently | All upstream responses must succeed.  Merge Kubernetes `items` or `Table.rows`, add the source annotation and virtual label to every returned object, and return one aggregate resource version. |
-| Same request with `limit` or an aggregate continuation token | All contexts, sequentially as required by the aggregate continuation state | Enforce one global limit and return only an opaque proxy continuation token.  Never forward a context-local token to another context. |
-| Collection list for Helm release Secrets or ConfigMaps in Helm compatibility mode | Primary | Do not merge independent release histories. |
+| Same request with a positive `limit` up to `10000`, optionally with an aggregate continuation token | All contexts, sequentially as required by the aggregate continuation state | Enforce one global limit and return only an opaque proxy continuation token.  Never forward a context-local token to another context. |
+| Request with an aggregate continuation token but no positive `limit` | None when `limit` is absent or invalid; all contexts when `limit=0` | A missing or invalid limit returns local `400`.  `limit=0` removes both pagination parameters and performs an ordinary unpaginated aggregate list. |
+| Secret or ConfigMap collection list whose decoded `labelSelector` contains `owner=helm` or `owner==helm`, in Helm compatibility mode | Primary | The literal substring match prevents merging independent release histories. |
 
 For an aggregate list, a transport failure or non-success response from any
 context fails the request.  The error must name the context.  The proxy must
@@ -99,7 +100,7 @@ not silently return a partial list.
 | --- | --- | --- |
 | `GET {collection-path}?watch=true` | All contexts concurrently | Open one watch per context and forward events as they arrive.  Add the source annotation and virtual label to event objects.  Ordering between contexts is intentionally undefined. |
 | Named object watch (`GET {object-path}?watch=true`) or collection watch with `fieldSelector=metadata.name={name}` | Contexts containing the named object | First locate the object in every context.  Open one watch only for each found object, using its context-local resource version.  A `404` is an expected absence during the lookup. |
-| Helm release-storage watch in Helm compatibility mode | Primary | Stream one release history only. |
+| Secret or ConfigMap collection watch whose decoded `labelSelector` contains `owner=helm` or `owner==helm`, in Helm compatibility mode | Primary | Stream one matching history only. |
 
 The initial upstream-open failure must identify its context.  Successful streams
 are not buffered and are not subject to the ordinary request timeout.
@@ -114,12 +115,12 @@ status`, is therefore not a cross-context readiness barrier.
 | --- | --- | --- |
 | `GET {object-path}` | All contexts concurrently | If primary returns `2xx`, return that response. Otherwise return the first `2xx` response in configured order. Set `metadata.labels["kcp-context"]` to the comma-separated configured contexts that returned `2xx`. |
 
-If no context returns `2xx` and all contexts return `404`, return the primary
-context's normal `404` response.  If no object is found and any context has a
-transport error or a non-`404` response, return a context-named failure rather
-than representing the result as an ordinary absence.  A found object wins over
-a `404` or failure from another context: this is a presence lookup, not an
-aggregate read.
+If no context returns `2xx` and all contexts return `404`, return a
+proxy-generated Kubernetes `Status` with `404` and the first configured
+context's name.  If no object is found and any context has a transport error or
+a non-`404` response, return a context-named failure rather than representing
+the result as an ordinary absence.  A found object wins over a `404` or failure
+from another context: this is a presence lookup, not an aggregate read.
 
 ### Pod connection subresources
 
@@ -138,16 +139,18 @@ This group includes `POST` to a collection, `PUT`, `PATCH`, and `DELETE` for a
 Kubernetes resource, including cluster-scoped resources.  The target is chosen
 in this order:
 
-1. `metadata.annotations["kubeconfig-proxy.io/target-context"]` selects the
-   comma-separated configured contexts. Surrounding whitespace is ignored,
-   repeated names are selected once, and an empty or unknown name is a local
-   `400` that makes no upstream call.
+1. `metadata.annotations["kubeconfig-proxy.io/target-context"]` in the request
+   body selects the comma-separated configured contexts. Surrounding whitespace
+   is ignored, repeated names are selected once, and an empty or unknown name
+   is a local `400` before any upstream call.
 2. Otherwise, `metadata.annotations["kubeconfig-proxy.io/single-context"] =
    "true"` selects the primary context.
 3. For a named `PATCH`, `DELETE`, or update whose body has no routing
    annotation, read the existing object in every context first.  Its routing
    annotation takes precedence.  Without one, route to the contexts where the
-   object exists; if it exists everywhere, this is normal fan-out.
+   object exists; if it exists everywhere, this is normal fan-out.  An empty or
+   unknown target in an existing object returns local `400` after the lookup and
+   before any mutation call.
 4. For an object-associated subresource mutation (for example `scale`,
    `status`, `finalize`, or Pod `ephemeralcontainers`), apply the same lookup
    to the owning object before routing the subresource request.
@@ -159,13 +162,14 @@ target's current `uid` and `resourceVersion`; identity from one cluster must
 never be sent to another.
 
 For fan-out mutations, send all selected requests concurrently and wait for all
-of them.  On a failure, return a Kubernetes `Status` failure that identifies
-the failing context and preserves the useful upstream reason where possible.
-There is no rollback: a request can succeed in some contexts before another
-context fails.  If every selected request succeeds, return the successful
-response from primary when it was selected; otherwise use the first selected
-context in configured order.  Never select the representative response by
-goroutine completion order.
+of them.  A transport failure returns a proxy-generated `502` Kubernetes
+`Status` naming the context.  A non-`2xx` upstream response returns a
+proxy-generated Kubernetes `Status` with the upstream HTTP code and status text;
+the upstream response body is not preserved.  There is no rollback: a request
+can succeed in some contexts before another context fails.  If every selected
+request succeeds, return the successful response from primary when it was
+selected; otherwise use the first selected context in configured order.  Never
+select the representative response by goroutine completion order.
 
 Collection deletion and other mutations that do not identify one existing
 object cannot use existing-object annotations; absent a request-body routing
@@ -177,6 +181,7 @@ annotation, they fan out to every configured context.
   opening start one upstream request per selected context concurrently.
 - A context name is required in every proxy-generated upstream failure.  Do not
   return an arbitrary upstream error without saying which context produced it.
+- Proxy-generated upstream failures do not copy the upstream response body.
 - A context-local `404` is only an expected absence while locating a named
   object or Pod.  It is not silently ignored for aggregate lists or fan-out
   mutations.

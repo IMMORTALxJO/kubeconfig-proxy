@@ -7,8 +7,8 @@ the project evolves.
 The user-facing behavior and command reference live in [README.md](README.md).
 Routing: [ROUTING.md](ROUTING.md).
 
-This document is the source of truth for internal structure and architectural
-constraints.
+This document records the internal structure and architectural constraints.
+The source code and tests are authoritative and this document must track them.
 
 ## Goals and constraints
 
@@ -134,6 +134,11 @@ or remove actual duplication.
 9. Atomically save the versioned state file.
 10. Write the managed cluster, auth info, and context to the kubeconfig.
 
+The CLI reads and updates one source kubeconfig file. An explicit
+`--kubeconfig` selects it directly. Without the flag, the first existing file
+from the client-go precedence list is selected; multiple files listed in
+`KUBECONFIG` are not merged.
+
 The generated kubeconfig contains the local HTTPS endpoint, public certificate
 data, and an exec credential command. The bearer token and private key exist
 only in the state file.
@@ -216,8 +221,11 @@ its own resource version.
 
 Watch streams are opened concurrently and copied to the client as events
 arrive. Event writes are serialized, but ordering between clusters is
-intentionally not defined. Every collection watch opens one upstream stream per
-configured target; field selectors are forwarded unchanged.
+intentionally not defined. An ordinary collection watch opens one upstream
+stream per configured target and forwards field selectors unchanged. A named
+object watch, or a collection watch with an exact `metadata.name` field
+selector, first probes all targets and opens streams only where the object was
+found.
 
 ### Cross-context pagination
 
@@ -233,8 +241,8 @@ keeps the aggregate resource version complete and stable from the first page,
 so a client can watch from that version without missing changes in targets
 visited by later pages.
 
-The proxy enforces one global `limit` and returns an opaque continuation token
-containing:
+The proxy enforces one global positive `limit`, up to `10000`, and returns an
+opaque continuation token containing:
 
 - the configured target names;
 - the current target;
@@ -244,16 +252,19 @@ containing:
 
 The token is rejected if the target set or request scope changes. This prevents
 mixing target-local tokens, selectors, or paths across pages. Callers must treat
-both aggregate resource versions and continuation tokens as opaque values.
+both aggregate resource versions and continuation tokens as opaque values. A
+continuation request must include a positive `limit`; without one it returns
+`400`, while `limit=0` starts an ordinary unpaginated aggregate list and ignores
+the continuation token.
 
 ## Mutations
 
 Mutation routing is intentionally explicit. The detailed precedence, including
 the distinction between persistent-resource changes and primary-only
 request/response APIs, is specified in [ROUTING.md](ROUTING.md). Routing
-annotations select one configured target; otherwise an existing named object
-can select its owning contexts, and ordinary persistent-resource mutations fan
-out.
+annotations select one or more configured targets; otherwise an existing named
+object can select its owning contexts, and ordinary persistent-resource
+mutations fan out.
 
 Before an ordinary manifest mutation sent with `POST` or `PUT` is forwarded,
 the proxy removes its virtual `kcp-context` label from the request body so
@@ -271,6 +282,9 @@ cluster's identity is never copied to another cluster.
 
 Fan-out calls run concurrently. There is no rollback: tests must verify which
 targets were contacted, not only the final status returned to the client.
+Non-success responses are replaced with a proxy-generated Kubernetes `Status`
+that includes the target name, HTTP code, and status text; the upstream response
+body is not retained on these paths.
 
 ## Upstream transport and resource limits
 
@@ -308,6 +322,9 @@ State persistence uses a temporary file followed by rename. State files and
 managed kubeconfig files use mode `0600`; their parent directories use mode
 `0700` when created. The state contains sensitive bearer-token and TLS private
 key material and must never be logged.
+
+`delete-context` removes the state and optional log file but retains any
+existing `<state>.lock` synchronization file.
 
 The local server:
 

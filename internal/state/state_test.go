@@ -16,7 +16,7 @@ func (f failingTemporaryFile) Write([]byte) (int, error) { return 0, f.writeErr 
 func (f failingTemporaryFile) Chmod(os.FileMode) error   { return f.chmodErr }
 func (f failingTemporaryFile) Close() error              { return f.closeErr }
 
-func TestSaveAndLoadRoundTripWithPrivatePermissions(t *testing.T) {
+func TestSaveAndLoadRuntimeRoundTripWithPrivatePermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "proxy.yaml")
 	profile := validTestProfile()
 	profile.LogsEnabled = true
@@ -35,10 +35,11 @@ func TestSaveAndLoadRoundTripWithPrivatePermissions(t *testing.T) {
 		t.Fatalf("state file mode = %v, want 0600", got)
 	}
 
-	loaded, err := Load(path)
+	runtime, err := LoadRuntime(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	loaded := runtime.Profile
 	if loaded.Name != profile.Name {
 		t.Fatalf("loaded name = %q, want %q", loaded.Name, profile.Name)
 	}
@@ -50,7 +51,7 @@ func TestSaveAndLoadRoundTripWithPrivatePermissions(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsInvalidStateFiles(t *testing.T) {
+func TestLoadRuntimeRejectsInvalidStateFiles(t *testing.T) {
 	tests := []struct {
 		name            string
 		data            string
@@ -110,9 +111,9 @@ options:
 				t.Fatal(err)
 			}
 
-			_, err := Load(path)
+			_, err := LoadRuntime(path)
 			if err == nil {
-				t.Fatal("Load returned nil error")
+				t.Fatal("LoadRuntime returned nil error")
 			}
 			if !strings.Contains(err.Error(), tt.wantErrContains) {
 				t.Fatalf("error = %q, want to contain %q", err.Error(), tt.wantErrContains)
@@ -121,13 +122,13 @@ options:
 	}
 }
 
-func TestLoadReturnsReadError(t *testing.T) {
-	_, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
+func TestLoadRuntimeReturnsReadError(t *testing.T) {
+	_, err := LoadRuntime(filepath.Join(t.TempDir(), "missing.yaml"))
 	if err == nil {
-		t.Fatal("Load returned nil error")
+		t.Fatal("LoadRuntime returned nil error")
 	}
 	if !os.IsNotExist(err) {
-		t.Fatalf("Load error = %v, want not-exist error", err)
+		t.Fatalf("LoadRuntime error = %v, want not-exist error", err)
 	}
 }
 

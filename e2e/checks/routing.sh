@@ -99,7 +99,7 @@ run_routing_checks() {
 
   write_configmap_manifest "$single_manifest" "$single_name" "  annotations:
     kubeconfig-proxy.io/single-context: \"true\""
-  run_cmd "single-context routes create to first context" apply_manifest "$PROXY_CONTEXT" "$single_manifest"
+  run_cmd "single-context routes create to primary context" apply_manifest "$PROXY_CONTEXT" "$single_manifest"
   expect_exists "single-context object exists in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap "$single_name"
   expect_not_found "single-context object absent from kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap "$single_name"
 
