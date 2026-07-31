@@ -1189,7 +1189,7 @@ func TestRequestTargetHandlesBodyFailuresAndCanceledRetry(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		response := p.requestTarget(ctx, target, httptest.NewRequest(http.MethodGet, "/api/v1/configmaps", nil), nil)
+		response := p.requestTarget(ctx, target, httptest.NewRequest(http.MethodGet, "/api/v1/configmaps", http.NoBody), nil)
 		if !errors.Is(response.err, context.Canceled) || attempts != 1 {
 			t.Fatalf("response error = %v, attempts = %d", response.err, attempts)
 		}
