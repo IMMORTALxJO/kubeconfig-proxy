@@ -451,34 +451,50 @@ func TestAnnotationTargets(t *testing.T) {
 	})
 	defer cleanup()
 
-	targets, handled, err := p.annotationTargets(map[string]string{targetContextAnnotation: "one"}, false)
-	if err != nil || !handled || len(targets) != 1 || targets[0].Name != "one" {
-		t.Fatalf("target-context targets = %#v, handled = %t, err = %v", targets, handled, err)
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		existing    bool
+		handled     bool
+		targets     string
+		err         string
+	}{
+		{name: "single target", annotations: map[string]string{targetContextAnnotation: "one"}, handled: true, targets: "one"},
+		{name: "single context", annotations: map[string]string{singleContextAnnotation: "true"}, handled: true, targets: "two"},
+		{name: "multiple targets", annotations: map[string]string{targetContextAnnotation: " one, two, one "}, handled: true, targets: "one,two"},
+		{name: "unknown target", annotations: map[string]string{targetContextAnnotation: "one,missing"}, handled: true, err: "missing"},
+		{name: "empty target", annotations: map[string]string{targetContextAnnotation: ""}, handled: true, err: "empty context name"},
+		{name: "source context", annotations: map[string]string{sourceContextAnnotation: "one,two"}},
+		{name: "existing unknown target", annotations: map[string]string{targetContextAnnotation: "missing"}, existing: true, handled: true, err: "existing object"},
 	}
-	targets, handled, err = p.annotationTargets(map[string]string{singleContextAnnotation: "true"}, false)
-	if err != nil || !handled || len(targets) != 1 || targets[0].Name != "two" {
-		t.Fatalf("single-context targets = %#v, handled = %t, err = %v", targets, handled, err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			targets, handled, err := p.annotationTargets(test.annotations, test.existing)
+			if handled != test.handled {
+				t.Fatalf("handled = %t, want %t", handled, test.handled)
+			}
+			if test.err != "" {
+				if err == nil || !contains(err.Error(), test.err) {
+					t.Fatalf("err = %v, want %q", err, test.err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := targetNames(targets); got != test.targets {
+				t.Fatalf("targets = %q, want %q", got, test.targets)
+			}
+		})
 	}
-	targets, handled, err = p.annotationTargets(map[string]string{targetContextAnnotation: " one, two, one "}, false)
-	if err != nil || !handled || len(targets) != 2 || targets[0].Name != "one" || targets[1].Name != "two" {
-		t.Fatalf("target-context targets = %#v, handled = %t, err = %v", targets, handled, err)
+}
+
+func targetNames(targets []Target) string {
+	names := make([]string, 0, len(targets))
+	for _, target := range targets {
+		names = append(names, target.Name)
 	}
-	_, handled, err = p.annotationTargets(map[string]string{targetContextAnnotation: "one,missing"}, false)
-	if !handled || err == nil || !contains(err.Error(), "missing") {
-		t.Fatalf("unknown target-context targets handled = %t, err = %v", handled, err)
-	}
-	_, handled, err = p.annotationTargets(map[string]string{targetContextAnnotation: ""}, false)
-	if !handled || err == nil || !contains(err.Error(), "empty context name") {
-		t.Fatalf("empty target-context targets handled = %t, err = %v", handled, err)
-	}
-	_, handled, err = p.annotationTargets(map[string]string{sourceContextAnnotation: "one,two"}, false)
-	if handled || err != nil {
-		t.Fatalf("source context handled = %t, err = %v", handled, err)
-	}
-	_, handled, err = p.annotationTargets(map[string]string{targetContextAnnotation: "missing"}, true)
-	if !handled || err == nil || !contains(err.Error(), "existing object") {
-		t.Fatalf("unknown target handled = %t, err = %v", handled, err)
-	}
+	return strings.Join(names, ",")
 }
 
 func TestListEntriesAndMarkEvent(t *testing.T) {
