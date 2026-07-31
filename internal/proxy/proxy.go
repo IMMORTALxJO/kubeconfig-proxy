@@ -11,10 +11,10 @@ import (
 const (
 	DefaultRetries = 5
 
-	contextNameAnnotation   = "kubeconfig-proxy.io/context-name"
+	targetContextAnnotation = "kubeconfig-proxy.io/target-context"
 	singleContextAnnotation = "kubeconfig-proxy.io/single-context"
-	sourceContextAnnotation = "kubeconfig-proxy.io/context"
-	sourceContextLabel      = "context"
+	sourceContextAnnotation = "kubeconfig-proxy.io/source-context"
+	sourceContextLabel      = "kcp-context"
 )
 
 type Target = upstream.Target

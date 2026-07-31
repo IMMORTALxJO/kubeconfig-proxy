@@ -366,9 +366,55 @@ func listEntries(payload map[string]any) ([]any, string, bool) {
 }
 
 func markEntry(entry any, contextName string) {
-	object, ok := entry.(map[string]any)
+	metadata, ok := entryMetadata(entry)
 	if !ok {
 		return
+	}
+	annotations, ok := metadata["annotations"].(map[string]any)
+	if !ok {
+		annotations = map[string]any{}
+		metadata["annotations"] = annotations
+	}
+	annotations[sourceContextAnnotation] = contextName
+	markContextLabel(entry, contextName)
+}
+
+func markNamedGetBody(body []byte, contextNames string) []byte {
+	var object map[string]any
+	if json.Unmarshal(body, &object) != nil {
+		return body
+	}
+	if rows, ok := object["rows"].([]any); ok {
+		for _, row := range rows {
+			markContextLabel(row, contextNames)
+		}
+	} else {
+		markContextLabel(object, contextNames)
+	}
+	marked, err := json.Marshal(object)
+	if err != nil {
+		return body
+	}
+	return marked
+}
+
+func markContextLabel(entry any, contextNames string) {
+	metadata, ok := entryMetadata(entry)
+	if !ok {
+		return
+	}
+	labels, ok := metadata["labels"].(map[string]any)
+	if !ok {
+		labels = map[string]any{}
+		metadata["labels"] = labels
+	}
+	labels[sourceContextLabel] = contextNames
+}
+
+func entryMetadata(entry any) (map[string]any, bool) {
+	object, ok := entry.(map[string]any)
+	if !ok {
+		return nil, false
 	}
 	if embedded, ok := object["object"].(map[string]any); ok {
 		object = embedded
@@ -378,16 +424,5 @@ func markEntry(entry any, contextName string) {
 		metadata = map[string]any{}
 		object["metadata"] = metadata
 	}
-	annotations, ok := metadata["annotations"].(map[string]any)
-	if !ok {
-		annotations = map[string]any{}
-		metadata["annotations"] = annotations
-	}
-	annotations[sourceContextAnnotation] = contextName
-	labels, ok := metadata["labels"].(map[string]any)
-	if !ok {
-		labels = map[string]any{}
-		metadata["labels"] = labels
-	}
-	labels[sourceContextLabel] = contextName
+	return metadata, true
 }

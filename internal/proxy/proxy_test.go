@@ -75,7 +75,7 @@ func TestNamedGetPrefersPrimary(t *testing.T) {
 	})
 	defer cleanup()
 	recorder := serve(p, http.MethodGet, "/api/v1/namespaces/default/configmaps/demo", "")
-	if recorder.Code != http.StatusOK || !contains(recorder.Body.String(), `"two"`) {
+	if recorder.Code != http.StatusOK || !contains(recorder.Body.String(), `"two"`) || !contains(recorder.Body.String(), `"kcp-context":"one,two"`) {
 		t.Fatalf("response = %d %s", recorder.Code, recorder.Body.String())
 	}
 	if got := calls.names(); len(got) != 2 {
@@ -109,7 +109,7 @@ func TestAggregateListMarksSourceContext(t *testing.T) {
 	})
 	defer cleanup()
 	recorder := serve(p, http.MethodGet, "/api/v1/configmaps", "")
-	if recorder.Code != http.StatusOK || !contains(recorder.Body.String(), `kubeconfig-proxy.io/context`) {
+	if recorder.Code != http.StatusOK || !contains(recorder.Body.String(), `kubeconfig-proxy.io/source-context`) {
 		t.Fatalf("response = %d %s", recorder.Code, recorder.Body.String())
 	}
 }
@@ -451,18 +451,50 @@ func TestAnnotationTargets(t *testing.T) {
 	})
 	defer cleanup()
 
-	targets, handled, err := p.annotationTargets(map[string]string{contextNameAnnotation: "one"}, false)
-	if err != nil || !handled || len(targets) != 1 || targets[0].Name != "one" {
-		t.Fatalf("context-name targets = %#v, handled = %t, err = %v", targets, handled, err)
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		existing    bool
+		handled     bool
+		targets     string
+		err         string
+	}{
+		{name: "single target", annotations: map[string]string{targetContextAnnotation: "one"}, handled: true, targets: "one"},
+		{name: "single context", annotations: map[string]string{singleContextAnnotation: "true"}, handled: true, targets: "two"},
+		{name: "multiple targets", annotations: map[string]string{targetContextAnnotation: " one, two, one "}, handled: true, targets: "one,two"},
+		{name: "unknown target", annotations: map[string]string{targetContextAnnotation: "one,missing"}, handled: true, err: "missing"},
+		{name: "empty target", annotations: map[string]string{targetContextAnnotation: ""}, handled: true, err: "empty context name"},
+		{name: "source context", annotations: map[string]string{sourceContextAnnotation: "one,two"}},
+		{name: "existing unknown target", annotations: map[string]string{targetContextAnnotation: "missing"}, existing: true, handled: true, err: "existing object"},
 	}
-	targets, handled, err = p.annotationTargets(map[string]string{singleContextAnnotation: "true"}, false)
-	if err != nil || !handled || len(targets) != 1 || targets[0].Name != "two" {
-		t.Fatalf("single-context targets = %#v, handled = %t, err = %v", targets, handled, err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			targets, handled, err := p.annotationTargets(test.annotations, test.existing)
+			if handled != test.handled {
+				t.Fatalf("handled = %t, want %t", handled, test.handled)
+			}
+			if test.err != "" {
+				if err == nil || !contains(err.Error(), test.err) {
+					t.Fatalf("err = %v, want %q", err, test.err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := targetNames(targets); got != test.targets {
+				t.Fatalf("targets = %q, want %q", got, test.targets)
+			}
+		})
 	}
-	_, handled, err = p.annotationTargets(map[string]string{contextNameAnnotation: "missing"}, true)
-	if !handled || err == nil || !contains(err.Error(), "existing object") {
-		t.Fatalf("unknown target handled = %t, err = %v", handled, err)
+}
+
+func targetNames(targets []Target) string {
+	names := make([]string, 0, len(targets))
+	for _, target := range targets {
+		names = append(names, target.Name)
 	}
+	return strings.Join(names, ",")
 }
 
 func TestListEntriesAndMarkEvent(t *testing.T) {
@@ -486,18 +518,168 @@ func TestMutationRoutingAndReadOnly(t *testing.T) {
 		"two": calls.handler("two", `{"metadata":{"name":"demo"}}`),
 	})
 	defer cleanup()
-	response := serve(p, http.MethodPost, "/api/v1/configmaps", `{"metadata":{"annotations":{"kubeconfig-proxy.io/context-name":"one"}}}`)
+	response := serve(p, http.MethodPost, "/api/v1/configmaps", `{"metadata":{"annotations":{"kubeconfig-proxy.io/target-context":"one"}}}`)
 	if response.Code != http.StatusOK || len(calls.names()) != 1 || calls.names()[0] != "one" {
-		t.Fatalf("context-name response = %d, calls = %v", response.Code, calls.names())
+		t.Fatalf("target-context response = %d, calls = %v", response.Code, calls.names())
 	}
-	response = serve(p, http.MethodPost, "/api/v1/configmaps", `{"metadata":{"annotations":{"kubeconfig-proxy.io/context-name":"missing"}}}`)
+	response = serve(p, http.MethodPost, "/api/v1/configmaps", `{"metadata":{"annotations":{"kubeconfig-proxy.io/target-context":"missing"}}}`)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("unknown context response = %d", response.Code)
+	}
+	calls = &callLog{}
+	p, cleanup = newProxy(t, "two", map[string]http.HandlerFunc{
+		"one": calls.handler("one", `{"metadata":{"name":"demo"}}`),
+		"two": calls.handler("two", `{"metadata":{"name":"demo"}}`),
+	})
+	defer cleanup()
+	response = serve(p, http.MethodPost, "/api/v1/configmaps", `{"metadata":{"annotations":{"kubeconfig-proxy.io/target-context":"one,two"}}}`)
+	callsByContext := strings.Join(calls.names(), ",")
+	if response.Code != http.StatusOK || strings.Count(callsByContext, "one") != 1 || strings.Count(callsByContext, "two") != 1 {
+		t.Fatalf("context response = %d, calls = %v", response.Code, calls.names())
 	}
 	p.options.ReadOnly = true
 	response = serve(p, http.MethodDelete, "/api/v1/configmaps/demo", "")
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("read-only response = %d", response.Code)
+	}
+}
+
+func TestMutationRemovesVirtualContextLabel(t *testing.T) {
+	var mu sync.Mutex
+	bodies := make([]string, 0, 2)
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		bodies = append(bodies, string(body))
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"metadata":{"name":"demo"}}`))
+	}
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": handler,
+		"two": handler,
+	})
+	defer cleanup()
+
+	response := serve(p, http.MethodPost, "/api/v1/configmaps", `{"metadata":{"labels":{"kcp-context":"one,two","keep":"value"}}}`)
+	if response.Code != http.StatusOK || len(bodies) != 2 {
+		t.Fatalf("response = %d, bodies = %v", response.Code, bodies)
+	}
+	for _, body := range bodies {
+		if contains(body, `"kcp-context"`) || !contains(body, `"keep":"value"`) {
+			t.Fatalf("forwarded body = %s", body)
+		}
+	}
+}
+
+func TestWithoutVirtualContextLabel(t *testing.T) {
+	tests := []struct {
+		name          string
+		body          string
+		wantUnchanged bool
+	}{
+		{name: "object", body: `{"metadata":{"labels":{"kcp-context":"one","keep":"value"}}}`},
+		{name: "yaml object", body: "metadata:\n  labels:\n    kcp-context: one\n    keep: value\n"},
+		{name: "without virtual label", body: `{"metadata":{"labels":{"keep":"value"}}}`, wantUnchanged: true},
+		{name: "without metadata", body: `{}`, wantUnchanged: true},
+		{name: "invalid body", body: "not: [valid", wantUnchanged: true},
+		{name: "json patch", body: `[{"op":"add","path":"/metadata/labels/kcp-context","value":"one"},{"op":"add","path":"/metadata/labels/keep","value":"value"}]`, wantUnchanged: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := withoutVirtualContextLabel([]byte(test.body))
+			if test.wantUnchanged {
+				if string(body) != test.body {
+					t.Fatalf("body = %s", body)
+				}
+				return
+			}
+			if contains(string(body), "kcp-context") {
+				t.Fatalf("body = %s", body)
+			}
+		})
+	}
+}
+
+func TestMarkNamedGetBody(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "object",
+			body: `{"metadata":{"labels":{"keep":"value"}}}`,
+			want: `"kcp-context":"one,two"`,
+		},
+		{
+			name: "table row",
+			body: `{"rows":[{"object":{"metadata":{"labels":{"keep":"value"}}}}]}`,
+			want: `"kcp-context":"one,two"`,
+		},
+		{
+			name: "invalid JSON",
+			body: "not JSON",
+			want: "not JSON",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := markNamedGetBody([]byte(test.body), "one,two")
+			if !contains(string(body), test.want) {
+				t.Fatalf("body = %s, want %q", body, test.want)
+			}
+		})
+	}
+}
+
+func TestMarkContextLabel(t *testing.T) {
+	entry := map[string]any{}
+	markContextLabel(entry, "one")
+	metadata, ok := entry["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata = %#v", entry["metadata"])
+	}
+	labels, ok := metadata["labels"].(map[string]any)
+	if !ok || labels[sourceContextLabel] != "one" {
+		t.Fatalf("labels = %#v", metadata["labels"])
+	}
+
+	markContextLabel("not an object", "one")
+	markEntry("not an object", "one")
+}
+
+func TestPatchPreservesVirtualContextLabel(t *testing.T) {
+	var mu sync.Mutex
+	bodies := make([]string, 0, 2)
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		mu.Lock()
+		bodies = append(bodies, string(body))
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"metadata":{"name":"demo"}}`))
+	}
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": handler,
+		"two": handler,
+	})
+	defer cleanup()
+
+	patch := `{"metadata":{"labels":{"kcp-context":"one,two"}}}`
+	response := serve(p, http.MethodPatch, "/api/v1/configmaps", patch)
+	if response.Code != http.StatusOK || len(bodies) != 2 {
+		t.Fatalf("response = %d, bodies = %v", response.Code, bodies)
+	}
+	for _, body := range bodies {
+		if body != patch {
+			t.Fatalf("forwarded body = %s", body)
+		}
 	}
 }
 
@@ -518,7 +700,7 @@ func TestAggregateHelpers(t *testing.T) {
 		{target: Target{Name: "one"}, body: []byte(`{"items":[{"metadata":{"name":"one"}}]}`)},
 		{target: Target{Name: "two"}, body: []byte(`{"items":[{"metadata":{"name":"two"}}]}`)},
 	})
-	if err != nil || !contains(string(merged), `"two"`) || !contains(string(merged), sourceContextLabel) {
+	if err != nil || !contains(string(merged), `"two"`) || !contains(string(merged), `"kcp-context"`) {
 		t.Fatalf("mergeLists() = %s, %v", merged, err)
 	}
 }
@@ -910,16 +1092,29 @@ func TestMutationExistingObjectErrors(t *testing.T) {
 			t.Fatalf("response = %d %s", response.Code, response.Body.String())
 		}
 	})
-	t.Run("existing annotation selects target", func(t *testing.T) {
+	t.Run("existing target-context annotation selects target", func(t *testing.T) {
 		calls := &callLog{}
 		p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
-			"one": calls.handler("one", `{"metadata":{"annotations":{"kubeconfig-proxy.io/context-name":"two"}}}`),
+			"one": calls.handler("one", `{"metadata":{"annotations":{"kubeconfig-proxy.io/target-context":"two"}}}`),
 			"two": calls.handler("two", `{"metadata":{"name":"demo"}}`),
 		})
 		defer cleanup()
 		response := serve(p, http.MethodPatch, "/api/v1/configmaps/demo", `{}`)
 		callsByContext := calls.names()
 		if response.Code != http.StatusOK || len(callsByContext) != 3 || strings.Count(strings.Join(callsByContext, ","), "two") != 2 {
+			t.Fatalf("response = %d calls = %v", response.Code, calls.names())
+		}
+	})
+	t.Run("existing target-context annotation selects targets", func(t *testing.T) {
+		calls := &callLog{}
+		p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+			"one": calls.handler("one", `{"metadata":{"annotations":{"kubeconfig-proxy.io/target-context":"one,two"}}}`),
+			"two": calls.handler("two", `{"metadata":{"name":"demo"}}`),
+		})
+		defer cleanup()
+		response := serve(p, http.MethodPatch, "/api/v1/configmaps/demo", `{}`)
+		callsByContext := strings.Join(calls.names(), ",")
+		if response.Code != http.StatusOK || strings.Count(callsByContext, "one") != 2 || strings.Count(callsByContext, "two") != 2 {
 			t.Fatalf("response = %d calls = %v", response.Code, calls.names())
 		}
 	})

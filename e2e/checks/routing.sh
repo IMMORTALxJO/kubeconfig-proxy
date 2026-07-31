@@ -10,6 +10,12 @@ apply_manifest() {
   kubectl_ctx "$ctx" apply -f "$file"
 }
 
+replace_manifest() {
+  local ctx="$1"
+  local file="$2"
+  kubectl_ctx "$ctx" replace -f "$file"
+}
+
 write_configmap_manifest() {
   local file="$1"
   local name="$2"
@@ -27,15 +33,18 @@ EOF_MANIFEST
 }
 
 run_routing_checks() {
-  local target_b_manifest="$TMP_DIR/context-name.yaml"
+  local target_b_manifest="$TMP_DIR/target-context.yaml"
+  local target_all_manifest="$TMP_DIR/target-context-all.yaml"
   local single_manifest="$TMP_DIR/single-context.yaml"
-  local named_get_value
+  local named_get_contexts
   local patch_value
+  local target_b_virtual_label
   local readonly_output
   local debug_container="debugger"
   local debug_name
   local fanout_name
   local target_b_name
+  local target_all_name
   local single_name
   local delete_a_name
   local debug_pod_name
@@ -43,6 +52,7 @@ run_routing_checks() {
 
   fanout_name="$(e2e_resource_name fanout)"
   target_b_name="$(e2e_resource_name target-b)"
+  target_all_name="$(e2e_resource_name target-all)"
   single_name="$(e2e_resource_name single)"
   delete_a_name="$(e2e_resource_name delete-a)"
   debug_pod_name="$(e2e_resource_name debug-pod)"
@@ -52,17 +62,39 @@ run_routing_checks() {
   expect_exists "fan-out object exists in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap "$fanout_name"
   expect_exists "fan-out object exists in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap "$fanout_name"
 
-  write_configmap_manifest "$target_b_manifest" "$target_b_name" "  annotations:
-    kubeconfig-proxy.io/context-name: $CTX_B"
-  run_cmd "context-name routes create to kubeconfig-proxy-b" apply_manifest "$PROXY_CONTEXT" "$target_b_manifest"
-  expect_not_found "context-name object absent from kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap "$target_b_name"
-  expect_exists "context-name object exists in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap "$target_b_name"
-
-  named_get_value="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmap "$target_b_name" -o jsonpath='{.metadata.name}' 2>&1)"
-  if [[ "$named_get_value" == "$target_b_name" ]]; then
-    add_result "PASS" "named GET routes to cluster containing object" "found object through proxy"
+  write_configmap_manifest "$target_b_manifest" "$target_b_name" "  labels:
+    kcp-context: proxy-only
+  annotations:
+    kubeconfig-proxy.io/target-context: $CTX_B"
+  run_cmd "target-context routes create to kubeconfig-proxy-b" apply_manifest "$PROXY_CONTEXT" "$target_b_manifest"
+  expect_not_found "target-context object absent from kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap "$target_b_name"
+  expect_exists "target-context object exists in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap "$target_b_name"
+  target_b_virtual_label="$(kubectl_ctx "$CTX_B" -n "$NS" get configmap "$target_b_name" -o jsonpath='{.metadata.labels.kcp-context}' 2>&1)"
+  if [[ -z "$target_b_virtual_label" ]]; then
+    add_result "PASS" "target-context strips virtual label before forwarding" "kcp-context is absent upstream"
   else
-    add_result "FAIL" "named GET routes to cluster containing object" "$named_get_value"
+    add_result "FAIL" "target-context strips virtual label before forwarding" "$target_b_virtual_label"
+  fi
+
+  run_cmd "target-context strips virtual label before forwarding PUT" replace_manifest "$PROXY_CONTEXT" "$target_b_manifest"
+  target_b_virtual_label="$(kubectl_ctx "$CTX_B" -n "$NS" get configmap "$target_b_name" -o jsonpath='{.metadata.labels.kcp-context}' 2>&1)"
+  if [[ -z "$target_b_virtual_label" ]]; then
+    add_result "PASS" "target-context strips virtual label before forwarding PUT" "kcp-context is absent upstream"
+  else
+    add_result "FAIL" "target-context strips virtual label before forwarding PUT" "$target_b_virtual_label"
+  fi
+
+  write_configmap_manifest "$target_all_manifest" "$target_all_name" "  annotations:
+    kubeconfig-proxy.io/target-context: $CTX_A, $CTX_B"
+  run_cmd "target-context routes create to both contexts" apply_manifest "$PROXY_CONTEXT" "$target_all_manifest"
+  expect_exists "target-context object exists in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$NS" get configmap "$target_all_name"
+  expect_exists "target-context object exists in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" get configmap "$target_all_name"
+
+  named_get_contexts="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmap "$target_all_name" -o jsonpath='{.metadata.labels.kcp-context}' 2>&1)"
+  if [[ "$named_get_contexts" == "$CTX_A,$CTX_B" ]]; then
+    add_result "PASS" "named GET lists contexts containing object" "$named_get_contexts"
+  else
+    add_result "FAIL" "named GET lists contexts containing object" "$named_get_contexts"
   fi
 
   write_configmap_manifest "$single_manifest" "$single_name" "  annotations:

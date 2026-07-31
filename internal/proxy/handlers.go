@@ -24,10 +24,21 @@ func (p *Proxy) forwardSingle(w http.ResponseWriter, r *http.Request, target Tar
 func (p *Proxy) forwardNamedGet(w http.ResponseWriter, r *http.Request) {
 	responses := p.probe(r.Context(), r, r.URL.Path)
 	if response, ok := p.firstSuccess(responses); ok {
+		response.body = markNamedGetBody(response.body, successfulContextNames(responses))
 		writeResponse(w, response)
 		return
 	}
 	writeTargetFailure(w, firstFailure(responses))
+}
+
+func successfulContextNames(responses []upstreamResponse) string {
+	names := make([]string, 0, len(responses))
+	for _, response := range responses {
+		if response.err == nil && response.status >= 200 && response.status < 300 {
+			names = append(names, response.target.Name)
+		}
+	}
+	return strings.Join(names, ",")
 }
 
 func (p *Proxy) forwardPodStream(w http.ResponseWriter, r *http.Request) {
@@ -91,6 +102,9 @@ func (p *Proxy) forwardMutation(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeStatus(w, http.StatusRequestEntityTooLarge, err.Error())
 		return
+	}
+	if r.Method == http.MethodPost || r.Method == http.MethodPut {
+		body = withoutVirtualContextLabel(body)
 	}
 	targets, err := p.mutationTargets(r.Context(), r, body)
 	if err != nil {
@@ -172,21 +186,39 @@ func needsExistingObject(method string, resource resourcePath) bool {
 }
 
 func (p *Proxy) annotationTargets(values map[string]string, existing bool) ([]Target, bool, error) {
-	if name := values[contextNameAnnotation]; name != "" {
+	if contexts, ok := values[targetContextAnnotation]; ok {
+		targets, err := p.contextTargets(contexts, existing)
+		return targets, true, err
+	}
+	if strings.EqualFold(values[singleContextAnnotation], "true") {
+		return []Target{p.primary}, true, nil
+	}
+	return nil, false, nil
+}
+
+func (p *Proxy) contextTargets(contexts string, existing bool) ([]Target, error) {
+	targets := make([]Target, 0, len(p.targets))
+	seen := make(map[string]struct{}, len(p.targets))
+	for _, value := range strings.Split(contexts, ",") {
+		name := strings.TrimSpace(value)
+		if name == "" {
+			return nil, fmt.Errorf("target-context annotation contains an empty context name")
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
 		target, ok := p.target(name)
 		if !ok {
 			prefix := ""
 			if existing {
 				prefix = " on existing object"
 			}
-			return nil, true, fmt.Errorf("context %q%s is not configured", name, prefix)
+			return nil, fmt.Errorf("context %q%s is not configured", name, prefix)
 		}
-		return []Target{target}, true, nil
+		seen[name] = struct{}{}
+		targets = append(targets, target)
 	}
-	if strings.EqualFold(values[singleContextAnnotation], "true") {
-		return []Target{p.primary}, true, nil
-	}
-	return nil, false, nil
+	return targets, nil
 }
 
 func (p *Proxy) existingAnnotationTargets(responses []upstreamResponse) ([]Target, bool, error) {
@@ -244,6 +276,53 @@ func annotations(body []byte) map[string]string {
 		}
 	}
 	return result
+}
+
+func withoutVirtualContextLabel(body []byte) []byte {
+	var value any
+	if json.Unmarshal(body, &value) != nil {
+		jsonBody, err := yaml.YAMLToJSON(body)
+		if err != nil || json.Unmarshal(jsonBody, &value) != nil {
+			return body
+		}
+	}
+	strippedValue, changed := removeVirtualContextLabel(value)
+	if !changed {
+		return body
+	}
+	stripped, err := json.Marshal(strippedValue)
+	if err != nil {
+		return body
+	}
+	return stripped
+}
+
+func removeVirtualContextLabel(value any) (any, bool) {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return value, false
+	}
+	return object, removeVirtualContextLabelFromObject(object)
+}
+
+func removeVirtualContextLabelFromObject(object map[string]any) bool {
+	metadata, ok := object["metadata"].(map[string]any)
+	if !ok {
+		return false
+	}
+	return removeVirtualContextLabelFromMetadata(metadata)
+}
+
+func removeVirtualContextLabelFromMetadata(metadata map[string]any) bool {
+	labels, ok := metadata["labels"].(map[string]any)
+	if !ok {
+		return false
+	}
+	if _, ok := labels[sourceContextLabel]; !ok {
+		return false
+	}
+	delete(labels, sourceContextLabel)
+	return true
 }
 
 func rewriteIdentity(body, currentBody []byte) ([]byte, error) {
