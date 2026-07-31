@@ -39,11 +39,25 @@ curl -fsSL https://raw.githubusercontent.com/IMMORTALxJO/kubeconfig-proxy/master
 
 ## Quick Start
 
-Create a proxy context from the default kubeconfig, then use it:
+Add `proxy-context` to your kubeconfig:
 
 ```bash
-kubeconfig-proxy add-context prod-proxy
-kubectl --context prod-proxy get pods -A -L context
+kubeconfig-proxy add-context proxy-context \
+  --contexts prod-a,prod-b
+```
+
+> To block mutating requests, add `--read-only`.
+
+Work through the proxy context:
+
+```bash
+kubectl get pods -A -L context --context proxy-context
+```
+
+If you no longer need it, remove the context and its state artifacts:
+
+```bash
+kubeconfig-proxy delete-context proxy-context
 ```
 
 ## How It Works
