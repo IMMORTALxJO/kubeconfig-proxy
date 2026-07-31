@@ -163,7 +163,7 @@ The runner covers the first integration ring for this project:
 - Collision-resistant default state paths for context names that sanitize alike.
 - Fan-out create mutations.
 - `kubeconfig-proxy.io/context-name` single-target routing.
-- `kubeconfig-proxy.io/single-context` routing to the alphabetically first target.
+- `kubeconfig-proxy.io/single-context` routing to the primary target.
 - Named GET routing to the source cluster that contains the object.
 - `kubectl logs` routing to the cluster that contains the pod.
 - `kubectl exec` routing to the cluster that contains the pod.
@@ -172,7 +172,9 @@ The runner covers the first integration ring for this project:
 - `kubectl debug` routing its ephemeral-container mutation to the cluster that
   contains the pod.
 - `kubectl rollout restart` and `kubectl rollout status` for matching
-  deployments in both source clusters.
+  deployments in both source clusters. Identically named deployments retain
+  ordinary Kubernetes watch identity, so one status request is not asserted as
+  a cross-context readiness barrier.
 - Multi-cluster `kubectl get -w` events from both source clusters.
 - PATCH routing based on the existing object when the patch body has no annotations.
 - DELETE routing only to clusters where the named object exists.

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,6 +10,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 )
 
 func TestSingleContextMutationUsesPrimary(t *testing.T) {
@@ -279,7 +285,7 @@ func TestNamedCollectionWatchUsesOnlyFoundContexts(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if got := watchPaths["one"]; !strings.HasPrefix(got, "/api/v1/namespaces/default/configmaps/demo?") || strings.Contains(got, "fieldSelector") || !strings.Contains(got, "resourceVersion=10") {
+	if got := watchPaths["one"]; !strings.HasPrefix(got, "/api/v1/namespaces/default/configmaps?") || !strings.Contains(got, "fieldSelector=metadata.name%3Ddemo") || !strings.Contains(got, "resourceVersion=10") {
 		t.Fatalf("one watch = %q", got)
 	}
 	if got := watchPaths["two"]; got != "" {
@@ -298,8 +304,8 @@ func TestNamedWatchRequest(t *testing.T) {
 	if !ok {
 		t.Fatal("collection watch was not classified as named")
 	}
-	if request.URL.Path != "/api/v1/configmaps/demo" || request.URL.Query().Get("fieldSelector") != "" {
-		t.Fatalf("named collection request = %s, %t", request.URL.String(), ok)
+	if request != collection {
+		t.Fatalf("named collection request = %v, want original request", request)
 	}
 
 	for _, path := range []string{
@@ -559,6 +565,60 @@ func TestAggregateWatchForwardsAndMarksEvents(t *testing.T) {
 	response := serve(p, http.MethodGet, "/api/v1/configmaps?watch=true", "")
 	if response.Code != http.StatusOK || !contains(response.Body.String(), `"one"`) || !contains(response.Body.String(), `"two"`) || !contains(response.Body.String(), sourceContextAnnotation) {
 		t.Fatalf("watch response = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestAggregateWatchDecodesNamedDeploymentEventsWithDynamicClient(t *testing.T) {
+	watchPaths := make(chan string, 2)
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("watch") != "true" {
+				_, _ = w.Write([]byte(`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"demo","resourceVersion":"10"}}`))
+				return
+			}
+			watchPaths <- r.URL.Path + "?" + r.URL.RawQuery
+			if strings.HasSuffix(r.URL.Path, "/demo") {
+				_, _ = w.Write([]byte(`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"demo"}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json;stream=watch")
+			_, _ = w.Write([]byte(`{"type":"ADDED","object":{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"demo"}}}` + "\n"))
+		},
+		"two": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("watch") != "true" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			watchPaths <- r.URL.Path + "?" + r.URL.RawQuery
+			w.Header().Set("Content-Type", "application/json;stream=watch")
+			_, _ = w.Write([]byte(`{"type":"ADDED","object":{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"demo"}}}` + "\n"))
+		},
+	})
+	defer cleanup()
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+	client, err := dynamic.NewForConfig(&rest.Config{Host: proxyServer.URL, BearerToken: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	watcher, err := client.Resource(schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}).Namespace("default").Watch(context.Background(), metav1.ListOptions{FieldSelector: "metadata.name=demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Stop()
+
+	event := <-watcher.ResultChan()
+	if event.Type != "ADDED" || event.Object == nil {
+		t.Fatalf("event = %#v", event)
+	}
+	select {
+	case watchPath := <-watchPaths:
+		if got, want := watchPath, "/apis/apps/v1/namespaces/default/deployments?fieldSelector=metadata.name%3Ddemo&resourceVersion=10&watch=true"; got != want {
+			t.Fatalf("watch path = %q, want %q", got, want)
+		}
+	default:
+		t.Fatal("watch request was not sent")
 	}
 }
 

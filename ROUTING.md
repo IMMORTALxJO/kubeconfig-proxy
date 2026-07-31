@@ -103,6 +103,10 @@ not silently return a partial list.
 
 The initial upstream-open failure must identify its context.  Successful streams
 are not buffered and are not subject to the ordinary request timeout.
+Identically named objects from separate contexts retain their ordinary
+Kubernetes identity (`namespace` and `name`); source markers do not create a
+distinct client-side cache key.  A named watch, including `kubectl rollout
+status`, is therefore not a cross-context readiness barrier.
 
 ### Named object reads
 
