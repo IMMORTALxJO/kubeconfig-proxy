@@ -13,7 +13,7 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: {{ .Chart.Name }}-nginx
+        app.kubernetes.io/name: {{ if .Values.namePrefix }}{{ .Values.namePrefix }}-{{ end }}{{ .Chart.Name }}-nginx
         app.kubernetes.io/part-of: {{ .Chart.Name }}
     spec:
       containers:
