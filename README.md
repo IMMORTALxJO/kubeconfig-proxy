@@ -37,6 +37,29 @@ verifies it with `checksums.txt`, and installs `kubeconfig-proxy` to
 curl -fsSL https://raw.githubusercontent.com/IMMORTALxJO/kubeconfig-proxy/master/install.sh | KUBECONFIG_PROXY_VERSION=v0.0.5 INSTALL_DIR="$HOME/.local/bin" sh
 ```
 
+## Quick Start
+
+Add `proxy-context` to your kubeconfig:
+
+```bash
+kubeconfig-proxy add-context proxy-context \
+  --contexts prod-a,prod-b
+```
+
+> To block mutating requests, add `--read-only`.
+
+Work through the proxy context:
+
+```bash
+kubectl get pods -A -L context --context proxy-context
+```
+
+If you no longer need it, remove the context and its state artifacts:
+
+```bash
+kubeconfig-proxy delete-context proxy-context
+```
+
 ## How It Works
 
 The proxy keeps a list of source contexts from the original kubeconfig. Requests
@@ -69,23 +92,7 @@ you can display the source cluster directly:
 kubectl get pods -A -L context
 ```
 
-## Quick Start
-
-Add an auto-started proxy context to your current kubeconfig:
-
-```bash
-kubeconfig-proxy add-context prod-proxy \
-  --kubeconfig ~/.kube/config \
-  --contexts prod-a,prod-b \
-  --primary-context prod-a \
-  --proxy-ttl 10m
-```
-
-Use it like any other kubeconfig context:
-
-```bash
-kubectl --context prod-proxy get pods -A -L context
-```
+## Proxy Context Lifecycle
 
 The generated `prod-proxy` context points to a local HTTPS endpoint and uses a
 kubeconfig exec credential command. When `kubectl` uses that context, it runs
@@ -117,17 +124,7 @@ to disable idle shutdown.
 Serve logs are disabled by default. Pass `--logs-enabled` to `add-context` to
 write auto-started `serve` output to `<state>.log`.
 
-Remove a generated proxy context and its state artifacts:
-
-```bash
-kubeconfig-proxy delete-context prod-proxy --kubeconfig ~/.kube/config
-```
-
-Show the CLI version:
-
-```bash
-kubeconfig-proxy version
-```
+## Selecting Source Contexts
 
 You can also select source contexts with a regular expression:
 
@@ -206,7 +203,7 @@ werf example.
 - `--request-timeout 30s` sets the timeout for one upstream Kubernetes API
   request. Use `0` to disable it.
 - `--retries 5` retries temporary upstream failures.
-- `--retry-backoff 500ms` sets the delay between retry attempts.
+- `--retry-backoff 200ms` sets the delay between retry attempts.
 - `--helm-release-proxy` enables Helm/werf release-history compatibility mode.
 - `--read-only` rejects create, update, patch, and delete requests with `403`.
 - `--logs-enabled` writes auto-started `serve` output to `<state>.log`.
