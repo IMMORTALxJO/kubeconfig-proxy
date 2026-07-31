@@ -565,6 +565,10 @@ func TestWithoutVirtualContextLabel(t *testing.T) {
 		wantUnchanged bool
 	}{
 		{name: "object", body: `{"metadata":{"labels":{"kcp-context":"one","keep":"value"}}}`},
+		{name: "yaml object", body: "metadata:\n  labels:\n    kcp-context: one\n    keep: value\n"},
+		{name: "without virtual label", body: `{"metadata":{"labels":{"keep":"value"}}}`, wantUnchanged: true},
+		{name: "without metadata", body: `{}`, wantUnchanged: true},
+		{name: "invalid body", body: "not: [valid", wantUnchanged: true},
 		{name: "json patch", body: `[{"op":"add","path":"/metadata/labels/kcp-context","value":"one"},{"op":"add","path":"/metadata/labels/keep","value":"value"}]`, wantUnchanged: true},
 	}
 	for _, test := range tests {
@@ -581,6 +585,54 @@ func TestWithoutVirtualContextLabel(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMarkNamedGetBody(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "object",
+			body: `{"metadata":{"labels":{"keep":"value"}}}`,
+			want: `"kcp-context":"one,two"`,
+		},
+		{
+			name: "table row",
+			body: `{"rows":[{"object":{"metadata":{"labels":{"keep":"value"}}}}]}`,
+			want: `"kcp-context":"one,two"`,
+		},
+		{
+			name: "invalid JSON",
+			body: "not JSON",
+			want: "not JSON",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := markNamedGetBody([]byte(test.body), "one,two")
+			if !contains(string(body), test.want) {
+				t.Fatalf("body = %s, want %q", body, test.want)
+			}
+		})
+	}
+}
+
+func TestMarkContextLabel(t *testing.T) {
+	entry := map[string]any{}
+	markContextLabel(entry, "one")
+	metadata, ok := entry["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata = %#v", entry["metadata"])
+	}
+	labels, ok := metadata["labels"].(map[string]any)
+	if !ok || labels[sourceContextLabel] != "one" {
+		t.Fatalf("labels = %#v", metadata["labels"])
+	}
+
+	markContextLabel("not an object", "one")
+	markEntry("not an object", "one")
 }
 
 func TestPatchPreservesVirtualContextLabel(t *testing.T) {
