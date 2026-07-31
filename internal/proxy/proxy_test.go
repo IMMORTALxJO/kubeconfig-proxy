@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
@@ -577,12 +578,8 @@ func TestAggregateWatchDecodesNamedDeploymentEventsWithDynamicClient(t *testing.
 				return
 			}
 			watchPaths <- r.URL.Path + "?" + r.URL.RawQuery
-			if strings.HasSuffix(r.URL.Path, "/demo") {
-				_, _ = w.Write([]byte(`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"demo"}}`))
-				return
-			}
 			w.Header().Set("Content-Type", "application/json;stream=watch")
-			_, _ = w.Write([]byte(`{"type":"ADDED","object":{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"demo"}}}` + "\n"))
+			_, _ = w.Write([]byte(`{"type":"MODIFIED","object":{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"demo"}}}` + "\n"))
 		},
 		"two": func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("watch") != "true" {
@@ -611,6 +608,10 @@ func TestAggregateWatchDecodesNamedDeploymentEventsWithDynamicClient(t *testing.
 	event := <-watcher.ResultChan()
 	if event.Type != "ADDED" || event.Object == nil {
 		t.Fatalf("event = %#v", event)
+	}
+	object, ok := event.Object.(*unstructured.Unstructured)
+	if !ok || object.GetAnnotations()[sourceContextAnnotation] != "one" {
+		t.Fatalf("initial event object = %#v", event.Object)
 	}
 	select {
 	case watchPath := <-watchPaths:
@@ -650,6 +651,9 @@ func TestNamedWatchOpensAllContexts(t *testing.T) {
 	response := serve(p, http.MethodGet, "/apis/apps/v1/namespaces/default/deployments/demo?watch=true&resourceVersion=10", "")
 	if response.Code != http.StatusOK {
 		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), `"type":"ADDED"`) {
+		t.Fatalf("watch response contains an unexpected initial event: %s", response.Body.String())
 	}
 	if got := watches.names(); len(got) != 2 || !contains(strings.Join(got, ","), "one") || !contains(strings.Join(got, ","), "two") {
 		t.Fatalf("watch calls = %v, want both contexts", got)

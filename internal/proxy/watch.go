@@ -62,6 +62,8 @@ func (p *Proxy) aggregateNamedWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	versions := make(map[string]string, len(targets))
+	initialEvents := make([][]byte, 0, len(targets))
+	shouldSendInitialEvents := r.URL.Query().Get("resourceVersion") == ""
 	for _, response := range responses {
 		if response.status < 200 || response.status >= 300 {
 			continue
@@ -72,8 +74,11 @@ func (p *Proxy) aggregateNamedWatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		versions[response.target.Name] = version
+		if shouldSendInitialEvents {
+			initialEvents = append(initialEvents, initialWatchEvent(response.body, response.target.Name))
+		}
 	}
-	aggregateWatchTargets(w, withAggregateResourceVersions(r, versions), targets)
+	aggregateWatchTargetsWithInitialEvents(w, withAggregateResourceVersions(r, versions), targets, initialEvents)
 }
 
 func namedWatchProbePath(r *http.Request, resource resourcePath) string {
@@ -85,6 +90,10 @@ func namedWatchProbePath(r *http.Request, resource resourcePath) string {
 }
 
 func aggregateWatchTargets(w http.ResponseWriter, r *http.Request, targets []Target) {
+	aggregateWatchTargetsWithInitialEvents(w, r, targets, nil)
+}
+
+func aggregateWatchTargetsWithInitialEvents(w http.ResponseWriter, r *http.Request, targets []Target, initialEvents [][]byte) {
 	streams, failure := openWatches(r.Context(), r, targets)
 	if failure.err != nil || failure.status < 200 || failure.status >= 300 {
 		for _, stream := range streams {
@@ -100,6 +109,14 @@ func aggregateWatchTargets(w http.ResponseWriter, r *http.Request, targets []Tar
 	}()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	for _, event := range initialEvents {
+		_, _ = w.Write(event)
+	}
+	if len(initialEvents) > 0 {
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
 	var writeMu sync.Mutex
 	var wg sync.WaitGroup
 	for _, stream := range streams {
@@ -108,6 +125,14 @@ func aggregateWatchTargets(w http.ResponseWriter, r *http.Request, targets []Tar
 		go func() { defer wg.Done(); copyWatch(r.Context(), w, &writeMu, stream) }()
 	}
 	wg.Wait()
+}
+
+func initialWatchEvent(body []byte, contextName string) []byte {
+	event := make([]byte, 0, len(body)+24)
+	event = append(event, `{"type":"ADDED","object":`...)
+	event = append(event, body...)
+	event = append(event, '}')
+	return markEvent(event, contextName)
 }
 
 func withAggregateResourceVersions(original *http.Request, versions map[string]string) *http.Request {
