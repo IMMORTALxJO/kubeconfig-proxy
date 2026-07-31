@@ -44,11 +44,11 @@ Treat routing behavior as the core product contract. Small changes in request cl
 ## Proxy Behavior Rules
 
 - Read/list/watch behavior must keep source context markers intact:
-  - annotation: `kubeconfig-proxy.io/context`
-  - virtual label: `context`
+  - annotation: `kubeconfig-proxy.io/source-context`
+  - virtual label: `kcp-context`
 - Mutations are dangerous. Tests should cover where a request is sent, not only the final HTTP status.
-- `kubeconfig-proxy.io/context-name` must route mutations to the named configured context.
-- `kubeconfig-proxy.io/single-context` must route mutations to the alphabetically first configured context unless `context-name` is present.
+- `kubeconfig-proxy.io/target-context` must route mutations to the named configured context.
+- `kubeconfig-proxy.io/single-context` must route mutations to the alphabetically first configured context unless `target-context` is present.
 - Named `PATCH` and `DELETE` must consider the existing object when request bodies do not carry routing annotations.
 - Read-only proxy contexts must reject `POST`, `PUT`, `PATCH`, and `DELETE` before upstream calls.
 - Discovery and primary-only behavior must stay predictable, especially for Helm/werf release storage compatibility.

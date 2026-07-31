@@ -86,20 +86,20 @@ kubectl --context kind-proxy get configmaps -o yaml
 Each aggregated item has this annotation:
 
 ```yaml
-kubeconfig-proxy.io/context: kind-kubeconfig-proxy-a
+kubeconfig-proxy.io/source-context: kind-kubeconfig-proxy-a
 ```
 
 or:
 
 ```yaml
-kubeconfig-proxy.io/context: kind-kubeconfig-proxy-b
+kubeconfig-proxy.io/source-context: kind-kubeconfig-proxy-b
 ```
 
-The proxy also injects a virtual `context` label into aggregated responses, so
+The proxy also injects a virtual `kcp-context` label into aggregated responses, so
 you can show the source context directly in table output:
 
 ```bash
-kubectl --context kind-proxy get configmaps -L context
+kubectl --context kind-proxy get configmaps -L kcp-context
 ```
 
 ## Test fan-out mutations
@@ -130,7 +130,7 @@ kind: ConfigMap
 metadata:
   name: context-name-demo
   annotations:
-    kubeconfig-proxy.io/context-name: kind-kubeconfig-proxy-b
+    kubeconfig-proxy.io/target-context: kind-kubeconfig-proxy-b
 data:
   value: only-b
 EOF

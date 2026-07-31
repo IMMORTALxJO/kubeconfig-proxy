@@ -51,7 +51,7 @@ kubeconfig-proxy add-context proxy-context \
 Work through the proxy context:
 
 ```bash
-kubectl get pods -A -L context --context proxy-context
+kubectl get pods -A -L kcp-context --context proxy-context
 ```
 
 If you no longer need it, remove the context and its state artifacts:
@@ -82,15 +82,18 @@ failure semantics, is in [ROUTING.md](ROUTING.md).
 Aggregated objects are marked with:
 
 ```yaml
-kubeconfig-proxy.io/context: <source-context>
+kubeconfig-proxy.io/source-context: <source-context>
 ```
 
-The proxy also injects a virtual `context` label into aggregated responses, so
+The proxy also injects a virtual `kcp-context` label into aggregated responses, so
 you can display the source cluster directly:
 
 ```bash
-kubectl get pods -A -L context
+kubectl get pods -A -L kcp-context
 ```
+
+For a named `GET`, the label contains a comma-separated list of every source
+context where the object exists.
 
 ## Proxy Context Lifecycle
 
@@ -141,15 +144,26 @@ when there is no current context, the first selected context is used.
 
 ## Resource Routing Annotations
 
-By default, mutating requests are sent to every selected context.
-
-To create or update a resource only in one specific source context, add:
+By default, mutating requests are sent to every selected context. To direct a
+mutation to one or more specific source contexts, add:
 
 ```yaml
 metadata:
   annotations:
-    kubeconfig-proxy.io/context-name: dev
+    kubeconfig-proxy.io/target-context: dev, prod
 ```
+
+Context names are comma-separated; surrounding whitespace is ignored and a
+repeated name is sent only once. An unknown or empty name causes a local `400`
+without any upstream call.
+
+`kubeconfig-proxy.io/source-context` on aggregated objects is a source-context marker
+only; it does not affect mutation routing.
+
+The proxy removes the virtual `kcp-context` label from ordinary manifest bodies
+sent with `POST` or `PUT`, so an object returned by the proxy can be used as a
+manifest without sending proxy-only metadata upstream. `PATCH` bodies are
+forwarded unchanged.
 
 To create or update a resource in any single context, add:
 
@@ -160,8 +174,7 @@ metadata:
 ```
 
 The selected context for `single-context` is the primary context. If both
-annotations are present,
-`kubeconfig-proxy.io/context-name` wins.
+routing annotations are present, `kubeconfig-proxy.io/target-context` wins.
 
 ## Helm And Werf
 

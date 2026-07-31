@@ -44,14 +44,14 @@ run_aggregation_checks() {
     done
   "
 
-  aggregate_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmaps -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.labels.context}{"\n"}{end}' 2>&1)"
+  aggregate_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmaps -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.labels.kcp-context}{"\n"}{end}' 2>&1)"
   if [[ "$aggregate_output" == *"$(e2e_resource_name only-a)=$CTX_A"* && "$aggregate_output" == *"$(e2e_resource_name only-b)=$CTX_B"* ]]; then
-    add_result "PASS" "aggregated list adds context labels" "saw prefixed resources in both contexts"
+    add_result "PASS" "aggregated list adds kcp-context labels" "saw prefixed resources in both contexts"
   else
-    add_result "FAIL" "aggregated list adds context labels" "$aggregate_output"
+    add_result "FAIL" "aggregated list adds kcp-context labels" "$aggregate_output"
   fi
 
-  selector_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmaps --selector="$AGGREGATION_TEST_SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.labels.context}{"\n"}{end}' 2>&1)"
+  selector_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmaps --selector="$AGGREGATION_TEST_SELECTOR" -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.labels.kcp-context}{"\n"}{end}' 2>&1)"
   selector_count="$(printf '%s\n' "$selector_output" | sed '/^$/d' | wc -l | tr -d ' ')"
   if [[ "$selector_count" == "20" ]] && has_all_aggregation_items "$selector_output"; then
     add_result "PASS" "aggregated selector list returns all test configmaps" "selector returned 20 items from both contexts"
@@ -59,7 +59,7 @@ run_aggregation_checks() {
     add_result "FAIL" "aggregated selector list returns all test configmaps" "$selector_output"
   fi
 
-  paginated_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmaps --selector="$AGGREGATION_TEST_SELECTOR" --chunk-size=1 -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.labels.context}{"\n"}{end}' 2>&1)"
+  paginated_output="$(kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmaps --selector="$AGGREGATION_TEST_SELECTOR" --chunk-size=1 -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.labels.kcp-context}{"\n"}{end}' 2>&1)"
   paginated_count="$(printf '%s\n' "$paginated_output" | sed '/^$/d' | wc -l | tr -d ' ')"
   if [[ "$paginated_count" == "20" ]] && has_all_aggregation_items "$paginated_output"; then
     add_result "PASS" "aggregated list pagination crosses target boundary" "chunk-size=1 returned 20 items from both contexts exactly once"
@@ -67,7 +67,7 @@ run_aggregation_checks() {
     add_result "FAIL" "aggregated list pagination crosses target boundary" "$paginated_output"
   fi
 
-  readonly_list_output="$(kubectl_ctx "$RO_PROXY_CONTEXT" -n "$NS" get configmaps -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.labels.context}{"\n"}{end}' 2>&1)"
+  readonly_list_output="$(kubectl_ctx "$RO_PROXY_CONTEXT" -n "$NS" get configmaps -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.labels.kcp-context}{"\n"}{end}' 2>&1)"
   if [[ "$readonly_list_output" == *"$(e2e_resource_name only-a)=$CTX_A"* && "$readonly_list_output" == *"$(e2e_resource_name only-b)=$CTX_B"* ]]; then
     add_result "PASS" "read-only proxy allows list reads" "saw prefixed resources in both contexts"
   else

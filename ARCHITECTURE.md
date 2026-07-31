@@ -200,8 +200,15 @@ ranges. This also preserves JSON `Table` negotiation for CLI output.
 
 For Kubernetes list objects and `Table` responses, each item is marked with:
 
-- annotation `kubeconfig-proxy.io/context`;
-- virtual label `context`.
+- annotation `kubeconfig-proxy.io/source-context`;
+- virtual label `kcp-context`.
+
+For mutations, `kubeconfig-proxy.io/target-context` can select one or more
+comma-separated configured target contexts. The response marker contains its
+single source context and does not affect mutation routing.
+
+For a named read, `kcp-context` contains the comma-separated configured
+contexts where the object was found.
 
 The proxy encodes per-target Kubernetes resource versions into one opaque
 aggregate resource version. A later watch decodes it and sends each target only
@@ -247,6 +254,11 @@ request/response APIs, is specified in [ROUTING.md](ROUTING.md). Routing
 annotations select one configured target; otherwise an existing named object
 can select its owning contexts, and ordinary persistent-resource mutations fan
 out.
+
+Before an ordinary manifest mutation sent with `POST` or `PUT` is forwarded,
+the proxy removes its virtual `kcp-context` label from the request body so
+proxy response metadata never becomes upstream resource metadata. `PATCH`
+bodies are forwarded unchanged.
 
 Named mutations and object-associated subresource mutations can lack routing
 annotations in their bodies. They therefore look up the owning object before

@@ -112,7 +112,7 @@ status`, is therefore not a cross-context readiness barrier.
 
 | Request pattern | Target | Result |
 | --- | --- | --- |
-| `GET {object-path}` | All contexts concurrently | If primary returns `2xx`, return that response.  Otherwise return the first `2xx` response in configured order. |
+| `GET {object-path}` | All contexts concurrently | If primary returns `2xx`, return that response. Otherwise return the first `2xx` response in configured order. Set `metadata.labels["kcp-context"]` to the comma-separated configured contexts that returned `2xx`. |
 
 If no context returns `2xx` and all contexts return `404`, return the primary
 context's normal `404` response.  If no object is found and any context has a
@@ -138,9 +138,10 @@ This group includes `POST` to a collection, `PUT`, `PATCH`, and `DELETE` for a
 Kubernetes resource, including cluster-scoped resources.  The target is chosen
 in this order:
 
-1. `metadata.annotations["kubeconfig-proxy.io/context-name"]` in the request
-   object selects exactly that configured context.  An unknown name is a local
-   `400` and makes no upstream call.
+1. `metadata.annotations["kubeconfig-proxy.io/target-context"]` selects the
+   comma-separated configured contexts. Surrounding whitespace is ignored,
+   repeated names are selected once, and an empty or unknown name is a local
+   `400` that makes no upstream call.
 2. Otherwise, `metadata.annotations["kubeconfig-proxy.io/single-context"] =
    "true"` selects the primary context.
 3. For a named `PATCH`, `DELETE`, or update whose body has no routing
@@ -181,9 +182,11 @@ annotation, they fan out to every configured context.
   mutations.
 - The proxy must preserve request method, path, query parameters, Kubernetes
   content negotiation, and upstream authentication.  It removes only the
-  local proxy bearer token before forwarding.
+  local proxy bearer token and removes the virtual `kcp-context` label from
+  ordinary manifest bodies sent with `POST` or `PUT`. `PATCH` bodies are
+  preserved unchanged.
 - List and watch merging may rewrite objects only to add
-  `kubeconfig-proxy.io/context` and the virtual `context` label, plus opaque
+  `kubeconfig-proxy.io/source-context` and the virtual `kcp-context` label, plus opaque
   aggregate pagination/resource-version values.  Other fields remain upstream
   data.
 - Read-only rejection, body-size limits, retry policy, and TLS/authentication

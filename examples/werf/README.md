@@ -73,7 +73,7 @@ The nginx Deployment should exist in both clusters:
 
 ```bash
 kubectl --context kind-proxy \
-  -n kubeconfig-proxy-werf-kind get deploy,svc -L context
+  -n kubeconfig-proxy-werf-kind get deploy,svc -L kcp-context
 ```
 
 Expected result: nginx resources are visible twice, once from
@@ -96,7 +96,7 @@ The Job should exist only in `kind-kubeconfig-proxy-a`, because
 
 ```bash
 kubectl --context kind-proxy \
-  -n kubeconfig-proxy-werf-kind get job -L context
+  -n kubeconfig-proxy-werf-kind get job -L kcp-context
 ```
 
 Direct cluster checks:
@@ -118,7 +118,7 @@ To force the Job into a specific context instead, replace the Job annotation in
 [.helm/templates/job.yaml](.helm/templates/job.yaml):
 
 ```yaml
-kubeconfig-proxy.io/context-name: kind-kubeconfig-proxy-b
+kubeconfig-proxy.io/target-context: kind-kubeconfig-proxy-b
 ```
 
 ## Cleanup

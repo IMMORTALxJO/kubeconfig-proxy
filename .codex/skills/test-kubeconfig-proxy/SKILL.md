@@ -157,14 +157,15 @@ The runner covers the first integration ring for this project:
   `kind-kubeconfig-proxy-a` and `kind-kubeconfig-proxy-b`.
 - Proxy context creation, explicit coverage-instrumented serve process, and
   exec-credential access.
-- Aggregated list responses with the virtual `context` label.
+- Aggregated list responses with the virtual `kcp-context` label.
 - Aggregated list pagination with a global limit and cross-context continuation.
 - Duplicate source-context rejection before proxy state is written.
 - Collision-resistant default state paths for context names that sanitize alike.
 - Fan-out create mutations.
-- `kubeconfig-proxy.io/context-name` single-target routing.
+- `POST` and `PUT` manifest bodies with the virtual `kcp-context` label stripped before forwarding.
+- `kubeconfig-proxy.io/target-context` routing to one or more targets.
 - `kubeconfig-proxy.io/single-context` routing to the primary target.
-- Named GET routing to the source cluster that contains the object.
+- Named GET responses whose `kcp-context` label lists the contexts containing the object.
 - `kubectl logs` routing to the cluster that contains the pod.
 - `kubectl exec` routing to the cluster that contains the pod.
 - `kubectl attach` and `kubectl port-forward` routing to the cluster that
