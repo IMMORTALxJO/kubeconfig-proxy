@@ -652,6 +652,9 @@ func TestNamedWatchOpensAllContexts(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("response = %d %s", response.Code, response.Body.String())
 	}
+	if strings.Contains(response.Body.String(), `"type":"ADDED"`) {
+		t.Fatalf("watch response contains an unexpected initial event: %s", response.Body.String())
+	}
 	if got := watches.names(); len(got) != 2 || !contains(strings.Join(got, ","), "one") || !contains(strings.Join(got, ","), "two") {
 		t.Fatalf("watch calls = %v, want both contexts", got)
 	}

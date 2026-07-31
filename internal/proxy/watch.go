@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	neturl "net/url"
 	"strings"
@@ -76,12 +75,7 @@ func (p *Proxy) aggregateNamedWatch(w http.ResponseWriter, r *http.Request) {
 		}
 		versions[response.target.Name] = version
 		if shouldSendInitialEvents {
-			event, err := initialWatchEvent(response.body, response.target.Name)
-			if err != nil {
-				writeStatus(w, http.StatusBadGateway, response.target.Name+": "+err.Error())
-				return
-			}
-			initialEvents = append(initialEvents, event)
+			initialEvents = append(initialEvents, initialWatchEvent(response.body, response.target.Name))
 		}
 	}
 	aggregateWatchTargetsWithInitialEvents(w, withAggregateResourceVersions(r, versions), targets, initialEvents)
@@ -133,18 +127,12 @@ func aggregateWatchTargetsWithInitialEvents(w http.ResponseWriter, r *http.Reque
 	wg.Wait()
 }
 
-func initialWatchEvent(body []byte, contextName string) ([]byte, error) {
-	var object any
-	if err := json.Unmarshal(body, &object); err != nil {
-		return nil, fmt.Errorf("decode initial watch object: %w", err)
-	}
-	event := map[string]any{"type": "ADDED", "object": object}
-	markEntry(event["object"], contextName)
-	result, err := json.Marshal(event)
-	if err != nil {
-		return nil, fmt.Errorf("encode initial watch event: %w", err)
-	}
-	return append(result, '\n'), nil
+func initialWatchEvent(body []byte, contextName string) []byte {
+	event := make([]byte, 0, len(body)+24)
+	event = append(event, `{"type":"ADDED","object":`...)
+	event = append(event, body...)
+	event = append(event, '}')
+	return markEvent(event, contextName)
 }
 
 func withAggregateResourceVersions(original *http.Request, versions map[string]string) *http.Request {
