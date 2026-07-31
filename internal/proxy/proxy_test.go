@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -1120,6 +1122,167 @@ func TestMutationExistingObjectErrors(t *testing.T) {
 	})
 }
 
+func TestAggregatePageFailureResponses(t *testing.T) {
+	t.Run("missing resource version", func(t *testing.T) {
+		p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+			"one": func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"items":[]}`)) },
+			"two": func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"items":[]}`)) },
+		})
+		defer cleanup()
+
+		response := serve(p, http.MethodGet, "/api/v1/configmaps?limit=1", "")
+		if response.Code != http.StatusBadGateway || !contains(response.Body.String(), "one: list response has no resource version") {
+			t.Fatalf("response = %d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("page upstream failure", func(t *testing.T) {
+		handler := func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("resourceVersion") == "" {
+				_, _ = w.Write([]byte(`{"metadata":{"resourceVersion":"7"},"items":[]}`))
+				return
+			}
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{"one": handler, "two": handler})
+		defer cleanup()
+
+		response := serve(p, http.MethodGet, "/api/v1/configmaps?limit=1", "")
+		if response.Code != http.StatusServiceUnavailable || !contains(response.Body.String(), "one: upstream returned HTTP Service Unavailable") {
+			t.Fatalf("response = %d %s", response.Code, response.Body.String())
+		}
+	})
+}
+
+func TestRequestTargetHandlesBodyFailuresAndCanceledRetry(t *testing.T) {
+	host, err := url.Parse("https://target.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("response body read error", func(t *testing.T) {
+		target := Target{Name: "one", Host: host, Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(errorReader{err: errors.New("read failed")})}, nil
+		})}}
+		p, err := NewWithOptions([]Target{target}, target, Options{BearerToken: "test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		response := serve(p, http.MethodGet, "/version", "")
+		if response.Code != http.StatusBadGateway || !contains(response.Body.String(), "one: read failed") {
+			t.Fatalf("response = %d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("canceled retry backoff", func(t *testing.T) {
+		attempts := 0
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		target := Target{Name: "one", Host: host, Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts++
+			cancel()
+			return nil, errors.New("upstream unavailable")
+		})}}
+		p, err := NewWithOptions([]Target{target}, target, Options{BearerToken: "test", Retries: 1, RetryBackoff: time.Hour})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		response := p.requestTarget(ctx, target, httptest.NewRequest(http.MethodGet, "/api/v1/configmaps", http.NoBody), nil)
+		if !errors.Is(response.err, context.Canceled) || attempts != 1 {
+			t.Fatalf("response error = %v, attempts = %d", response.err, attempts)
+		}
+	})
+
+	if _, err := readBody(strings.NewReader("oversized"), 3); !errors.Is(err, io.ErrShortBuffer) {
+		t.Fatalf("readBody error = %v, want %v", err, io.ErrShortBuffer)
+	}
+}
+
+func TestNewWithOptionsRejectsInvalidConfiguration(t *testing.T) {
+	host, err := url.Parse("https://target.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newTarget := func(name string) Target {
+		return Target{Name: name, Host: host, Client: &http.Client{}}
+	}
+	one := newTarget("one")
+	two := newTarget("two")
+
+	tests := []struct {
+		name    string
+		targets []Target
+		primary Target
+		options Options
+	}{
+		{name: "no targets", primary: one, options: Options{BearerToken: "test"}},
+		{name: "empty bearer token", targets: []Target{one}, primary: one},
+		{name: "empty target name", targets: []Target{{Host: host, Client: &http.Client{}}}, primary: one, options: Options{BearerToken: "test"}},
+		{name: "missing target host", targets: []Target{{Name: "one", Client: &http.Client{}}}, primary: one, options: Options{BearerToken: "test"}},
+		{name: "missing target client", targets: []Target{{Name: "one", Host: host}}, primary: one, options: Options{BearerToken: "test"}},
+		{name: "duplicate target", targets: []Target{one, one}, primary: one, options: Options{BearerToken: "test"}},
+		{name: "primary not selected", targets: []Target{one}, primary: two, options: Options{BearerToken: "test"}},
+		{name: "negative retries", targets: []Target{one}, primary: one, options: Options{BearerToken: "test", Retries: -1}},
+		{name: "negative timeout", targets: []Target{one}, primary: one, options: Options{BearerToken: "test", RequestTimeout: -time.Second}},
+		{name: "negative retry backoff", targets: []Target{one}, primary: one, options: Options{BearerToken: "test", RetryBackoff: -time.Second}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewWithOptions(test.targets, test.primary, test.options); err == nil {
+				t.Fatal("NewWithOptions error = nil")
+			}
+		})
+	}
+}
+
+func TestMutationRoutesYAMLTargetContextAndRewritesEachPUT(t *testing.T) {
+	t.Run("YAML target context", func(t *testing.T) {
+		calls := &callLog{}
+		p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+			"one": calls.handler("one", `{"metadata":{"name":"demo"}}`),
+			"two": calls.handler("two", `{"metadata":{"name":"demo"}}`),
+		})
+		defer cleanup()
+
+		response := serve(p, http.MethodPost, "/api/v1/configmaps", "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  annotations:\n    kubeconfig-proxy.io/target-context: two\n")
+		if response.Code != http.StatusOK || strings.Join(calls.names(), ",") != "two" {
+			t.Fatalf("response = %d calls = %v", response.Code, calls.names())
+		}
+	})
+
+	t.Run("PUT uses each target identity", func(t *testing.T) {
+		var mu sync.Mutex
+		putBodies := make(map[string]string)
+		handler := func(name, uid, resourceVersion string) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					_, _ = w.Write([]byte(`{"metadata":{"uid":"` + uid + `","resourceVersion":"` + resourceVersion + `"}}`))
+					return
+				}
+				body, _ := readBody(r.Body, maxBodyBytes)
+				mu.Lock()
+				putBodies[name] = string(body)
+				mu.Unlock()
+				_, _ = w.Write([]byte(`{"metadata":{"name":"demo"}}`))
+			}
+		}
+		p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+			"one": handler("one", "uid-one", "1"),
+			"two": handler("two", "uid-two", "2"),
+		})
+		defer cleanup()
+
+		response := serve(p, http.MethodPut, "/api/v1/configmaps/demo", `{"metadata":{"name":"demo","annotations":{"kubeconfig-proxy.io/target-context":"one,two"}}}`)
+		mu.Lock()
+		defer mu.Unlock()
+		if response.Code != http.StatusOK || !contains(putBodies["one"], `"uid":"uid-one"`) || !contains(putBodies["one"], `"resourceVersion":"1"`) || contains(putBodies["one"], `"uid":"uid-two"`) || !contains(putBodies["two"], `"uid":"uid-two"`) || !contains(putBodies["two"], `"resourceVersion":"2"`) || contains(putBodies["two"], `"uid":"uid-one"`) {
+			t.Fatalf("response = %d bodies = %#v", response.Code, putBodies)
+		}
+	})
+}
+
 type callLog struct {
 	mu     sync.Mutex
 	values []string
@@ -1129,6 +1292,14 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return f(request)
+}
+
+type errorReader struct {
+	err error
+}
+
+func (r errorReader) Read([]byte) (int, error) {
+	return 0, r.err
 }
 
 type closeTrackingBody struct {
