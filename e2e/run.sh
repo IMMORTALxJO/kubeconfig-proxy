@@ -739,8 +739,6 @@ if is_check_selected werf; then
   run_werf_checks
 fi
 
-cleanup_test_resources
-
 if [[ "$HAD_FAILURE" -ne 0 ]]; then
   exit 1
 fi

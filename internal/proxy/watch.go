@@ -34,18 +34,10 @@ func namedWatchRequest(original *http.Request, resource resourcePath) (*http.Req
 	if !resource.isCollection {
 		return nil, false
 	}
-	name, ok := namedFieldSelector(original.URL.Query().Get("fieldSelector"))
-	if !ok {
+	if _, ok := namedFieldSelector(original.URL.Query().Get("fieldSelector")); !ok {
 		return nil, false
 	}
-	request := original.Clone(original.Context())
-	url := *original.URL
-	url.Path = strings.TrimSuffix(url.Path, "/") + "/" + neturl.PathEscape(name)
-	query := url.Query()
-	query.Del("fieldSelector")
-	url.RawQuery = query.Encode()
-	request.URL = &url
-	return request, true
+	return original, true
 }
 
 func namedFieldSelector(value string) (string, bool) {
@@ -59,7 +51,7 @@ func namedFieldSelector(value string) (string, bool) {
 
 func (p *Proxy) aggregateNamedWatch(w http.ResponseWriter, r *http.Request) {
 	resource := parseResourcePath(r.URL.Path)
-	responses := p.probe(r.Context(), r, resource.ownerPath)
+	responses := p.probe(r.Context(), r, namedWatchProbePath(r, resource))
 	targets, err := foundTargets(responses)
 	if err != nil {
 		writeStatus(w, http.StatusBadGateway, err.Error())
@@ -82,6 +74,14 @@ func (p *Proxy) aggregateNamedWatch(w http.ResponseWriter, r *http.Request) {
 		versions[response.target.Name] = version
 	}
 	aggregateWatchTargets(w, withAggregateResourceVersions(r, versions), targets)
+}
+
+func namedWatchProbePath(r *http.Request, resource resourcePath) string {
+	if resource.isObject {
+		return resource.ownerPath
+	}
+	name, _ := namedFieldSelector(r.URL.Query().Get("fieldSelector"))
+	return strings.TrimSuffix(r.URL.Path, "/") + "/" + neturl.PathEscape(name)
 }
 
 func aggregateWatchTargets(w http.ResponseWriter, r *http.Request, targets []Target) {
