@@ -1,0 +1,4 @@
+interface:
+  display_name: "Go Update"
+  short_description: "Update Go and module dependencies safely"
+  default_prompt: "Use $golang-update to update this repository to the latest stable Go and Go module releases."
