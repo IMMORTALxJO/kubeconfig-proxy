@@ -4,6 +4,23 @@ set -u -o pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$ROOT" || exit 1
+# shellcheck source=e2e/versions.sh
+source "$ROOT/e2e/versions.sh"
+
+CLUSTER_A_VERSION_PROFILE="${KCP_CLUSTER_A_VERSION_PROFILE:-${KCP_CLUSTER_VERSION_PROFILE:-1.36}}"
+CLUSTER_B_VERSION_PROFILE="${KCP_CLUSTER_B_VERSION_PROFILE:-${KCP_CLUSTER_VERSION_PROFILE:-1.36}}"
+KUBECTL_VERSION_PROFILE="${KCP_KUBECTL_VERSION_PROFILE:-$CLUSTER_A_VERSION_PROFILE}"
+
+if ! kcp_select_cluster_version "$CLUSTER_A_VERSION_PROFILE"; then
+  exit 2
+fi
+if ! kcp_select_cluster_version "$CLUSTER_B_VERSION_PROFILE"; then
+  exit 2
+fi
+if ! kcp_select_kubectl_version "$KUBECTL_VERSION_PROFILE"; then
+  exit 2
+fi
+KUBECTL_VERSION="$KCP_SELECTED_KUBECTL_VERSION"
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kcp-it.XXXXXX")"
 KUBECONFIG_FILE="$TMP_DIR/kubeconfig"
@@ -26,9 +43,6 @@ BINARY="$ROOT/bin/kubeconfig-proxy"
 COVERAGE_DATA_DIR="$TMP_DIR/coverage-data"
 COVERAGE_PROFILE="$TMP_DIR/integration-coverage.out"
 COVERAGE_HTML="${KCP_COVERAGE_HTML:-$ROOT/.codex/reports/coverage.html}"
-KUBERNETES_VERSION="v1.36.1"
-KUBECTL_VERSION="v1.36.1"
-KIND_NODE_IMAGE="kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5"
 KUBECTL_BIN=""
 KCP_CACHE_DIR="${KCP_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/kubeconfig-proxy}"
 TOUCHED_TEST_RESOURCES=0
@@ -513,6 +527,7 @@ cluster_server_version() {
 check_cluster_version() {
   local cluster="$1"
   local ctx="$2"
+  local expected_version="$3"
   local version
   local attempt
   for ((attempt = 0; attempt < 30; attempt++)); do
@@ -525,11 +540,11 @@ check_cluster_version() {
     add_result "FAIL" "kind cluster $cluster Kubernetes version" "could not read server version for $ctx"
     return 1
   fi
-  if [[ "$version" == "$KUBERNETES_VERSION" ]]; then
+  if [[ "$version" == "$expected_version" ]]; then
     add_result "PASS" "kind cluster $cluster Kubernetes version" "$version"
     return 0
   fi
-  add_result "FAIL" "kind cluster $cluster Kubernetes version" "got $version, want $KUBERNETES_VERSION; rerun with KCP_RECREATE_KIND=1"
+  add_result "FAIL" "kind cluster $cluster Kubernetes version" "got $version, want $expected_version; rerun with KCP_RECREATE_KIND=1"
   return 1
 }
 
@@ -549,30 +564,36 @@ check_cluster_ready() {
 
 ensure_cluster() {
   local cluster="$1"
+  local profile="$2"
   local ctx="kind-$cluster"
   local create_output
+
+  if ! kcp_select_cluster_version "$profile"; then
+    add_result "FAIL" "select Kubernetes compatibility profile" "$profile"
+    return 1
+  fi
   if cluster_exists "$cluster"; then
     if [[ "${KCP_RECREATE_KIND:-0}" == "1" ]]; then
       run_cmd "delete existing kind cluster $cluster" kind delete cluster --name "$cluster" || return 1
     else
       run_cmd "export existing kind cluster $cluster" kind export kubeconfig --name "$cluster" --kubeconfig "$KUBECONFIG_FILE" || return 1
-      check_cluster_version "$cluster" "$ctx" || return 1
+      check_cluster_version "$cluster" "$ctx" "$KCP_SELECTED_KUBERNETES_VERSION" || return 1
       check_cluster_ready "$cluster" "$ctx" || return 1
       add_result "PASS" "kind cluster $cluster" "reused existing cluster"
       return 0
     fi
   fi
 
-  if create_output="$(kind create cluster --name "$cluster" --image "$KIND_NODE_IMAGE" --kubeconfig "$KUBECONFIG_FILE" 2>&1)"; then
+  if create_output="$(kind create cluster --name "$cluster" --image "$KCP_SELECTED_KIND_NODE_IMAGE" --kubeconfig "$KUBECONFIG_FILE" 2>&1)"; then
     add_result "PASS" "create kind cluster $cluster" "ok"
-    check_cluster_version "$cluster" "$ctx" || return 1
+    check_cluster_version "$cluster" "$ctx" "$KCP_SELECTED_KUBERNETES_VERSION" || return 1
     check_cluster_ready "$cluster" "$ctx" || return 1
     return 0
   fi
   if cluster_exists "$cluster"; then
     add_result "PASS" "create kind cluster $cluster" "another e2e run created it"
     run_cmd "export concurrently created kind cluster $cluster" kind export kubeconfig --name "$cluster" --kubeconfig "$KUBECONFIG_FILE" || return 1
-    check_cluster_version "$cluster" "$ctx" || return 1
+    check_cluster_version "$cluster" "$ctx" "$KCP_SELECTED_KUBERNETES_VERSION" || return 1
     check_cluster_ready "$cluster" "$ctx" || return 1
     add_result "PASS" "kind cluster $cluster" "reused concurrently created cluster"
     return 0
@@ -656,8 +677,8 @@ if [[ "$HAD_FAILURE" -ne 0 ]]; then
   exit 1
 fi
 
-ensure_cluster kubeconfig-proxy-a
-ensure_cluster kubeconfig-proxy-b
+ensure_cluster kubeconfig-proxy-a "$CLUSTER_A_VERSION_PROFILE"
+ensure_cluster kubeconfig-proxy-b "$CLUSTER_B_VERSION_PROFILE"
 
 if [[ "$HAD_FAILURE" -ne 0 ]]; then
   add_result "SKIP" "integration checks" "previous setup check failed"

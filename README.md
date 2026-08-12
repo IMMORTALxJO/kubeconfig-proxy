@@ -332,6 +332,18 @@ integration runner because the upstream e2e suite
 expects one coherent Kubernetes API server; multi-cluster aggregation and
 fan-out remain covered by the project integration tests.
 
+## Kubernetes Compatibility
+
+[![Kubernetes compatibility](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/compatibility.yml/badge.svg?branch=main)](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/compatibility.yml)
+
+The supported compatibility window is Kubernetes and kubectl `1.34`, `1.35`,
+and `1.36`. The compatibility workflow verifies all 21 Kubernetes-supported
+combinations of kubectl, primary cluster, and secondary cluster, then runs the
+upstream
+`[sig-cli] Kubectl client` suite for each Kubernetes minor version. The exact
+tested images, patch versions, scope, latest workflow result, and commands for
+running an individual cell are in [COMPATIBILITY.md](COMPATIBILITY.md).
+
 Release builds are produced by GitHub Actions when a `v*` tag is pushed. The
 release workflow injects that tag into `kubeconfig-proxy version`.
 
