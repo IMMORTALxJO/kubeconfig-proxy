@@ -72,7 +72,7 @@ There are three distinct lifecycles:
 | `internal/upstream` | Converting selected kubeconfig contexts into concrete upstream targets with `client-go` transports | Request classification or response aggregation |
 | `internal/state` | Versioned state schema, validation, duration parsing, and atomic persistence | Runtime networking or kubeconfig mutation |
 | `internal/proxy` | Incoming authentication, routing decisions, upstream execution, mutation targeting, list/pagination/watch aggregation, and response handling | CLI flags, state-file I/O, or process lifecycle |
-| `e2e` | Real-cluster kind validation, behavior-category checks in `e2e/checks`, and upstream single-source `kubectl` compatibility runners; produces the latest HTML coverage report in `.codex/reports/coverage.html` | Production runtime code or Codex skill instructions |
+| `e2e` | Real-cluster kind validation, behavior-category checks in `e2e/checks`, upstream single-source `kubectl` compatibility runners, and the profile-refresh generator; produces the latest HTML coverage report in `.codex/reports/coverage.html` | Production runtime code or Codex skill instructions |
 | `.codex/skills/test-kubeconfig-proxy` | Real-cluster integration validation using controlled kind clusters, including upstream single-source `kubectl` e2e compatibility | Production runtime code |
 | `examples` | Executable user examples | Shared production logic |
 

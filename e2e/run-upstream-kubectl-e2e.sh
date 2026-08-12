@@ -8,10 +8,16 @@ set -u -o pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$ROOT" || exit 1
+# shellcheck source=e2e/versions.sh
+source "$ROOT/e2e/versions.sh"
 
-KUBERNETES_VERSION="v1.36.1"
-KUBERNETES_COMMIT="756939600b9a7180fc2df6550a4585b638875e67"
-KIND_NODE_IMAGE="kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5"
+KUBERNETES_VERSION_PROFILE="${KCP_KUBERNETES_VERSION_PROFILE:-1.36}"
+if ! kcp_select_cluster_version "$KUBERNETES_VERSION_PROFILE"; then
+  exit 2
+fi
+KUBERNETES_VERSION="$KCP_SELECTED_KUBERNETES_VERSION"
+KUBERNETES_COMMIT="$KCP_SELECTED_KUBERNETES_COMMIT"
+KIND_NODE_IMAGE="$KCP_SELECTED_KIND_NODE_IMAGE"
 CLUSTER="kubeconfig-proxy-kubectl-e2e"
 SOURCE_CONTEXT="kind-$CLUSTER"
 PROXY_CONTEXT="kind-proxy-kubectl-e2e"
@@ -402,7 +408,7 @@ cluster_exists() {
 }
 
 cluster_server_version() {
-  KUBECONFIG="$KUBECONFIG_FILE" kubectl --context "$SOURCE_CONTEXT" version -o json 2>/dev/null |
+  KUBECONFIG="$KUBECONFIG_FILE" "$UPSTREAM_KUBECTL_BIN" --context "$SOURCE_CONTEXT" version -o json 2>/dev/null |
     awk -F'"' 'seen && /"gitVersion"[[:space:]]*:/ {print $4; exit} /"serverVersion"[[:space:]]*:/ {seen=1}'
 }
 
@@ -416,7 +422,7 @@ check_cluster() {
   fi
   add_result "PASS" "kind cluster Kubernetes version" "$version"
 
-  if output="$(KUBECONFIG="$KUBECONFIG_FILE" kubectl --context "$SOURCE_CONTEXT" wait --for=condition=Ready nodes --all --timeout="$CLUSTER_READY_TIMEOUT" 2>&1)"; then
+  if output="$(KUBECONFIG="$KUBECONFIG_FILE" "$UPSTREAM_KUBECTL_BIN" --context "$SOURCE_CONTEXT" wait --for=condition=Ready nodes --all --timeout="$CLUSTER_READY_TIMEOUT" 2>&1)"; then
     add_result "PASS" "kind cluster node readiness" "$output"
     return 0
   fi
@@ -504,7 +510,7 @@ find_upstream_binary() {
 write_kubectl_wrapper() {
   local source_server
 
-  source_server="$(kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$SOURCE_CONTEXT" config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
+  source_server="$("$UPSTREAM_KUBECTL_BIN" --kubeconfig "$KUBECONFIG_FILE" --context "$SOURCE_CONTEXT" config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
   if [[ -z "$source_server" ]]; then
     return 1
   fi
@@ -588,7 +594,6 @@ run_upstream_kubectl_e2e() {
 
 require_cmd git
 require_cmd kind
-require_cmd kubectl
 require_cmd make
 select_build_environment
 ensure_builder_image

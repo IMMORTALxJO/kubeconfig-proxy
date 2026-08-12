@@ -315,6 +315,12 @@ make e2e kind     # two-cluster kind integration suite
 make e2e kubectl  # upstream kubectl compatibility suite
 ```
 
+To run the full e2e suite for a pull request from GitHub Actions, comment
+`/e2e` on that PR. The command is available to repository owners, members, and
+collaborators; it checks out the current PR head and runs `make e2e` with the
+optional `werf` check skipped. A newer `/e2e` comment cancels a running e2e job
+for the same PR and starts a fresh one.
+
 Run the upstream Kubernetes `kubectl` e2e compatibility suite through a
 single-source proxy context:
 
@@ -331,6 +337,18 @@ logging, and writes the final HTML coverage report to
 integration runner because the upstream e2e suite
 expects one coherent Kubernetes API server; multi-cluster aggregation and
 fan-out remain covered by the project integration tests.
+
+## Kubernetes Compatibility
+
+[![Kubernetes compatibility](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/compatibility.yml/badge.svg?branch=main)](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/compatibility.yml)
+
+The supported compatibility window is the current three active Kubernetes and
+kubectl minor versions. The compatibility workflow verifies every
+Kubernetes-supported combination of kubectl, primary cluster, and secondary
+cluster, then runs the upstream `[sig-cli] Kubectl client` suite for each
+minor version. The exact tested images, patch versions, scope, latest workflow
+result, and commands for running an individual cell are in
+[COMPATIBILITY.md](COMPATIBILITY.md).
 
 Release builds are produced by GitHub Actions when a `v*` tag is pushed. The
 release workflow injects that tag into `kubeconfig-proxy version`.
