@@ -64,14 +64,14 @@ processes, merges their
 per-function Go coverage report. It also writes the HTML report to
 `.codex/reports/coverage.html`.
 
-The runner pins Kubernetes and `kubectl` to `v1.36.1`. New kind clusters are
-created with `kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5`.
-If a reused kind cluster runs another Kubernetes version, the runner fails before
-touching test resources; rerun with `KCP_RECREATE_KIND=1` to recreate it with the
-pinned node image. The runner also verifies that kind nodes are Ready before
-running proxy behavior checks. If the local `kubectl` is missing or not `v1.36.1`,
-the runner uses a cached official `v1.36.1` binary or downloads one and verifies
-its sha256 checksum. The default cache root is
+The runner uses the default Kubernetes and `kubectl` profile from
+`e2e/versions.sh`. New kind clusters use that profile's pinned node image. If a
+reused kind cluster runs another Kubernetes version, the runner fails before
+touching test resources; rerun with `KCP_RECREATE_KIND=1` to recreate it with
+the selected node image. The runner also verifies that kind nodes are Ready
+before running proxy behavior checks. If the local `kubectl` does not match the
+selected profile, the runner uses a cached official binary or downloads one and
+verifies its sha256 checksum. The default cache root is
 `${XDG_CACHE_HOME:-$HOME/.cache}/kubeconfig-proxy`.
 
 The two shared kind clusters are never deleted by the runner. Each run creates
@@ -88,7 +88,7 @@ single-source proxy context with:
 e2e/run-upstream-kubectl-e2e.sh
 ```
 
-The runner builds Kubernetes `v1.36.1` from a cached shallow checkout, creates
+The runner builds the selected Kubernetes profile from a cached shallow checkout, creates
 or reuses the `kubeconfig-proxy-kubectl-e2e` kind cluster, and runs `e2e.test`
 with the direct source context for framework setup and assertions. A temporary
 wrapper replaces the e2e framework's `--kubeconfig` and `--context` arguments
@@ -121,15 +121,15 @@ Useful options:
 - `KCP_KUBECTL_E2E_SKIP=<regexp>` skips selected Ginkgo specs.
 - `KCP_KUBECTL_E2E_TIMEOUT=<duration>` changes the Ginkgo suite timeout,
   default `6h`.
-- `KCP_KUBERNETES_SOURCE=<path>` uses an existing Kubernetes `v1.36.1`
-  checkout instead of the cache.
+- `KCP_KUBERNETES_SOURCE=<path>` uses an existing checkout for the selected
+  Kubernetes profile instead of the cache.
 - `KCP_KUBECTL_E2E_RECREATE_KIND=1` recreates the dedicated kind cluster.
 - `KCP_KEEP_KIND=1` leaves the cluster, temporary kubeconfig, e2e report,
   proxy state, and enabled serve log in place for debugging.
 - `KCP_COVERAGE_HTML=<path>` changes the HTML coverage report path; by default
   each e2e runner writes `.codex/reports/coverage.html` (the latest run wins).
 
-Kubernetes `v1.36.1` requires Bash 4.2 or newer to build. On macOS, install it
+The selected Kubernetes source may require Bash 4.2 or newer to build. On macOS, install it
 with `brew install bash`; the runner finds the Homebrew path automatically, or
 accepts `KCP_KUBECTL_E2E_BASH=/path/to/bash`. When no suitable Bash is
 available, the runner builds native-platform binaries in Docker with
@@ -151,9 +151,9 @@ The runner covers the first integration ring for this project:
   printed as a per-function report with a total statement percentage.
 - Required local tools: `kind` and `curl` (the latter is used by the
   port-forward check and when the pinned `kubectl` client must be downloaded).
-- Pinned `kubectl v1.36.1`.
-- Two kind clusters: `kubeconfig-proxy-a` and `kubeconfig-proxy-b` running
-  Kubernetes `v1.36.1` with Ready nodes, using contexts
+- kubectl matching the selected compatibility profile.
+- Two kind clusters: `kubeconfig-proxy-a` and `kubeconfig-proxy-b` running the
+  selected Kubernetes profile with Ready nodes, using contexts
   `kind-kubeconfig-proxy-a` and `kind-kubeconfig-proxy-b`.
 - Proxy context creation, explicit coverage-instrumented serve process, and
   exec-credential access.

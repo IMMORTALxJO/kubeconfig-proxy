@@ -74,5 +74,6 @@ To run the upstream kubectl client suite for a profile:
 KCP_KUBERNETES_VERSION_PROFILE=1.35 e2e/run-upstream-kubectl-e2e.sh
 ```
 
-When Kubernetes support changes, update `e2e/versions.sh`, its focused test,
-this document, and the workflow matrix in the same pull request.
+The weekly `Refresh Kubernetes compatibility profiles` workflow updates this
+document, `e2e/versions.sh`, its focused test, and the workflow matrix. It
+opens a pull request only when the three supported minor profiles change.

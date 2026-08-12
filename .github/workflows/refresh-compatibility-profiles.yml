@@ -1,0 +1,51 @@
+name: Refresh Kubernetes compatibility profiles
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: refresh-kubernetes-compatibility-profiles
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Refresh stable Kubernetes profiles
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Refresh compatibility profiles
+        run: e2e/update-compatibility-profiles.sh
+
+      - name: Validate refreshed profiles
+        run: make e2e-versions-test e2e-profile-update-test shellcheck actionlint
+
+      - name: Create or update compatibility pull request
+        uses: peter-evans/create-pull-request@84ae59a2cdc2258d6fa0732dd66352dddae2a412 # v7.0.9
+        with:
+          base: master
+          branch: automation/refresh-kubernetes-compatibility
+          delete-branch: true
+          commit-message: "test: refresh Kubernetes compatibility profiles"
+          title: "test: refresh Kubernetes compatibility profiles"
+          body: |
+            Refreshes the three active Kubernetes compatibility profiles from
+            the official stable release channel. The change updates kind image
+            pins, upstream Kubernetes source tags, kubectl versions, the e2e
+            matrix, and its public documentation.
