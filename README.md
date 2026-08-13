@@ -320,7 +320,7 @@ To run the full e2e suite for a pull request from GitHub Actions, comment
 collaborators; it checks out the current PR head and runs `make e2e` with the
 optional `werf` check skipped. A newer `/e2e` comment cancels a running e2e job
 for the same PR and starts a fresh one. Follow the run in the
-[PR e2e command workflow](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/pr-e2e-command.yml).
+[PR e2e command workflow](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/pr-e2e-command.yml); it can run for up to six hours.
 
 Run the upstream Kubernetes `kubectl` e2e compatibility suite through a
 single-source proxy context:
