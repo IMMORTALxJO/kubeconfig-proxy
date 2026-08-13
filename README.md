@@ -323,7 +323,7 @@ head. A newer matching command cancels a running job for the same PR and starts
 a fresh one. The kind job runs for up to 45 minutes and skips the optional
 `werf` check; the upstream job can run for up to six hours. Follow them in the
 [kind e2e workflow](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/pr-e2e-command.yml)
-and [upstream kubectl workflow](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/pr-upstream-kubectl-e2e-command.yml).
+and [upstream kubectl workflow](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/pr-upstream-kubectl-e2e-command.yml). Their progress and result also appear in the PR's Checks list.
 
 Run the upstream Kubernetes `kubectl` e2e compatibility suite through a
 single-source proxy context:
