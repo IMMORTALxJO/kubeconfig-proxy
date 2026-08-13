@@ -30,6 +30,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install validation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+
       - name: Refresh compatibility profiles
         run: e2e/update-compatibility-profiles.sh
 
