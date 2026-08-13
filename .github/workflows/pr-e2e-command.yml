@@ -5,20 +5,20 @@ on:
     types: [created]
 
 permissions:
-  checks: write
-  contents: read
-  pull-requests: read
+  contents: none
 
 jobs:
-  kind-e2e:
-    name: kind e2e for PR #${{ github.event.issue.number }}
+  prepare-check:
+    name: prepare kind e2e check for PR #${{ github.event.issue.number }}
     if: >-
       github.event.issue.pull_request && github.event.comment.body == '/e2e' && (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'MEMBER' || github.event.comment.author_association == 'COLLABORATOR')
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    concurrency:
-      group: pr-e2e-${{ github.event.issue.number }}
-      cancel-in-progress: true
+    permissions:
+      checks: write
+      pull-requests: read
+    outputs:
+      check_run_id: ${{ steps.check-run.outputs.check_run_id }}
+      head_sha: ${{ steps.pull-request.outputs.head_sha }}
 
     steps:
       - name: Resolve pull request head
@@ -44,10 +44,24 @@ jobs:
             --jq .id)"
           printf 'check_run_id=%s\n' "$check_run_id" >> "$GITHUB_OUTPUT"
 
+  kind-e2e:
+    name: kind e2e for PR #${{ github.event.issue.number }}
+    needs: prepare-check
+    if: needs.prepare-check.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: pr-e2e-${{ github.event.issue.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+
+    steps:
       - name: Checkout pull request head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.pull-request.outputs.head_sha }}
+          persist-credentials: false
+          ref: ${{ needs.prepare-check.outputs.head_sha }}
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -67,12 +81,20 @@ jobs:
           KCP_E2E_CHECKS: context,aggregation,routing,rollout,subresources,watch,helm
         run: make e2e kind
 
+  publish-check:
+    name: publish kind e2e result for PR #${{ github.event.issue.number }}
+    needs: [prepare-check, kind-e2e]
+    if: always() && needs.prepare-check.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+
+    steps:
       - name: Publish PR check result
-        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-          CHECK_RUN_ID: ${{ steps.check-run.outputs.check_run_id }}
-          CHECK_CONCLUSION: ${{ steps.run-kind-e2e.outcome || 'failure' }}
+          CHECK_RUN_ID: ${{ needs.prepare-check.outputs.check_run_id }}
+          CHECK_CONCLUSION: ${{ needs.kind-e2e.result }}
         run: |
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_RUN_ID" \
             -f status=completed \
