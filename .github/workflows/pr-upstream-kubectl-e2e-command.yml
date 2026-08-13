@@ -1,4 +1,4 @@
-name: PR kind e2e command
+name: PR upstream kubectl e2e command
 
 on:
   issue_comment:
@@ -9,9 +9,9 @@ permissions:
 
 jobs:
   prepare-check:
-    name: prepare kind e2e check for PR #${{ github.event.issue.number }}
+    name: prepare upstream kubectl e2e check for PR #${{ github.event.issue.number }}
     if: >-
-      github.event.issue.pull_request && github.event.comment.body == '/e2e' && (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'MEMBER' || github.event.comment.author_association == 'COLLABORATOR')
+      github.event.issue.pull_request && github.event.comment.body == '/e2e-upstream-kubectl' && (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'MEMBER' || github.event.comment.author_association == 'COLLABORATOR')
     runs-on: ubuntu-latest
     permissions:
       checks: write
@@ -37,21 +37,21 @@ jobs:
           HEAD_SHA: ${{ steps.pull-request.outputs.head_sha }}
         run: |
           check_run_id="$(gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" \
-            -f name='kind e2e' \
+            -f name='upstream kubectl e2e' \
             -f head_sha="$HEAD_SHA" \
             -f status=in_progress \
             -f details_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             --jq .id)"
           printf 'check_run_id=%s\n' "$check_run_id" >> "$GITHUB_OUTPUT"
 
-  kind-e2e:
-    name: kind e2e for PR #${{ github.event.issue.number }}
+  upstream-kubectl-e2e:
+    name: upstream kubectl e2e for PR #${{ github.event.issue.number }}
     needs: prepare-check
     if: needs.prepare-check.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 360
     concurrency:
-      group: pr-e2e-${{ github.event.issue.number }}
+      group: pr-upstream-kubectl-e2e-${{ github.event.issue.number }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -74,16 +74,13 @@ jobs:
           go install sigs.k8s.io/kind@v0.30.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: Run kind e2e suite
-        id: run-kind-e2e
-        env:
-          KCP_SKIP_MAKE_CHECK: "1"
-          KCP_E2E_CHECKS: context,aggregation,routing,rollout,subresources,watch,helm
-        run: make e2e kind
+      - name: Run upstream kubectl e2e suite
+        id: run-upstream-kubectl-e2e
+        run: make e2e kubectl
 
   publish-check:
-    name: publish kind e2e result for PR #${{ github.event.issue.number }}
-    needs: [prepare-check, kind-e2e]
+    name: publish upstream kubectl e2e result for PR #${{ github.event.issue.number }}
+    needs: [prepare-check, upstream-kubectl-e2e]
     if: always() && needs.prepare-check.result == 'success'
     runs-on: ubuntu-latest
     permissions:
@@ -94,7 +91,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CHECK_RUN_ID: ${{ needs.prepare-check.outputs.check_run_id }}
-          CHECK_CONCLUSION: ${{ needs.kind-e2e.result }}
+          CHECK_CONCLUSION: ${{ needs.upstream-kubectl-e2e.result }}
         run: |
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_RUN_ID" \
             -f status=completed \
