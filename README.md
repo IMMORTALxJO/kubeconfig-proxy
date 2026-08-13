@@ -315,12 +315,15 @@ make e2e kind     # two-cluster kind integration suite
 make e2e kubectl  # upstream kubectl compatibility suite
 ```
 
-To run the full e2e suite for a pull request from GitHub Actions, comment
-`/e2e` on that PR. The command is available to repository owners, members, and
-collaborators; it checks out the current PR head and runs `make e2e` with the
-optional `werf` check skipped. A newer `/e2e` comment cancels a running e2e job
-for the same PR and starts a fresh one. Follow the run in the
-[PR e2e command workflow](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/pr-e2e-command.yml); it can run for up to six hours.
+To run the two-cluster kind e2e suite for a pull request from GitHub Actions,
+comment `/e2e` on that PR. To run the separate upstream Kubernetes `kubectl`
+suite, comment `/e2e-upstream-kubectl`. Both commands are available to
+repository owners, members, and collaborators; they check out the current PR
+head. A newer matching command cancels a running job for the same PR and starts
+a fresh one. The kind job runs for up to 45 minutes and skips the optional
+`werf` check; the upstream job can run for up to six hours. Follow them in the
+[kind e2e workflow](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/pr-e2e-command.yml)
+and [upstream kubectl workflow](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/pr-upstream-kubectl-e2e-command.yml).
 
 Run the upstream Kubernetes `kubectl` e2e compatibility suite through a
 single-source proxy context:
