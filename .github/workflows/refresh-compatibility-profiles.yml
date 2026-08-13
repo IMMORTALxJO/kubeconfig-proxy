@@ -30,11 +30,16 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install validation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+
       - name: Refresh compatibility profiles
         run: e2e/update-compatibility-profiles.sh
 
       - name: Validate refreshed profiles
-        run: make e2e-versions-test e2e-profile-update-test shellcheck actionlint
+        run: SHELLCHECK="shellcheck -S warning" make e2e-versions-test e2e-profile-update-test shellcheck actionlint
 
       - name: Create or update compatibility pull request
         uses: peter-evans/create-pull-request@84ae59a2cdc2258d6fa0732dd66352dddae2a412 # v7.0.9
