@@ -7,7 +7,7 @@ clusters created by [kind](https://kind.sigs.k8s.io/).
 
 Install:
 
-- Go 1.26.5+
+- Go 1.26.6+
 - Docker
 - kubectl
 - kind
