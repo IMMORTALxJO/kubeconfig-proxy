@@ -2,6 +2,15 @@
 
 # Sourced by e2e/run.sh after both proxy contexts have started.
 
+werf_dev_branch() {
+  local worktree_root="$1"
+  local werf_home="${2:-${WERF_HOME:-$HOME/.werf}}"
+  local checksum
+
+  checksum="$(printf '%s\n%s' "$worktree_root" "$werf_home" | cksum | awk '{print $1}')"
+  printf '_werf-dev-kcp-e2e-%s' "$checksum"
+}
+
 run_helm_checks() {
   local helm_output
   local helm_count
@@ -27,15 +36,19 @@ run_helm_checks() {
 }
 
 run_werf_checks() {
+  local dev_branch
+
   if [[ "${KCP_SKIP_WERF:-0}" == "1" ]]; then
     add_result "SKIP" "werf example converge and dismiss" "KCP_SKIP_WERF=1"
     return
   fi
 
+  dev_branch="$(werf_dev_branch "$ROOT")"
+
   run_cmd "werf example converge" bash -c "
     set -euo pipefail
     cd '$ROOT/examples/werf'
-    KUBECONFIG='$KUBECONFIG_FILE' werf converge --env kind --dev --namespace '$WERF_NS' --kube-context '$PROXY_CONTEXT' --timeout '$WERF_TIMEOUT' --set namePrefix='$E2E_RESOURCE_PREFIX'
+    KUBECONFIG='$KUBECONFIG_FILE' werf converge --env kind --dev --dev-branch '$dev_branch' --namespace '$WERF_NS' --kube-context '$PROXY_CONTEXT' --timeout '$WERF_TIMEOUT' --set namePrefix='$E2E_RESOURCE_PREFIX'
   "
   expect_exists "werf nginx deployment exists in kubeconfig-proxy-a" kubectl_ctx "$CTX_A" -n "$WERF_NS" get deployment "$(e2e_resource_name kubeconfig-proxy-werf-nginx)"
   expect_exists "werf nginx deployment exists in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$WERF_NS" get deployment "$(e2e_resource_name kubeconfig-proxy-werf-nginx)"
