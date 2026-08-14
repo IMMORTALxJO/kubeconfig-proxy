@@ -44,29 +44,84 @@ func watchRuntimeFiles(
 				nextState, err := readRuntimeFileSnapshot(statePath)
 				if err != nil {
 					if os.IsNotExist(err) {
-						changed <- stateFileRemovedError(statePath)
+						sendRuntimeFileEvent(ctx, changed, stateFileRemovedError(statePath))
 						return
 					}
-					changed <- fmt.Errorf("read state file %s: %w", statePath, err)
+					sendRuntimeFileEvent(ctx, changed, fmt.Errorf("read state file %s: %w", statePath, err))
 					return
 				}
 				nextSourceKubeconfig, err := readRuntimeFileSnapshot(sourceKubeconfigPath)
 				if err != nil {
-					changed <- fmt.Errorf("read source kubeconfig %s: %w", sourceKubeconfigPath, err)
+					sendRuntimeFileEvent(ctx, changed, fmt.Errorf("read source kubeconfig %s: %w", sourceKubeconfigPath, err))
 					return
 				}
 				if !sourceKubeconfigSnapshot.isEqual(nextSourceKubeconfig) {
-					changed <- errSourceKubeconfigChanged
-					return
+					nextSourceKubeconfig, err = waitForStableRuntimeFileSnapshot(ctx, sourceKubeconfigPath, nextSourceKubeconfig)
+					if ctx.Err() != nil {
+						return
+					}
+					if err != nil {
+						sendRuntimeFileEvent(ctx, changed, fmt.Errorf("read source kubeconfig %s: %w", sourceKubeconfigPath, err))
+						return
+					}
+				}
+				if !sourceKubeconfigSnapshot.isEqual(nextSourceKubeconfig) {
+					sourceKubeconfigSnapshot = nextSourceKubeconfig
+					if !sendRuntimeFileEvent(ctx, changed, errSourceKubeconfigChanged) {
+						return
+					}
+					continue
 				}
 				if !stateSnapshot.isEqual(nextState) {
-					changed <- errStateFileChanged
-					return
+					nextState, err = waitForStableRuntimeFileSnapshot(ctx, statePath, nextState)
+					if ctx.Err() != nil {
+						return
+					}
+					if err != nil {
+						sendRuntimeFileEvent(ctx, changed, fmt.Errorf("read state file %s: %w", statePath, err))
+						return
+					}
+				}
+				if !stateSnapshot.isEqual(nextState) {
+					stateSnapshot = nextState
+					if !sendRuntimeFileEvent(ctx, changed, errStateFileChanged) {
+						return
+					}
 				}
 			}
 		}
 	}()
 	return changed
+}
+
+func sendRuntimeFileEvent(ctx context.Context, changed chan<- error, err error) bool {
+	select {
+	case changed <- err:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func waitForStableRuntimeFileSnapshot(ctx context.Context, path string, snapshot runtimeFileSnapshot) (runtimeFileSnapshot, error) {
+	timer := time.NewTimer(runtimeFileSettleInterval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return runtimeFileSnapshot{}, ctx.Err()
+		case <-timer.C:
+			next, err := readRuntimeFileSnapshot(path)
+			if err != nil {
+				return runtimeFileSnapshot{}, err
+			}
+			if snapshot.isEqual(next) {
+				return next, nil
+			}
+			snapshot = next
+			timer.Reset(runtimeFileSettleInterval)
+		}
+	}
 }
 
 func stateFileRemovedError(path string) error {

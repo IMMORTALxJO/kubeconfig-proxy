@@ -131,11 +131,16 @@ Serve logs are disabled by default. Pass `--logs-enabled` to `add-context` to
 write auto-started `serve` output to `<state>.log`.
 
 While `serve` is running, it watches both the state file and the selected source
-kubeconfig. Replacing credentials in that kubeconfig replaces the `serve`
-process and rebuilds the upstream clients so refreshed OIDC tokens, client
-certificates, and exec credential configuration are used without recreating the
-proxy context. Active proxy requests are canceled before the process is
-replaced; clients can reconnect to the same local address immediately.
+kubeconfig. Changing either file replaces the `serve` process so all runtime
+settings and upstream clients are rebuilt from scratch. Refreshed OIDC tokens,
+client certificates, and exec credential configuration are therefore used
+without recreating the proxy context. A detected change remains pending while
+proxy requests are in flight; the process is replaced only after the last one
+finishes. Long-running watches and streaming subresources can therefore defer a
+reload indefinitely, but they are never interrupted by it. Clients can
+reconnect immediately when the local address and proxy credentials remain
+unchanged; otherwise they must reload the generated kubeconfig entries written
+by `add-context`.
 
 ## Selecting Source Contexts
 
