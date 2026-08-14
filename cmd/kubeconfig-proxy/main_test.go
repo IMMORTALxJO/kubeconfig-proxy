@@ -808,6 +808,24 @@ func TestServeStateReloadsOIDCCredentialsWhenSourceKubeconfigChanges(t *testing.
 	}))
 	defer upstream.Close()
 
+	test := newOIDCReloadTest(t, upstream)
+	restartedStatePath, errCh, restartErr := startOIDCReloadServe(test.statePath)
+	assertProxyUsesOIDCToken(t, test.profile, test.initialToken)
+	replaceOIDCTokenPreservingMetadata(t, test.sourcePath, test.refreshedToken)
+	assertServeProcessReplacement(t, test.statePath, restartedStatePath, errCh, restartErr)
+}
+
+type oidcReloadTest struct {
+	profile        *proxystate.Profile
+	statePath      string
+	sourcePath     string
+	initialToken   string
+	refreshedToken string
+}
+
+func newOIDCReloadTest(t *testing.T, upstream *httptest.Server) oidcReloadTest {
+	t.Helper()
+
 	initialToken := validMainTestOIDCToken("initial")
 	refreshedToken := validMainTestOIDCToken("renewed")
 	sourcePath := writeMainTestKubeconfigWithContexts(t, []mainTestContext{{
@@ -854,7 +872,16 @@ func TestServeStateReloadsOIDCCredentialsWhenSourceKubeconfigChanges(t *testing.
 	if err := proxystate.Save(statePath, profile); err != nil {
 		t.Fatal(err)
 	}
+	return oidcReloadTest{
+		profile:        profile,
+		statePath:      statePath,
+		sourcePath:     sourcePath,
+		initialToken:   initialToken,
+		refreshedToken: refreshedToken,
+	}
+}
 
+func startOIDCReloadServe(statePath string) (<-chan string, <-chan error, error) {
 	restartedStatePath := make(chan string, 1)
 	restartErr := errors.New("test process replaced")
 	restart := func(statePath string) error {
@@ -865,6 +892,11 @@ func TestServeStateReloadsOIDCCredentialsWhenSourceKubeconfigChanges(t *testing.
 	go func() {
 		errCh <- runServeStateWithRestarter([]string{"--state", statePath}, nil, restart)
 	}()
+	return restartedStatePath, errCh, restartErr
+}
+
+func assertProxyUsesOIDCToken(t *testing.T, profile *proxystate.Profile, token string) {
+	t.Helper()
 
 	readyClient, err := newProfileHTTPClient(profile)
 	if err != nil {
@@ -873,9 +905,13 @@ func TestServeStateReloadsOIDCCredentialsWhenSourceKubeconfigChanges(t *testing.
 	if err := waitReady(readyClient, profile, 2*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if body := getProxyBody(t, profile, "/version"); !strings.Contains(body, initialToken) {
-		t.Fatalf("initial proxy body = %s, want initial OIDC token", body)
+	if body := getProxyBody(t, profile, "/version"); !strings.Contains(body, token) {
+		t.Fatalf("proxy body = %s, want OIDC token", body)
 	}
+}
+
+func replaceOIDCTokenPreservingMetadata(t *testing.T, sourcePath, refreshedToken string) {
+	t.Helper()
 
 	initialSourceInfo, err := os.Stat(sourcePath)
 	if err != nil {
@@ -899,6 +935,10 @@ func TestServeStateReloadsOIDCCredentialsWhenSourceKubeconfigChanges(t *testing.
 	if updatedSourceInfo.Size() != initialSourceInfo.Size() {
 		t.Fatalf("updated source kubeconfig size = %d, want unchanged size %d", updatedSourceInfo.Size(), initialSourceInfo.Size())
 	}
+}
+
+func assertServeProcessReplacement(t *testing.T, statePath string, restartedStatePath <-chan string, errCh <-chan error, restartErr error) {
+	t.Helper()
 
 	select {
 	case gotStatePath := <-restartedStatePath:

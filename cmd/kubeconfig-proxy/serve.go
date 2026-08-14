@@ -203,20 +203,10 @@ func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.C
 		errCh <- server.Serve(tlsListener)
 	}()
 
-	var ttlCh <-chan time.Time
-	var ticker *time.Ticker
-	if proxyTTL > 0 {
-		ticker = time.NewTicker(calculateTTLCheckInterval(proxyTTL))
-		defer ticker.Stop()
-		ttlCh = ticker.C
-	}
-
-	if stop == nil {
-		signalStop := make(chan os.Signal, 1)
-		signal.Notify(signalStop, os.Interrupt, syscall.SIGTERM)
-		defer signal.Stop(signalStop)
-		stop = signalStop
-	}
+	ttlCh, stopTTL := proxyTTLChannel(proxyTTL)
+	defer stopTTL()
+	stop, stopSignals := serveStopChannel(stop)
+	defer stopSignals()
 
 	for {
 		select {
@@ -228,28 +218,53 @@ func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.C
 				runtimeChanged = nil
 				continue
 			}
-			if err != nil && !isRuntimeFileChange(err) {
-				logger.Printf("shutting down after runtime configuration file error: %v", err)
-			}
-			if errors.Is(err, errSourceKubeconfigChanged) {
-				cancelServe()
-			}
-			if shutdownErr := shutdownServer(server); shutdownErr != nil {
-				return shutdownErr
-			}
-			return err
+			return shutdownAfterRuntimeChange(server, cancelServe, err, logger)
 		case <-ttlCh:
 			if activityHandler.isIdleFor(proxyTTL) {
 				logger.Printf("shutting down after %s without active requests", proxyTTL)
 				return shutdownServer(server)
 			}
 		case err := <-errCh:
-			if err != nil && !errors.Is(err, http.ErrServerClosed) {
-				return err
-			}
-			return nil
+			return normalizeServeError(err)
 		}
 	}
+}
+
+func proxyTTLChannel(proxyTTL time.Duration) (<-chan time.Time, func()) {
+	if proxyTTL <= 0 {
+		return nil, func() {}
+	}
+	ticker := time.NewTicker(calculateTTLCheckInterval(proxyTTL))
+	return ticker.C, ticker.Stop
+}
+
+func serveStopChannel(stop <-chan os.Signal) (<-chan os.Signal, func()) {
+	if stop != nil {
+		return stop, func() {}
+	}
+	signalStop := make(chan os.Signal, 1)
+	signal.Notify(signalStop, os.Interrupt, syscall.SIGTERM)
+	return signalStop, func() { signal.Stop(signalStop) }
+}
+
+func shutdownAfterRuntimeChange(server *http.Server, cancelServe context.CancelFunc, err error, logger *log.Logger) error {
+	if err != nil && !isRuntimeFileChange(err) {
+		logger.Printf("shutting down after runtime configuration file error: %v", err)
+	}
+	if errors.Is(err, errSourceKubeconfigChanged) {
+		cancelServe()
+	}
+	if shutdownErr := shutdownServer(server); shutdownErr != nil {
+		return shutdownErr
+	}
+	return err
+}
+
+func normalizeServeError(err error) error {
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 func isRuntimeFileChange(err error) bool {
