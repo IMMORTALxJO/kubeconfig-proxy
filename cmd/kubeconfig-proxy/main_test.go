@@ -1081,6 +1081,29 @@ func TestReexecServeProcessUsesCurrentExecutableAndState(t *testing.T) {
 	if want := []string{gotExecutable, "serve", "--state", statePath}; !slices.Equal(gotArgs, want) {
 		t.Fatalf("reexec args = %v, want %v", gotArgs, want)
 	}
+	if err := reexecServeProcessWithExec(statePath, func(string, []string, []string) error { return nil }); err != nil {
+		t.Fatalf("successful reexec = %v, want nil", err)
+	}
+}
+
+func TestNormalizeServeError(t *testing.T) {
+	wantErr := errors.New("serve failed")
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{name: "nil", err: nil, want: nil},
+		{name: "server closed", err: http.ErrServerClosed, want: nil},
+		{name: "serve failure", err: wantErr, want: wantErr},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := normalizeServeError(test.err); !errors.Is(got, test.want) {
+				t.Fatalf("normalizeServeError(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
 }
 
 func TestWatchRuntimeFilesPrioritizesSourceKubeconfigChange(t *testing.T) {
@@ -1118,6 +1141,81 @@ func TestWatchRuntimeFilesPrioritizesSourceKubeconfigChange(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("runtime file watcher did not detect changes")
+	}
+}
+
+func TestWatchRuntimeFilesReportsStateReadError(t *testing.T) {
+	statePath, sourcePath, stateSnapshot, sourceSnapshot := newRuntimeFileWatcherTest(t)
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(statePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	changed := watchRuntimeFiles(context.Background(), statePath, stateSnapshot, sourcePath, sourceSnapshot)
+	assertRuntimeFileWatcherError(t, changed, "read state file")
+}
+
+func TestWatchRuntimeFilesReportsSourceReadError(t *testing.T) {
+	statePath, sourcePath, stateSnapshot, sourceSnapshot := newRuntimeFileWatcherTest(t)
+	if err := os.Remove(sourcePath); err != nil {
+		t.Fatal(err)
+	}
+
+	changed := watchRuntimeFiles(context.Background(), statePath, stateSnapshot, sourcePath, sourceSnapshot)
+	assertRuntimeFileWatcherError(t, changed, "read source kubeconfig")
+}
+
+func TestWatchRuntimeFilesStopsWhenCanceled(t *testing.T) {
+	statePath, sourcePath, stateSnapshot, sourceSnapshot := newRuntimeFileWatcherTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	changed := watchRuntimeFiles(ctx, statePath, stateSnapshot, sourcePath, sourceSnapshot)
+	cancel()
+
+	select {
+	case _, ok := <-changed:
+		if ok {
+			t.Fatal("runtime file watcher emitted a change after cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runtime file watcher did not stop after cancellation")
+	}
+}
+
+func newRuntimeFileWatcherTest(t *testing.T) (string, string, runtimeFileSnapshot, runtimeFileSnapshot) {
+	t.Helper()
+
+	tempDir := t.TempDir()
+	statePath := filepath.Join(tempDir, "state.yaml")
+	sourcePath := filepath.Join(tempDir, "source.yaml")
+	if err := os.WriteFile(statePath, []byte("state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateSnapshot, err := readRuntimeFileSnapshot(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceSnapshot, err := readRuntimeFileSnapshot(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return statePath, sourcePath, stateSnapshot, sourceSnapshot
+}
+
+func assertRuntimeFileWatcherError(t *testing.T, changed <-chan error, want string) {
+	t.Helper()
+
+	select {
+	case err := <-changed:
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("runtime file watcher error = %v, want to contain %q", err, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("runtime file watcher did not report %q", want)
 	}
 }
 
