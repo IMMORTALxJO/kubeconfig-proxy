@@ -178,12 +178,16 @@ expired proxy without treating the serve process as a permanent daemon.
 3. load source contexts and construct upstream targets;
 4. construct the proxy handler and TLS certificate;
 5. listen on the configured address;
-6. watch the state file for modification or removal.
+6. watch the state file and source kubeconfig for modification or removal.
 
 When the state file changes, the current HTTP server shuts down gracefully and
 the runtime is rebuilt from the new profile. Removing the state file stops the
-server with an error. This keeps state reload explicit and avoids mutable global
-configuration inside the proxy.
+server with an error. A source kubeconfig change cancels active proxy requests,
+shuts down the HTTP server, and replaces the `serve` process through `exec`.
+Replacing the process clears client-go authentication caches before refreshed
+tokens, client certificates, and exec credential configuration are loaded into
+new upstream transports. This keeps runtime reload explicit, bounds credential
+cache lifetime, and avoids mutable global configuration inside the proxy.
 
 The activity wrapper tracks active proxied requests and last activity. The
 readiness endpoint does not extend the idle TTL. A zero TTL disables idle

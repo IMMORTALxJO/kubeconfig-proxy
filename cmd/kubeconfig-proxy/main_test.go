@@ -2,13 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -799,6 +802,159 @@ func TestServeStateRestartsWhenStateFileChanges(t *testing.T) {
 	assertServeLogContains(t, statePath, "targets:          beta")
 }
 
+func TestServeStateReloadsOIDCCredentialsWhenSourceKubeconfigChanges(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(w, `{"authorization":%q}`, r.Header.Get("Authorization"))
+	}))
+	defer upstream.Close()
+
+	test := newOIDCReloadTest(t, upstream)
+	restartedStatePath, errCh, restartErr := startOIDCReloadServe(test.statePath)
+	assertProxyUsesOIDCToken(t, test.profile, test.initialToken)
+	replaceOIDCTokenPreservingMetadata(t, test.sourcePath, test.refreshedToken)
+	assertServeProcessReplacement(t, test.statePath, restartedStatePath, errCh, restartErr)
+}
+
+type oidcReloadTest struct {
+	profile        *proxystate.Profile
+	statePath      string
+	sourcePath     string
+	initialToken   string
+	refreshedToken string
+}
+
+func newOIDCReloadTest(t *testing.T, upstream *httptest.Server) oidcReloadTest {
+	t.Helper()
+
+	initialToken := validMainTestOIDCToken("initial")
+	refreshedToken := validMainTestOIDCToken("renewed")
+	sourcePath := writeMainTestKubeconfigWithContexts(t, []mainTestContext{{
+		name:      "alpha",
+		serverURL: upstream.URL,
+		caData:    mainTestServerCAData(upstream),
+		authProvider: &clientcmdapi.AuthProviderConfig{
+			Name: "oidc",
+			Config: map[string]string{
+				"idp-issuer-url": "https://issuer.example.test",
+				"client-id":      "kubeconfig-proxy-test",
+				"id-token":       initialToken,
+			},
+		},
+	}})
+	listenAddr, err := pickAvailableListenAddr()
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, keyPEM, err := generateTLSCertificate(listenAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := &proxystate.Profile{
+		Version:          proxystate.Version,
+		Name:             "oidc-reload-proxy",
+		SourceKubeconfig: sourcePath,
+		Listen:           listenAddr,
+		Contexts:         []string{"alpha"},
+		PrimaryContext:   "alpha",
+		BearerToken:      "state-token",
+		ProxyTTL:         "0s",
+		TLS: proxystate.TLS{
+			CertPEM: string(certPEM),
+			KeyPEM:  string(keyPEM),
+		},
+		Options: proxystate.ProxyOptions{
+			RequestTimeout: "2s",
+			Retries:        0,
+			RetryBackoff:   "1ms",
+		},
+	}
+	statePath := filepath.Join(t.TempDir(), "oidc-reload-proxy.yaml")
+	if err := proxystate.Save(statePath, profile); err != nil {
+		t.Fatal(err)
+	}
+	return oidcReloadTest{
+		profile:        profile,
+		statePath:      statePath,
+		sourcePath:     sourcePath,
+		initialToken:   initialToken,
+		refreshedToken: refreshedToken,
+	}
+}
+
+func startOIDCReloadServe(statePath string) (<-chan string, <-chan error, error) {
+	restartedStatePath := make(chan string, 1)
+	restartErr := errors.New("test process replaced")
+	restart := func(statePath string) error {
+		restartedStatePath <- statePath
+		return restartErr
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runServeStateWithRestarter([]string{"--state", statePath}, nil, restart)
+	}()
+	return restartedStatePath, errCh, restartErr
+}
+
+func assertProxyUsesOIDCToken(t *testing.T, profile *proxystate.Profile, token string) {
+	t.Helper()
+
+	readyClient, err := newProfileHTTPClient(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := waitReady(readyClient, profile, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if body := getProxyBody(t, profile, "/version"); !strings.Contains(body, token) {
+		t.Fatalf("proxy body = %s, want OIDC token", body)
+	}
+}
+
+func replaceOIDCTokenPreservingMetadata(t *testing.T, sourcePath, refreshedToken string) {
+	t.Helper()
+
+	initialSourceInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := clientcmd.LoadFromFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.AuthInfos["user-alpha"].AuthProvider.Config["id-token"] = refreshedToken
+	if err := clientcmd.WriteToFile(*config, sourcePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(sourcePath, initialSourceInfo.ModTime(), initialSourceInfo.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	updatedSourceInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedSourceInfo.Size() != initialSourceInfo.Size() {
+		t.Fatalf("updated source kubeconfig size = %d, want unchanged size %d", updatedSourceInfo.Size(), initialSourceInfo.Size())
+	}
+}
+
+func assertServeProcessReplacement(t *testing.T, statePath string, restartedStatePath <-chan string, errCh <-chan error, restartErr error) {
+	t.Helper()
+
+	select {
+	case gotStatePath := <-restartedStatePath:
+		if gotStatePath != statePath {
+			t.Fatalf("restarted state path = %q, want %q", gotStatePath, statePath)
+		}
+	case err := <-errCh:
+		t.Fatalf("serve exited before process replacement: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("serve did not replace its process after source kubeconfig changed")
+	}
+	if err := <-errCh; !errors.Is(err, restartErr) {
+		t.Fatalf("serve error = %v, want process replacement error", err)
+	}
+}
+
 func waitForProxyTarget(t *testing.T, profile *proxystate.Profile, errCh <-chan error, target string) {
 	t.Helper()
 
@@ -828,6 +984,306 @@ func assertServeLogContains(t *testing.T, statePath, want string) {
 	}
 	if !strings.Contains(string(logData), want) {
 		t.Fatalf("reloaded serve log = %q, want %q", string(logData), want)
+	}
+}
+
+func TestServeHTTPRuntimeReloadCancelsActiveRequest(t *testing.T) {
+	listenAddr, err := pickAvailableListenAddr()
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, keyPEM, err := generateTLSCertificate(listenAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsCertificate, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requestStarted := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	handler := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-r.Context().Done()
+		close(requestCanceled)
+	})
+	runtimeChanged := make(chan error, 1)
+	serveErrCh := make(chan error, 1)
+	go func() {
+		serveErrCh <- serveHTTP(
+			listener,
+			handler,
+			tlsCertificate,
+			0,
+			"state-token",
+			nil,
+			runtimeChanged,
+			log.New(io.Discard, "", 0),
+		)
+	}()
+
+	client, err := newProfileHTTPClient(&proxystate.Profile{TLS: proxystate.TLS{CertPEM: string(certPEM)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodGet, "https://"+listenAddr+"/watch", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer state-token")
+	requestErrCh := make(chan error, 1)
+	go func() {
+		response, requestErr := client.Do(request)
+		if requestErr == nil {
+			_ = response.Body.Close()
+		}
+		requestErrCh <- requestErr
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("active request did not start")
+	}
+	runtimeChanged <- errSourceKubeconfigChanged
+	select {
+	case <-requestCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("runtime reload did not cancel active request")
+	}
+	if err := <-serveErrCh; !errors.Is(err, errSourceKubeconfigChanged) {
+		t.Fatalf("serveHTTP error = %v, want source kubeconfig change", err)
+	}
+	<-requestErrCh
+}
+
+func TestServeHTTPContinuesAfterRuntimeWatcherCloses(t *testing.T) {
+	listener, tlsCertificate := newServeHTTPTestListener(t)
+	runtimeChanged := make(chan error)
+	close(runtimeChanged)
+	stop := make(chan os.Signal, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- serveHTTP(
+			listener,
+			http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+			tlsCertificate,
+			0,
+			"state-token",
+			stop,
+			runtimeChanged,
+			log.New(io.Discard, "", 0),
+		)
+	}()
+
+	time.Sleep(2 * statePollInterval)
+	stop <- os.Interrupt
+	if err := <-errCh; err != nil {
+		t.Fatalf("serveHTTP error = %v, want nil", err)
+	}
+}
+
+func TestServeHTTPReturnsListenerError(t *testing.T) {
+	listener, tlsCertificate := newServeHTTPTestListener(t)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err := serveHTTP(
+		listener,
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		tlsCertificate,
+		0,
+		"state-token",
+		make(chan os.Signal),
+		nil,
+		log.New(io.Discard, "", 0),
+	)
+	if err == nil {
+		t.Fatal("serveHTTP returned nil for a closed listener")
+	}
+}
+
+func newServeHTTPTestListener(t *testing.T) (net.Listener, tls.Certificate) {
+	t.Helper()
+
+	listenAddr, err := pickAvailableListenAddr()
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, keyPEM, err := generateTLSCertificate(listenAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsCertificate, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return listener, tlsCertificate
+}
+
+func TestReexecServeProcessUsesCurrentExecutableAndState(t *testing.T) {
+	wantErr := errors.New("exec failed")
+	statePath := filepath.Join(t.TempDir(), "proxy.yaml")
+	var gotExecutable string
+	var gotArgs []string
+	err := reexecServeProcessWithExec(statePath, func(executable string, args []string, _ []string) error {
+		gotExecutable = executable
+		gotArgs = append([]string(nil), args...)
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("reexec error = %v, want injected error", err)
+	}
+	if gotExecutable == "" {
+		t.Fatal("reexec executable is empty")
+	}
+	if want := []string{gotExecutable, "serve", "--state", statePath}; !slices.Equal(gotArgs, want) {
+		t.Fatalf("reexec args = %v, want %v", gotArgs, want)
+	}
+	if err := reexecServeProcessWithExec(statePath, func(string, []string, []string) error { return nil }); err != nil {
+		t.Fatalf("successful reexec = %v, want nil", err)
+	}
+}
+
+func TestNormalizeServeError(t *testing.T) {
+	wantErr := errors.New("serve failed")
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{name: "nil", err: nil, want: nil},
+		{name: "server closed", err: http.ErrServerClosed, want: nil},
+		{name: "serve failure", err: wantErr, want: wantErr},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := normalizeServeError(test.err); !errors.Is(got, test.want) {
+				t.Fatalf("normalizeServeError(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
+}
+
+func TestWatchRuntimeFilesPrioritizesSourceKubeconfigChange(t *testing.T) {
+	tempDir := t.TempDir()
+	statePath := filepath.Join(tempDir, "state.yaml")
+	sourcePath := filepath.Join(tempDir, "source.yaml")
+	if err := os.WriteFile(statePath, []byte("state-before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("source-before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateSnapshot, err := readRuntimeFileSnapshot(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceSnapshot, err := readRuntimeFileSnapshot(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, []byte("state-after"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("source-after"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	changed := watchRuntimeFiles(ctx, statePath, stateSnapshot, sourcePath, sourceSnapshot)
+	select {
+	case err := <-changed:
+		if !errors.Is(err, errSourceKubeconfigChanged) {
+			t.Fatalf("runtime file change = %v, want source kubeconfig change", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime file watcher did not detect changes")
+	}
+}
+
+func TestWatchRuntimeFilesReportsStateReadError(t *testing.T) {
+	statePath, sourcePath, stateSnapshot, sourceSnapshot := newRuntimeFileWatcherTest(t)
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(statePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	changed := watchRuntimeFiles(context.Background(), statePath, stateSnapshot, sourcePath, sourceSnapshot)
+	assertRuntimeFileWatcherError(t, changed, "read state file")
+}
+
+func TestWatchRuntimeFilesReportsSourceReadError(t *testing.T) {
+	statePath, sourcePath, stateSnapshot, sourceSnapshot := newRuntimeFileWatcherTest(t)
+	if err := os.Remove(sourcePath); err != nil {
+		t.Fatal(err)
+	}
+
+	changed := watchRuntimeFiles(context.Background(), statePath, stateSnapshot, sourcePath, sourceSnapshot)
+	assertRuntimeFileWatcherError(t, changed, "read source kubeconfig")
+}
+
+func TestWatchRuntimeFilesStopsWhenCanceled(t *testing.T) {
+	statePath, sourcePath, stateSnapshot, sourceSnapshot := newRuntimeFileWatcherTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	changed := watchRuntimeFiles(ctx, statePath, stateSnapshot, sourcePath, sourceSnapshot)
+	cancel()
+
+	select {
+	case _, ok := <-changed:
+		if ok {
+			t.Fatal("runtime file watcher emitted a change after cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runtime file watcher did not stop after cancellation")
+	}
+}
+
+func newRuntimeFileWatcherTest(t *testing.T) (string, string, runtimeFileSnapshot, runtimeFileSnapshot) {
+	t.Helper()
+
+	tempDir := t.TempDir()
+	statePath := filepath.Join(tempDir, "state.yaml")
+	sourcePath := filepath.Join(tempDir, "source.yaml")
+	if err := os.WriteFile(statePath, []byte("state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateSnapshot, err := readRuntimeFileSnapshot(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceSnapshot, err := readRuntimeFileSnapshot(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return statePath, sourcePath, stateSnapshot, sourceSnapshot
+}
+
+func assertRuntimeFileWatcherError(t *testing.T, changed <-chan error, want string) {
+	t.Helper()
+
+	select {
+	case err := <-changed:
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("runtime file watcher error = %v, want to contain %q", err, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("runtime file watcher did not report %q", want)
 	}
 }
 
@@ -1413,6 +1869,73 @@ options:
 	}
 }
 
+func TestLoadServeRuntimeReturnsSourceKubeconfigErrors(t *testing.T) {
+	tests := []struct {
+		name            string
+		writeSource     bool
+		sourceContents  string
+		wantErrContains string
+	}{
+		{
+			name:            "missing source",
+			wantErrContains: "read source kubeconfig",
+		},
+		{
+			name:            "invalid source",
+			writeSource:     true,
+			sourceContents:  "contexts: [",
+			wantErrContains: "error loading config file",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			sourcePath := filepath.Join(tempDir, "source.yaml")
+			if test.writeSource {
+				if err := os.WriteFile(sourcePath, []byte(test.sourceContents), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			profile := validMainTestProfile()
+			profile.SourceKubeconfig = sourcePath
+			statePath := filepath.Join(tempDir, "state.yaml")
+			if err := proxystate.Save(statePath, profile); err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err := loadServeRuntime(statePath)
+			if err == nil || !strings.Contains(err.Error(), test.wantErrContains) {
+				t.Fatalf("loadServeRuntime error = %v, want to contain %q", err, test.wantErrContains)
+			}
+		})
+	}
+}
+
+func TestLoadServeRuntimeRejectsMissingSelectedContext(t *testing.T) {
+	sourcePath := writeMainTestKubeconfig(t, "https://cluster.example.test", nil)
+	profile := validMainTestProfile()
+	profile.SourceKubeconfig = sourcePath
+	profile.Contexts = []string{"missing"}
+	profile.PrimaryContext = "missing"
+	statePath := filepath.Join(t.TempDir(), "state.yaml")
+	if err := proxystate.Save(statePath, profile); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := loadServeRuntime(statePath)
+	if err == nil || !strings.Contains(err.Error(), `context "missing" not found`) {
+		t.Fatalf("loadServeRuntime error = %v, want missing context", err)
+	}
+}
+
+func TestServeRuntimeReturnsListenError(t *testing.T) {
+	runtime := &serveRuntimeConfig{profile: &proxystate.Profile{Listen: "127.0.0.1:-1"}}
+	_, err := serveRuntime("state.yaml", runtime, runtimeFileSnapshot{}, nil, log.New(io.Discard, "", 0))
+	if err == nil {
+		t.Fatal("serveRuntime returned nil for invalid listen address")
+	}
+}
+
 func TestWriteExecCredential(t *testing.T) {
 	var buf bytes.Buffer
 	expiration := time.Date(2026, 7, 16, 15, 30, 0, 0, time.UTC)
@@ -1554,9 +2077,10 @@ func writeMainTestKubeconfig(t *testing.T, serverURL string, caData []byte) stri
 }
 
 type mainTestContext struct {
-	name      string
-	serverURL string
-	caData    []byte
+	name         string
+	serverURL    string
+	caData       []byte
+	authProvider *clientcmdapi.AuthProviderConfig
 }
 
 func validMainTestProfile() *proxystate.Profile {
@@ -1602,7 +2126,12 @@ func writeMainTestKubeconfigWithContextsAndCurrent(t *testing.T, contexts []main
 			Server:                   context.serverURL,
 			CertificateAuthorityData: context.caData,
 		}
-		config.AuthInfos[userName] = &clientcmdapi.AuthInfo{Token: "source-token"}
+		config.AuthInfos[userName] = &clientcmdapi.AuthInfo{
+			AuthProvider: context.authProvider,
+		}
+		if context.authProvider == nil {
+			config.AuthInfos[userName].Token = "source-token"
+		}
 		config.Contexts[context.name] = &clientcmdapi.Context{
 			Cluster:   clusterName,
 			AuthInfo:  userName,
@@ -1616,6 +2145,12 @@ func writeMainTestKubeconfigWithContextsAndCurrent(t *testing.T, contexts []main
 		t.Fatal(err)
 	}
 	return path
+}
+
+func validMainTestOIDCToken(subject string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d,"sub":%q}`, time.Now().Add(time.Hour).Unix(), subject)))
+	return header + "." + payload + "."
 }
 
 func captureStdout(t *testing.T, fn func() error) string {

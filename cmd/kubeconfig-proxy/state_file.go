@@ -2,29 +2,35 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"time"
 )
 
-type stateFileSnapshot struct {
-	modTime time.Time
-	size    int64
+type runtimeFileSnapshot struct {
+	checksum [sha256.Size]byte
 }
 
-func readStateFileSnapshot(path string) (stateFileSnapshot, error) {
-	info, err := os.Stat(path)
+func readRuntimeFileSnapshot(path string) (runtimeFileSnapshot, error) {
+	data, err := os.ReadFile(path) // #nosec G304 -- runtime file paths come from the explicit state path and its validated source kubeconfig path.
 	if err != nil {
-		return stateFileSnapshot{}, err
+		return runtimeFileSnapshot{}, err
 	}
-	return stateFileSnapshot{modTime: info.ModTime(), size: info.Size()}, nil
+	return runtimeFileSnapshot{checksum: sha256.Sum256(data)}, nil
 }
 
-func (s stateFileSnapshot) isEqual(other stateFileSnapshot) bool {
-	return s.size == other.size && s.modTime.Equal(other.modTime)
+func (s runtimeFileSnapshot) isEqual(other runtimeFileSnapshot) bool {
+	return s.checksum == other.checksum
 }
 
-func watchStateFile(ctx context.Context, path string, snapshot stateFileSnapshot) <-chan error {
+func watchRuntimeFiles(
+	ctx context.Context,
+	statePath string,
+	stateSnapshot runtimeFileSnapshot,
+	sourceKubeconfigPath string,
+	sourceKubeconfigSnapshot runtimeFileSnapshot,
+) <-chan error {
 	changed := make(chan error, 1)
 	ticker := time.NewTicker(statePollInterval)
 	go func() {
@@ -35,17 +41,26 @@ func watchStateFile(ctx context.Context, path string, snapshot stateFileSnapshot
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				next, err := readStateFileSnapshot(path)
+				nextState, err := readRuntimeFileSnapshot(statePath)
 				if err != nil {
 					if os.IsNotExist(err) {
-						changed <- stateFileRemovedError(path)
+						changed <- stateFileRemovedError(statePath)
 						return
 					}
-					changed <- fmt.Errorf("stat state file %s: %w", path, err)
+					changed <- fmt.Errorf("read state file %s: %w", statePath, err)
 					return
 				}
-				if !snapshot.isEqual(next) {
-					changed <- nil
+				nextSourceKubeconfig, err := readRuntimeFileSnapshot(sourceKubeconfigPath)
+				if err != nil {
+					changed <- fmt.Errorf("read source kubeconfig %s: %w", sourceKubeconfigPath, err)
+					return
+				}
+				if !sourceKubeconfigSnapshot.isEqual(nextSourceKubeconfig) {
+					changed <- errSourceKubeconfigChanged
+					return
+				}
+				if !stateSnapshot.isEqual(nextState) {
+					changed <- errStateFileChanged
 					return
 				}
 			}

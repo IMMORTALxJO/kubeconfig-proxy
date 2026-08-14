@@ -130,6 +130,13 @@ to disable idle shutdown.
 Serve logs are disabled by default. Pass `--logs-enabled` to `add-context` to
 write auto-started `serve` output to `<state>.log`.
 
+While `serve` is running, it watches both the state file and the selected source
+kubeconfig. Replacing credentials in that kubeconfig replaces the `serve`
+process and rebuilds the upstream clients so refreshed OIDC tokens, client
+certificates, and exec credential configuration are used without recreating the
+proxy context. Active proxy requests are canceled before the process is
+replaced; clients can reconnect to the same local address immediately.
+
 ## Selecting Source Contexts
 
 You can also select source contexts with a regular expression:
