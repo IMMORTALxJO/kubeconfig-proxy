@@ -23,14 +23,14 @@ import (
 
 const shutdownTimeout = 5 * time.Second
 
-type serveProcessRestarter func(statePath string) error
+type serveProcessReplacer func(statePath string) error
 type processExec func(executable string, args []string, env []string) error
 
 func runServeState(args []string, stop <-chan os.Signal) error {
-	return runServeStateWithRestarter(args, stop, reexecServeProcess)
+	return runServeStateWithReplacer(args, stop, reexecServeProcess)
 }
 
-func runServeStateWithRestarter(args []string, stop <-chan os.Signal, restartProcess serveProcessRestarter) error {
+func runServeStateWithReplacer(args []string, stop <-chan os.Signal, replaceProcess serveProcessReplacer) error {
 	flags := flag.NewFlagSet("kubeconfig-proxy serve", flag.ContinueOnError)
 	statePath := flags.String("state", "", "state file path")
 	if err := flags.Parse(args); err != nil {
@@ -44,38 +44,22 @@ func runServeStateWithRestarter(args []string, stop <-chan os.Signal, restartPro
 	if err != nil {
 		return err
 	}
-	for {
-		logger, closeLogger, err := newServeLogger(*statePath, runtime.profile.LogsEnabled)
-		if err != nil {
-			return err
-		}
-		restart, serveErr := serveRuntime(*statePath, runtime, snapshot, stop, logger)
-		closeErr := closeLogger()
-		if errors.Is(serveErr, errSourceKubeconfigChanged) {
-			if closeErr != nil {
-				return closeErr
-			}
-			return restartProcess(*statePath)
-		}
-		if serveErr == nil {
-			serveErr = closeErr
-		}
-		if serveErr != nil {
-			return serveErr
-		}
-		if !restart {
-			return nil
-		}
-
-		previousSourceSnapshot := runtime.sourceSnapshot
-		runtime, snapshot, err = loadServeRuntime(*statePath)
-		if err != nil {
-			return err
-		}
-		if !previousSourceSnapshot.isEqual(runtime.sourceSnapshot) {
-			return restartProcess(*statePath)
-		}
+	logger, closeLogger, err := newServeLogger(*statePath, runtime.profile.LogsEnabled)
+	if err != nil {
+		return err
 	}
+	serveErr := serveRuntime(*statePath, runtime, snapshot, stop, logger)
+	closeErr := closeLogger()
+	if isRuntimeFileChange(serveErr) {
+		if closeErr != nil {
+			return closeErr
+		}
+		return replaceProcess(*statePath)
+	}
+	if serveErr != nil {
+		return serveErr
+	}
+	return closeErr
 }
 
 type serveRuntimeConfig struct {
@@ -144,10 +128,10 @@ func loadServeRuntime(statePath string) (*serveRuntimeConfig, runtimeFileSnapsho
 	}, snapshot, nil
 }
 
-func serveRuntime(statePath string, runtime *serveRuntimeConfig, snapshot runtimeFileSnapshot, stop <-chan os.Signal, logger *log.Logger) (bool, error) {
+func serveRuntime(statePath string, runtime *serveRuntimeConfig, snapshot runtimeFileSnapshot, stop <-chan os.Signal, logger *log.Logger) error {
 	listener, err := net.Listen("tcp", runtime.profile.Listen)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer listener.Close()
 
@@ -173,26 +157,20 @@ func serveRuntime(statePath string, runtime *serveRuntimeConfig, snapshot runtim
 
 	err = serveHTTP(listener, runtime.handler, runtime.tlsCertificate, runtime.proxyTTL, runtime.profile.BearerToken, stop, runtimeChanged, logger)
 	if errors.Is(err, errStateFileChanged) {
-		logger.Printf("state file changed, restarting serve")
-		return true, nil
+		logger.Printf("state file changed, replacing serve process")
 	}
 	if errors.Is(err, errSourceKubeconfigChanged) {
 		logger.Printf("source kubeconfig changed, replacing serve process")
 	}
-	return false, err
+	return err
 }
 
 func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.Certificate, proxyTTL time.Duration, bearerToken string, stop <-chan os.Signal, runtimeChanged <-chan error, logger *log.Logger) error {
 	activityHandler := newActivityHandler(handler, bearerToken)
-	serveCtx, cancelServe := context.WithCancel(context.Background())
-	defer cancelServe()
 	server := &http.Server{
 		Addr:              listener.Addr().String(),
 		Handler:           activityHandler,
 		ReadHeaderTimeout: 10 * time.Second,
-		BaseContext: func(net.Listener) context.Context {
-			return serveCtx
-		},
 	}
 	errCh := make(chan error, 1)
 	go func() {
@@ -207,6 +185,7 @@ func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.C
 	defer stopTTL()
 	stop, stopSignals := serveStopChannel(stop)
 	defer stopSignals()
+	var pendingRuntimeChange error
 
 	for {
 		select {
@@ -218,7 +197,16 @@ func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.C
 				runtimeChanged = nil
 				continue
 			}
-			return shutdownAfterRuntimeChange(server, cancelServe, err, logger)
+			if isRuntimeFileChange(err) && !activityHandler.beginDrainIfIdle() {
+				pendingRuntimeChange = err
+				logger.Printf("runtime configuration changed, waiting for active requests before replacing serve process")
+				continue
+			}
+			return shutdownAfterRuntimeChange(server, err, logger)
+		case <-activityHandler.becameIdle:
+			if pendingRuntimeChange != nil && activityHandler.beginDrainIfIdle() {
+				return shutdownAfterRuntimeChange(server, pendingRuntimeChange, logger)
+			}
 		case <-ttlCh:
 			if activityHandler.isIdleFor(proxyTTL) {
 				logger.Printf("shutting down after %s without active requests", proxyTTL)
@@ -247,12 +235,9 @@ func serveStopChannel(stop <-chan os.Signal) (<-chan os.Signal, func()) {
 	return signalStop, func() { signal.Stop(signalStop) }
 }
 
-func shutdownAfterRuntimeChange(server *http.Server, cancelServe context.CancelFunc, err error, logger *log.Logger) error {
+func shutdownAfterRuntimeChange(server *http.Server, err error, logger *log.Logger) error {
 	if err != nil && !isRuntimeFileChange(err) {
 		logger.Printf("shutting down after runtime configuration file error: %v", err)
-	}
-	if errors.Is(err, errSourceKubeconfigChanged) {
-		cancelServe()
 	}
 	if shutdownErr := shutdownServer(server); shutdownErr != nil {
 		return shutdownErr
@@ -278,11 +263,11 @@ func reexecServeProcess(statePath string) error {
 func reexecServeProcessWithExec(statePath string, execProcess processExec) error {
 	executable, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("resolve executable for source kubeconfig reload: %w", err)
+		return fmt.Errorf("resolve executable for runtime configuration reload: %w", err)
 	}
 	args := []string{executable, "serve", "--state", statePath}
 	if err := execProcess(executable, args, os.Environ()); err != nil { // #nosec G204 -- re-exec replaces the current process with the same binary and explicit state path.
-		return fmt.Errorf("replace serve process after source kubeconfig reload: %w", err)
+		return fmt.Errorf("replace serve process after runtime configuration reload: %w", err)
 	}
 	return nil
 }
