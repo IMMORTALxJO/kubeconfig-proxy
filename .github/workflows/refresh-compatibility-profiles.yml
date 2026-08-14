@@ -42,7 +42,7 @@ jobs:
         run: SHELLCHECK="shellcheck -S warning" make e2e-versions-test e2e-profile-update-test shellcheck actionlint
 
       - name: Create or update compatibility pull request
-        uses: peter-evans/create-pull-request@84ae59a2cdc2258d6fa0732dd66352dddae2a412 # v7.0.9
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           base: master
           branch: automation/refresh-kubernetes-compatibility
