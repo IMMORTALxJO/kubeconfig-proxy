@@ -1062,6 +1062,74 @@ func TestServeHTTPRuntimeReloadCancelsActiveRequest(t *testing.T) {
 	<-requestErrCh
 }
 
+func TestServeHTTPContinuesAfterRuntimeWatcherCloses(t *testing.T) {
+	listener, tlsCertificate := newServeHTTPTestListener(t)
+	runtimeChanged := make(chan error)
+	close(runtimeChanged)
+	stop := make(chan os.Signal, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- serveHTTP(
+			listener,
+			http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+			tlsCertificate,
+			0,
+			"state-token",
+			stop,
+			runtimeChanged,
+			log.New(io.Discard, "", 0),
+		)
+	}()
+
+	time.Sleep(2 * statePollInterval)
+	stop <- os.Interrupt
+	if err := <-errCh; err != nil {
+		t.Fatalf("serveHTTP error = %v, want nil", err)
+	}
+}
+
+func TestServeHTTPReturnsListenerError(t *testing.T) {
+	listener, tlsCertificate := newServeHTTPTestListener(t)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err := serveHTTP(
+		listener,
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		tlsCertificate,
+		0,
+		"state-token",
+		make(chan os.Signal),
+		nil,
+		log.New(io.Discard, "", 0),
+	)
+	if err == nil {
+		t.Fatal("serveHTTP returned nil for a closed listener")
+	}
+}
+
+func newServeHTTPTestListener(t *testing.T) (net.Listener, tls.Certificate) {
+	t.Helper()
+
+	listenAddr, err := pickAvailableListenAddr()
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, keyPEM, err := generateTLSCertificate(listenAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsCertificate, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return listener, tlsCertificate
+}
+
 func TestReexecServeProcessUsesCurrentExecutableAndState(t *testing.T) {
 	wantErr := errors.New("exec failed")
 	statePath := filepath.Join(t.TempDir(), "proxy.yaml")
@@ -1798,6 +1866,73 @@ options:
 	}
 	if !strings.Contains(err.Error(), "load TLS key pair from state") {
 		t.Fatalf("error = %q, want TLS key pair error", err.Error())
+	}
+}
+
+func TestLoadServeRuntimeReturnsSourceKubeconfigErrors(t *testing.T) {
+	tests := []struct {
+		name            string
+		writeSource     bool
+		sourceContents  string
+		wantErrContains string
+	}{
+		{
+			name:            "missing source",
+			wantErrContains: "read source kubeconfig",
+		},
+		{
+			name:            "invalid source",
+			writeSource:     true,
+			sourceContents:  "contexts: [",
+			wantErrContains: "error loading config file",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			sourcePath := filepath.Join(tempDir, "source.yaml")
+			if test.writeSource {
+				if err := os.WriteFile(sourcePath, []byte(test.sourceContents), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			profile := validMainTestProfile()
+			profile.SourceKubeconfig = sourcePath
+			statePath := filepath.Join(tempDir, "state.yaml")
+			if err := proxystate.Save(statePath, profile); err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err := loadServeRuntime(statePath)
+			if err == nil || !strings.Contains(err.Error(), test.wantErrContains) {
+				t.Fatalf("loadServeRuntime error = %v, want to contain %q", err, test.wantErrContains)
+			}
+		})
+	}
+}
+
+func TestLoadServeRuntimeRejectsMissingSelectedContext(t *testing.T) {
+	sourcePath := writeMainTestKubeconfig(t, "https://cluster.example.test", nil)
+	profile := validMainTestProfile()
+	profile.SourceKubeconfig = sourcePath
+	profile.Contexts = []string{"missing"}
+	profile.PrimaryContext = "missing"
+	statePath := filepath.Join(t.TempDir(), "state.yaml")
+	if err := proxystate.Save(statePath, profile); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := loadServeRuntime(statePath)
+	if err == nil || !strings.Contains(err.Error(), `context "missing" not found`) {
+		t.Fatalf("loadServeRuntime error = %v, want missing context", err)
+	}
+}
+
+func TestServeRuntimeReturnsListenError(t *testing.T) {
+	runtime := &serveRuntimeConfig{profile: &proxystate.Profile{Listen: "127.0.0.1:-1"}}
+	_, err := serveRuntime("state.yaml", runtime, runtimeFileSnapshot{}, nil, log.New(io.Discard, "", 0))
+	if err == nil {
+		t.Fatal("serveRuntime returned nil for invalid listen address")
 	}
 }
 
