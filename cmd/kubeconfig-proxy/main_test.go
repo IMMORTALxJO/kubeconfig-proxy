@@ -808,6 +808,30 @@ func TestServeStateReloadsOIDCCredentialsWhenSourceKubeconfigChanges(t *testing.
 	assertServeProcessReplacement(t, test.statePath, replacedStatePath, errCh, replaceErr)
 }
 
+func TestRunServeStateReportsLogOpenError(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"gitVersion":"v1.test"}`))
+	}))
+	defer upstream.Close()
+
+	test := newOIDCReloadTest(t, upstream)
+	test.profile.LogsEnabled = true
+	if err := proxystate.Save(test.statePath, test.profile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(test.statePath+".log", 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runServeStateWithReplacer([]string{"--state", test.statePath}, nil, func(string) error {
+		t.Fatal("process replacement called after log open error")
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), test.statePath+".log") {
+		t.Fatalf("serve error = %v, want log path", err)
+	}
+}
+
 type oidcReloadTest struct {
 	profile        *proxystate.Profile
 	statePath      string
@@ -1379,6 +1403,63 @@ func TestWaitForStableRuntimeFileSnapshotReturnsLatestWrite(t *testing.T) {
 	}
 }
 
+func TestWaitForStableRuntimeFileSnapshotStopsWhenCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := waitForStableRuntimeFileSnapshot(ctx, filepath.Join(t.TempDir(), "runtime.yaml"), runtimeFileSnapshot{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("stable runtime file snapshot error = %v, want context cancellation", err)
+	}
+}
+
+func TestWaitForStableRuntimeFileSnapshotReportsReadError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.yaml")
+
+	_, err := waitForStableRuntimeFileSnapshot(context.Background(), path, runtimeFileSnapshot{})
+	if !os.IsNotExist(err) {
+		t.Fatalf("stable runtime file snapshot error = %v, want missing file", err)
+	}
+}
+
+func TestWatchRuntimeFilesStopsWhenSourceEventCannotBeDelivered(t *testing.T) {
+	statePath, sourcePath, stateSnapshot, sourceSnapshot := newRuntimeFileWatcherTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	changed := watchRuntimeFiles(ctx, statePath, stateSnapshot, sourcePath, sourceSnapshot)
+
+	if err := os.WriteFile(sourcePath, []byte("source-after-first-change"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(statePollInterval + 2*runtimeFileSettleInterval)
+	if err := os.WriteFile(sourcePath, []byte("source-after-second-change"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(statePollInterval + 2*runtimeFileSettleInterval)
+	cancel()
+
+	assertRuntimeFileWatcherEvent(t, changed, errSourceKubeconfigChanged)
+	assertRuntimeFileWatcherClosed(t, changed)
+}
+
+func TestWatchRuntimeFilesStopsWhenStateEventCannotBeDelivered(t *testing.T) {
+	statePath, sourcePath, stateSnapshot, sourceSnapshot := newRuntimeFileWatcherTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	changed := watchRuntimeFiles(ctx, statePath, stateSnapshot, sourcePath, sourceSnapshot)
+
+	if err := os.WriteFile(statePath, []byte("state-after-first-change"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(statePollInterval + 2*runtimeFileSettleInterval)
+	if err := os.WriteFile(statePath, []byte("state-after-second-change"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(statePollInterval + 2*runtimeFileSettleInterval)
+	cancel()
+
+	assertRuntimeFileWatcherEvent(t, changed, errStateFileChanged)
+	assertRuntimeFileWatcherClosed(t, changed)
+}
+
 func newRuntimeFileWatcherTest(t *testing.T) (string, string, runtimeFileSnapshot, runtimeFileSnapshot) {
 	t.Helper()
 
@@ -1425,6 +1506,19 @@ func assertRuntimeFileWatcherEvent(t *testing.T, changed <-chan error, want erro
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("runtime file watcher did not report %v", want)
+	}
+}
+
+func assertRuntimeFileWatcherClosed(t *testing.T, changed <-chan error) {
+	t.Helper()
+
+	select {
+	case _, ok := <-changed:
+		if ok {
+			t.Fatal("runtime file watcher emitted an unexpected event")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runtime file watcher did not stop after cancellation")
 	}
 }
 
@@ -1604,6 +1698,24 @@ func TestActivityHandlerDrainsOnlyWhenIdle(t *testing.T) {
 	handler.ServeHTTP(readiness, readinessRequest)
 	if readiness.Code != http.StatusServiceUnavailable {
 		t.Fatalf("readiness status while draining = %d, want %d", readiness.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestActivityHandlerCoalescesIdleNotifications(t *testing.T) {
+	handler := newActivityHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), "state-token")
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/version", http.NoBody))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/version", http.NoBody))
+
+	select {
+	case <-handler.becameIdle:
+	default:
+		t.Fatal("activity handler did not report becoming idle")
+	}
+	select {
+	case <-handler.becameIdle:
+		t.Fatal("activity handler queued duplicate idle notifications")
+	default:
 	}
 }
 
