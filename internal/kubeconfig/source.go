@@ -40,10 +40,6 @@ func LoadSource(path string) (*Source, error) {
 }
 
 func (s *Source) SelectContexts(selection ContextSelection) ([]string, string, error) {
-	if len(selection.SelectedContexts) > 0 && strings.TrimSpace(selection.ContextRegexp) != "" {
-		return nil, "", fmt.Errorf("--contexts and --context-regexp are mutually exclusive")
-	}
-
 	contextNames, err := s.selectContextNames(selection)
 	if err != nil {
 		return nil, "", err
@@ -102,32 +98,51 @@ func (s *Source) ClientConfig(contextName string) (*clientcmdapi.Context, *rest.
 }
 
 func (s *Source) selectContextNames(selection ContextSelection) ([]string, error) {
-	switch {
-	case len(selection.SelectedContexts) > 0:
-		return append([]string(nil), selection.SelectedContexts...), nil
-	case strings.TrimSpace(selection.ContextRegexp) != "":
+	contextNames := append([]string(nil), selection.SelectedContexts...)
+	selectedNames := make(map[string]struct{}, len(contextNames))
+	for _, name := range contextNames {
+		selectedNames[name] = struct{}{}
+	}
+
+	if strings.TrimSpace(selection.ContextRegexp) != "" {
 		re, err := regexp.Compile(selection.ContextRegexp)
 		if err != nil {
 			return nil, err
 		}
-		contextNames := make([]string, 0, len(s.rawConfig.Contexts))
+		matchedNames := make([]string, 0, len(s.rawConfig.Contexts))
 		for name := range s.rawConfig.Contexts {
-			if name != selection.ProxyContextName && re.MatchString(name) {
-				contextNames = append(contextNames, name)
+			if !s.isManagedProxyContext(name) && re.MatchString(name) {
+				matchedNames = append(matchedNames, name)
 			}
 		}
-		sort.Strings(contextNames)
-		return contextNames, nil
-	default:
-		contextNames := make([]string, 0, len(s.rawConfig.Contexts))
-		for name := range s.rawConfig.Contexts {
-			if name != selection.ProxyContextName {
-				contextNames = append(contextNames, name)
+		sort.Strings(matchedNames)
+		for _, name := range matchedNames {
+			if _, ok := selectedNames[name]; ok {
+				continue
 			}
+			contextNames = append(contextNames, name)
+			selectedNames[name] = struct{}{}
 		}
-		sort.Strings(contextNames)
-		return contextNames, nil
 	}
+
+	if len(selection.SelectedContexts) == 0 && strings.TrimSpace(selection.ContextRegexp) == "" {
+		for name := range s.rawConfig.Contexts {
+			if !s.isManagedProxyContext(name) {
+				contextNames = append(contextNames, name)
+			}
+		}
+		sort.Strings(contextNames)
+	}
+	return contextNames, nil
+}
+
+func (s *Source) isManagedProxyContext(contextName string) bool {
+	kubeContext := s.rawConfig.Contexts[contextName]
+	if kubeContext == nil {
+		return false
+	}
+	entryName := formatProxyEntryName(contextName)
+	return kubeContext.Cluster == entryName && kubeContext.AuthInfo == entryName
 }
 
 func (s *Source) validateSelectedContexts(proxyContextName string, contextNames []string) error {
