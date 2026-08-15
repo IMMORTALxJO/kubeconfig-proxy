@@ -3,9 +3,21 @@
 # Sourced by e2e/run.sh after the proxy contexts have been created.
 
 run_context_checks() {
+  local absolute_kubeconfig
   local duplicate_output
   local duplicate_status
+  local dynamic_kubeconfig
+  local moved_kubeconfig
   local state_file_count
+  local stored_kubeconfig
+
+  absolute_kubeconfig="$(printf '%s\n' "$KUBECONFIG_FILE" | sed 's#//*#/#g')"
+  stored_kubeconfig="$(sed -n 's/^sourceKubeconfig: //p' "$STATE_FILE")"
+  if [[ "$stored_kubeconfig" == "$absolute_kubeconfig" ]]; then
+    add_result "PASS" "explicit kubeconfig path is stored in state" "$absolute_kubeconfig"
+  else
+    add_result "FAIL" "explicit kubeconfig path is stored in state" "stored=$stored_kubeconfig expected=$absolute_kubeconfig"
+  fi
 
   duplicate_output="$("$BINARY" add-context "$DUPLICATE_PROXY_CONTEXT" \
     --kubeconfig "$KUBECONFIG_FILE" \
@@ -38,4 +50,27 @@ run_context_checks() {
   else
     add_result "FAIL" "default state paths avoid sanitized-name collisions" "found $state_file_count state files"
   fi
+
+  dynamic_kubeconfig="$TMP_DIR/dynamic-kubeconfig"
+  moved_kubeconfig="$TMP_DIR/moved-kubeconfig"
+  cp "$KUBECONFIG_FILE" "$dynamic_kubeconfig"
+  run_cmd "add proxy context with default kubeconfig loading" env KUBECONFIG="$dynamic_kubeconfig" "$BINARY" add-context "$DYNAMIC_PROXY_CONTEXT" \
+    --state "$DYNAMIC_STATE_FILE" \
+    --contexts "$CTX_A,$CTX_B" \
+    --primary-context "$CTX_A" \
+    --listen "127.0.0.1:0" \
+    --proxy-ttl "2m" \
+    --request-timeout "$TIMEOUT" \
+    --logs-enabled \
+    --exec-command "$BINARY"
+  if grep -q '^sourceKubeconfig:' "$DYNAMIC_STATE_FILE"; then
+    add_result "FAIL" "default kubeconfig path is omitted from state" "unexpected sourceKubeconfig key"
+  else
+    add_result "PASS" "default kubeconfig path is omitted from state" "state uses standard loading rules"
+  fi
+  mv "$dynamic_kubeconfig" "$moved_kubeconfig"
+  run_cmd "proxy follows default kubeconfig after file move" env KUBECONFIG="$moved_kubeconfig" "$KUBECTL_BIN" \
+    --request-timeout="$TIMEOUT" \
+    --context "$DYNAMIC_PROXY_CONTEXT" \
+    get nodes
 }

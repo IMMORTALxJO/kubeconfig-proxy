@@ -83,6 +83,11 @@ func (s *Source) CurrentContext() string {
 	return s.rawConfig.CurrentContext
 }
 
+// KubeconfigPaths returns the files that can affect the loaded configuration.
+func (s *Source) KubeconfigPaths() []string {
+	return s.loadingRules.GetLoadingPrecedence()
+}
+
 func (s *Source) ClientConfig(contextName string) (*clientcmdapi.Context, *rest.Config, error) {
 	kubeContext, ok := s.rawConfig.Contexts[contextName]
 	if !ok || kubeContext == nil {

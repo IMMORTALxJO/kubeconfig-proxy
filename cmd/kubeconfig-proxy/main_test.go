@@ -171,7 +171,50 @@ func TestAddContextWritesStateAndKubeconfigExecContext(t *testing.T) {
 	}
 
 	profile := assertMainTestProxyState(t, statePath)
+	if profile.SourceKubeconfig != kubeconfigPath {
+		t.Fatalf("profile source kubeconfig = %q, want %q", profile.SourceKubeconfig, kubeconfigPath)
+	}
 	assertMainTestProxyKubeconfig(t, kubeconfigPath, statePath, profile)
+}
+
+func TestAddContextUsesDefaultKubeconfigLoadingAfterFileMove(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	kubeconfigPath := writeMainTestKubeconfig(t, upstream.URL, mainTestServerCAData(upstream))
+	t.Setenv("KUBECONFIG", kubeconfigPath)
+	statePath := filepath.Join(t.TempDir(), "dynamic-proxy.yaml")
+	if err := runWithArgs([]string{
+		"add-context", "dynamic-proxy",
+		"--state", statePath,
+		"--listen", "127.0.0.1:0",
+		"--contexts", "alpha",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	profile := loadMainTestProfile(t, statePath)
+	if profile.SourceKubeconfig != "" {
+		t.Fatalf("profile source kubeconfig = %q, want default loading", profile.SourceKubeconfig)
+	}
+	stateData, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stateData), "sourceKubeconfig:") {
+		t.Fatalf("dynamic state should omit sourceKubeconfig:\n%s", stateData)
+	}
+
+	movedKubeconfigPath := filepath.Join(t.TempDir(), "moved-kubeconfig")
+	if err := os.Rename(kubeconfigPath, movedKubeconfigPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECONFIG", movedKubeconfigPath)
+	if _, _, err := loadServeRuntime(statePath); err != nil {
+		t.Fatalf("loadServeRuntime after kubeconfig move: %v", err)
+	}
 }
 
 func TestAddContextPersistsContextSelectors(t *testing.T) {
@@ -740,6 +783,36 @@ func TestResolveAddContextListenAddrPicksStablePort(t *testing.T) {
 	}
 }
 
+func TestResolveAddContextPaths(t *testing.T) {
+	t.Run("default loading", func(t *testing.T) {
+		kubeconfigPath := filepath.Join(t.TempDir(), "config")
+		t.Setenv("KUBECONFIG", kubeconfigPath)
+		resolvedPath, writePath, _, err := resolveAddContextPaths("", filepath.Join(t.TempDir(), "state.yaml"), "proxy")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resolvedPath != "" {
+			t.Fatalf("resolved kubeconfig = %q, want standard loading", resolvedPath)
+		}
+		if writePath != kubeconfigPath {
+			t.Fatalf("kubeconfig write path = %q, want %q", writePath, kubeconfigPath)
+		}
+	})
+
+	t.Run("explicit path", func(t *testing.T) {
+		tempDir := t.TempDir()
+		t.Chdir(tempDir)
+		resolvedPath, writePath, _, err := resolveAddContextPaths("config", filepath.Join(tempDir, "state.yaml"), "proxy")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.Join(tempDir, "config")
+		if resolvedPath != want || writePath != want {
+			t.Fatalf("resolved paths = %q, %q, want %q", resolvedPath, writePath, want)
+		}
+	})
+}
+
 func TestResolveAddContextListenAddrRejectsInvalidAddress(t *testing.T) {
 	if _, err := resolveAddContextListenAddr("bad-listen"); err == nil {
 		t.Fatal("resolveAddContextListenAddr returned nil error")
@@ -873,7 +946,7 @@ func TestServeStateReplacesProcessWhenStateFileChanges(t *testing.T) {
 	assertServeProcessReplacement(t, statePath, replacedStatePath, errCh, replaceErr)
 }
 
-func TestServeStateReloadsOIDCCredentialsWhenSourceKubeconfigChanges(t *testing.T) {
+func TestServeStateReloadsOIDCCredentialsWhenKubeconfigChanges(t *testing.T) {
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintf(w, `{"authorization":%q}`, r.Header.Get("Authorization"))
 	}))
@@ -1345,7 +1418,7 @@ func TestNormalizeServeError(t *testing.T) {
 	}
 }
 
-func TestWatchRuntimeFilesPrioritizesSourceKubeconfigChange(t *testing.T) {
+func TestWatchRuntimeFilesPrioritizesKubeconfigChange(t *testing.T) {
 	tempDir := t.TempDir()
 	statePath := filepath.Join(tempDir, "state.yaml")
 	sourcePath := filepath.Join(tempDir, "source.yaml")
@@ -1372,7 +1445,7 @@ func TestWatchRuntimeFilesPrioritizesSourceKubeconfigChange(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	changed := watchRuntimeFiles(ctx, statePath, stateSnapshot, sourcePath, sourceSnapshot)
+	changed := watchRuntimeFiles(ctx, statePath, stateSnapshot, []watchedRuntimeFile{{path: sourcePath, snapshot: sourceSnapshot}})
 	select {
 	case err := <-changed:
 		if !errors.Is(err, errSourceKubeconfigChanged) {
@@ -1387,7 +1460,7 @@ func TestWatchRuntimeFilesContinuesAfterContentChange(t *testing.T) {
 	statePath, sourcePath, stateSnapshot, sourceSnapshot := newRuntimeFileWatcherTest(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	changed := watchRuntimeFiles(ctx, statePath, stateSnapshot, sourcePath, sourceSnapshot)
+	changed := watchRuntimeFiles(ctx, statePath, stateSnapshot, []watchedRuntimeFile{{path: sourcePath, snapshot: sourceSnapshot}})
 
 	if err := os.WriteFile(sourcePath, []byte("source-after"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1412,24 +1485,41 @@ func TestWatchRuntimeFilesReportsStateReadError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changed := watchRuntimeFiles(context.Background(), statePath, stateSnapshot, sourcePath, sourceSnapshot)
+	changed := watchRuntimeFiles(context.Background(), statePath, stateSnapshot, []watchedRuntimeFile{{path: sourcePath, snapshot: sourceSnapshot}})
 	assertRuntimeFileWatcherError(t, changed, "read state file")
 }
 
-func TestWatchRuntimeFilesReportsSourceReadError(t *testing.T) {
+func TestWatchRuntimeFilesDetectsKubeconfigRemoval(t *testing.T) {
 	statePath, sourcePath, stateSnapshot, sourceSnapshot := newRuntimeFileWatcherTest(t)
 	if err := os.Remove(sourcePath); err != nil {
 		t.Fatal(err)
 	}
 
-	changed := watchRuntimeFiles(context.Background(), statePath, stateSnapshot, sourcePath, sourceSnapshot)
-	assertRuntimeFileWatcherError(t, changed, "read source kubeconfig")
+	changed := watchRuntimeFiles(context.Background(), statePath, stateSnapshot, []watchedRuntimeFile{{path: sourcePath, snapshot: sourceSnapshot}})
+	assertRuntimeFileWatcherEvent(t, changed, errSourceKubeconfigChanged)
+}
+
+func TestWatchRuntimeFilesDetectsNewKubeconfigPrecedenceFile(t *testing.T) {
+	statePath, _, stateSnapshot, _ := newRuntimeFileWatcherTest(t)
+	kubeconfigPath := filepath.Join(t.TempDir(), "new-kubeconfig")
+	kubeconfigFiles, err := snapshotKubeconfigFiles([]string{kubeconfigPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kubeconfigPath, []byte("new source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	changed := watchRuntimeFiles(ctx, statePath, stateSnapshot, kubeconfigFiles)
+	assertRuntimeFileWatcherEvent(t, changed, errSourceKubeconfigChanged)
 }
 
 func TestWatchRuntimeFilesStopsWhenCanceled(t *testing.T) {
 	statePath, sourcePath, stateSnapshot, sourceSnapshot := newRuntimeFileWatcherTest(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	changed := watchRuntimeFiles(ctx, statePath, stateSnapshot, sourcePath, sourceSnapshot)
+	changed := watchRuntimeFiles(ctx, statePath, stateSnapshot, []watchedRuntimeFile{{path: sourcePath, snapshot: sourceSnapshot}})
 	cancel()
 
 	select {
@@ -1502,7 +1592,7 @@ func TestWaitForStableRuntimeFileSnapshotReportsReadError(t *testing.T) {
 func TestWatchRuntimeFilesStopsWhenSourceEventCannotBeDelivered(t *testing.T) {
 	statePath, sourcePath, stateSnapshot, sourceSnapshot := newRuntimeFileWatcherTest(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	changed := watchRuntimeFiles(ctx, statePath, stateSnapshot, sourcePath, sourceSnapshot)
+	changed := watchRuntimeFiles(ctx, statePath, stateSnapshot, []watchedRuntimeFile{{path: sourcePath, snapshot: sourceSnapshot}})
 
 	if err := os.WriteFile(sourcePath, []byte("source-after-first-change"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1521,7 +1611,7 @@ func TestWatchRuntimeFilesStopsWhenSourceEventCannotBeDelivered(t *testing.T) {
 func TestWatchRuntimeFilesStopsWhenStateEventCannotBeDelivered(t *testing.T) {
 	statePath, sourcePath, stateSnapshot, sourceSnapshot := newRuntimeFileWatcherTest(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	changed := watchRuntimeFiles(ctx, statePath, stateSnapshot, sourcePath, sourceSnapshot)
+	changed := watchRuntimeFiles(ctx, statePath, stateSnapshot, []watchedRuntimeFile{{path: sourcePath, snapshot: sourceSnapshot}})
 
 	if err := os.WriteFile(statePath, []byte("state-after-first-change"), 0o600); err != nil {
 		t.Fatal(err)
@@ -2235,7 +2325,7 @@ options:
 	}
 }
 
-func TestLoadServeRuntimeReturnsSourceKubeconfigErrors(t *testing.T) {
+func TestLoadServeRuntimeReturnsKubeconfigErrors(t *testing.T) {
 	tests := []struct {
 		name            string
 		writeSource     bool
