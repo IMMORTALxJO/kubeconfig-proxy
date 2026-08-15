@@ -51,11 +51,12 @@ func runAddContext(args []string) error {
 	if err != nil {
 		return err
 	}
+	contextSelection := stateContextSelection(options)
 	selectedContexts, selectedPrimary, err := source.SelectContexts(kubeconfig.ContextSelection{
 		ProxyContextName: options.contextName,
-		SelectedContexts: splitCSV(options.contextsCSV),
-		ContextRegexp:    options.contextRegexp,
-		PrimaryContext:   options.primaryContext,
+		SelectedContexts: contextSelection.Names,
+		ContextRegexp:    contextSelection.Regexp,
+		PrimaryContext:   contextSelection.Primary,
 	})
 	if err != nil {
 		return err
@@ -65,7 +66,7 @@ func runAddContext(args []string) error {
 		return err
 	}
 
-	profile, certPEM, err := newAddContextProfile(options, absoluteKubeconfigPath, resolvedListenAddr, targets, primary)
+	profile, certPEM, err := newAddContextProfile(options, absoluteKubeconfigPath, resolvedListenAddr, contextSelection)
 	if err != nil {
 		return err
 	}
@@ -94,7 +95,7 @@ func parseAddContextOptions(args []string) (addContextOptions, error) {
 		statePath      = flags.String("state", "", "state file path; defaults to ~/.kube/kubeconfig-proxy/<context>.yaml")
 		listenAddr     = flags.String("listen", "", "proxy listen address; defaults to an available 127.0.0.1 port")
 		contextsCSV    = flags.String("contexts", "", "comma-separated source kubeconfig contexts to include")
-		contextRegexp  = flags.String("context-regexp", "", "regular expression for source context names")
+		contextRegexp  = flags.String("context-regexp", "", "regular expression for source context names to include; combines with --contexts")
 		primaryContext = flags.String("primary-context", "", "context used for single-cluster operations")
 		proxyTTL       = flags.Duration("proxy-ttl", 10*time.Minute, "time after the last active request before the proxy exits; 0 disables it")
 		requestTimeout = flags.Duration("request-timeout", 30*time.Second, "timeout for one upstream Kubernetes API request; 0 disables it")
@@ -162,7 +163,22 @@ func resolveAddContextPaths(kubeconfigPath, statePath, contextName string) (stri
 	return absoluteKubeconfigPath, absoluteStatePath, nil
 }
 
-func newAddContextProfile(options addContextOptions, kubeconfigPath, listenAddr string, targets []upstream.Target, primary upstream.Target) (*proxystate.Profile, []byte, error) {
+func stateContextSelection(options addContextOptions) proxystate.ContextSelection {
+	selection := proxystate.ContextSelection{
+		Regexp:  options.contextRegexp,
+		Names:   splitCSV(options.contextsCSV),
+		Primary: options.primaryContext,
+	}
+	if strings.TrimSpace(selection.Regexp) == "" {
+		selection.Regexp = ""
+		if len(selection.Names) == 0 {
+			selection.Regexp = ".*"
+		}
+	}
+	return selection
+}
+
+func newAddContextProfile(options addContextOptions, kubeconfigPath, listenAddr string, contexts proxystate.ContextSelection) (*proxystate.Profile, []byte, error) {
 	bearerToken, err := generateBearerToken()
 	if err != nil {
 		return nil, nil, err
@@ -177,8 +193,7 @@ func newAddContextProfile(options addContextOptions, kubeconfigPath, listenAddr 
 		Name:             options.contextName,
 		SourceKubeconfig: kubeconfigPath,
 		Listen:           listenAddr,
-		Contexts:         upstream.NameList(targets),
-		PrimaryContext:   primary.Name,
+		Contexts:         contexts,
 		BearerToken:      bearerToken,
 		ProxyTTL:         options.proxyTTL.String(),
 		LogsEnabled:      options.logsEnabled,

@@ -56,8 +56,9 @@ flowchart LR
 
 There are three distinct lifecycles:
 
-1. Configuration: `add-context` selects source contexts, generates local
-   credentials, saves state, and writes a managed kubeconfig context.
+1. Configuration: `add-context` validates source-context selection rules,
+   generates local credentials, saves state, and writes a managed kubeconfig
+   context.
 2. Activation: Kubernetes runs `credential`; it starts `serve` if necessary and
    returns an `ExecCredential` containing the local proxy bearer token.
 3. Request handling: `serve` loads the state and source kubeconfig, constructs
@@ -126,12 +127,14 @@ or remove actual duplication.
 2. Resolve absolute kubeconfig and state paths and choose a local listen
    address.
 3. Load the source kubeconfig once through `internal/kubeconfig`.
-4. Select contexts explicitly, by regular expression, or by the default rules.
+4. Combine explicitly named contexts with regular-expression matches; when
+   neither selector is provided, use the persisted default expression `.*`.
 5. Reject missing, repeated, or recursively selected proxy contexts.
 6. Choose a required primary context.
 7. Build upstream targets through `internal/upstream`.
 8. Generate a bearer token and self-signed TLS key pair.
-9. Atomically save the versioned state file.
+9. Atomically save the versioned state file with the selection rules rather
+   than the currently resolved context list.
 10. Write the managed cluster, auth info, and context to the kubeconfig.
 
 The CLI reads and updates one source kubeconfig file. An explicit
@@ -142,6 +145,19 @@ from the client-go precedence list is selected; multiple files listed in
 The generated kubeconfig contains the local HTTPS endpoint, public certificate
 data, and an exec credential command. The bearer token and private key exist
 only in the state file.
+
+State schema version 1 stores context selection under `contexts`: `names` and
+`regexp` are complementary selectors whose results are combined without
+duplicates, while optional `primary` records only an explicit
+`--primary-context`. Resolved regexp matches and an inferred primary are runtime
+data and are deliberately not persisted. The previous flat representation of
+`contexts` is not supported.
+
+Regexp selection ignores every context whose cluster reference uses the
+reserved `kubeconfig-proxy/` prefix, including contexts renamed after creation.
+Explicit `names` may include another managed proxy context, but direct
+self-selection remains invalid. This keeps broad expressions such as `.*` from
+accidentally creating proxy chains while preserving intentional composition.
 
 Safe context names retain their historical state filename. Unsafe or long names
 use a sanitized readable prefix plus a short hash so distinct context names do
@@ -175,7 +191,8 @@ expired proxy without treating the serve process as a permanent daemon.
 
 1. load and validate the profile;
 2. parse duration strings once into a runtime profile;
-3. load source contexts and construct upstream targets;
+3. resolve the saved context selectors against the current source kubeconfig
+   and construct upstream targets;
 4. construct the proxy handler and TLS certificate;
 5. listen on the configured address;
 6. watch the state file and source kubeconfig for modification or removal.
@@ -187,9 +204,11 @@ watches and streaming subresources can defer replacement indefinitely; reload
 never cancels them. Removing the state file stops the server with an error.
 Replacing the process ensures every runtime setting is read again and clears
 client-go authentication caches before refreshed tokens, client certificates,
-and exec credential configuration are loaded into new upstream transports. This
-keeps runtime reload explicit, bounds credential cache lifetime, and avoids
-mutable global configuration inside the proxy.
+and exec credential configuration are loaded into new upstream transports.
+Context selection rules are resolved again during replacement, so newly
+matching `contexts.regexp` entries become targets automatically. This keeps
+runtime reload explicit, bounds credential cache lifetime, and avoids mutable
+global configuration inside the proxy.
 
 The activity wrapper tracks active proxied requests and last activity. The
 readiness endpoint does not extend the idle TTL. A zero TTL disables idle

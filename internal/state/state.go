@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"sigs.k8s.io/yaml"
@@ -23,17 +25,22 @@ var createTemporaryFile = func(dir, pattern string) (temporaryFile, error) {
 }
 
 type Profile struct {
-	Version          int          `json:"version"`
-	Name             string       `json:"name"`
-	SourceKubeconfig string       `json:"sourceKubeconfig"`
-	Listen           string       `json:"listen"`
-	Contexts         []string     `json:"contexts"`
-	PrimaryContext   string       `json:"primaryContext"`
-	BearerToken      string       `json:"bearerToken"`
-	ProxyTTL         string       `json:"proxyTTL"`
-	LogsEnabled      bool         `json:"logsEnabled"`
-	TLS              TLS          `json:"tls"`
-	Options          ProxyOptions `json:"options"`
+	Version          int              `json:"version"`
+	Name             string           `json:"name"`
+	SourceKubeconfig string           `json:"sourceKubeconfig"`
+	Listen           string           `json:"listen"`
+	Contexts         ContextSelection `json:"contexts"`
+	BearerToken      string           `json:"bearerToken"`
+	ProxyTTL         string           `json:"proxyTTL"`
+	LogsEnabled      bool             `json:"logsEnabled"`
+	TLS              TLS              `json:"tls"`
+	Options          ProxyOptions     `json:"options"`
+}
+
+type ContextSelection struct {
+	Regexp  string   `json:"regexp,omitempty"`
+	Names   []string `json:"names,omitempty"`
+	Primary string   `json:"primary,omitempty"`
 }
 
 type TLS struct {
@@ -157,7 +164,6 @@ func (p *Profile) validateRequiredFields() error {
 		{p.Name, "state name"},
 		{p.SourceKubeconfig, "state sourceKubeconfig"},
 		{p.Listen, "state listen"},
-		{p.PrimaryContext, "state primaryContext"},
 		{p.BearerToken, "state bearerToken"},
 		{p.TLS.CertPEM, "state tls.certPEM"},
 		{p.TLS.KeyPEM, "state tls.keyPEM"},
@@ -167,22 +173,36 @@ func (p *Profile) validateRequiredFields() error {
 			return fmt.Errorf("%s is required", field.name)
 		}
 	}
-	if len(p.Contexts) == 0 {
+	contextRegexp := strings.TrimSpace(p.Contexts.Regexp)
+	if len(p.Contexts.Names) == 0 && contextRegexp == "" {
 		return fmt.Errorf("state contexts are required")
 	}
-	seenContexts := make(map[string]struct{}, len(p.Contexts))
-	primaryFound := false
-	for _, contextName := range p.Contexts {
+	var compiledRegexp *regexp.Regexp
+	if contextRegexp != "" {
+		var err error
+		compiledRegexp, err = regexp.Compile(p.Contexts.Regexp)
+		if err != nil {
+			return fmt.Errorf("parse contexts.regexp: %w", err)
+		}
+	}
+	seenContexts := make(map[string]struct{}, len(p.Contexts.Names))
+	for _, contextName := range p.Contexts.Names {
+		if contextName == "" {
+			return fmt.Errorf("state context name is required")
+		}
 		if _, ok := seenContexts[contextName]; ok {
 			return fmt.Errorf("state context %q is configured more than once", contextName)
 		}
 		seenContexts[contextName] = struct{}{}
-		if contextName == p.PrimaryContext {
-			primaryFound = true
-		}
 	}
-	if !primaryFound {
-		return fmt.Errorf("state primaryContext %q is not included in contexts", p.PrimaryContext)
+	if p.Contexts.Primary == "" {
+		return nil
+	}
+	if _, ok := seenContexts[p.Contexts.Primary]; ok {
+		return nil
+	}
+	if compiledRegexp == nil || !compiledRegexp.MatchString(p.Contexts.Primary) {
+		return fmt.Errorf("state contexts.primary %q is not selected by contexts", p.Contexts.Primary)
 	}
 	return nil
 }

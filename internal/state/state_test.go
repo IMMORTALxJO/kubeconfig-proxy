@@ -68,8 +68,9 @@ func TestLoadRuntimeRejectsInvalidStateFiles(t *testing.T) {
 name: test
 sourceKubeconfig: /tmp/kubeconfig
 listen: 127.0.0.1:9443
-contexts: [alpha]
-primaryContext: alpha
+contexts:
+  names: [alpha]
+  primary: alpha
 bearerToken: token
 proxyTTL: 10m
 tls:
@@ -88,8 +89,9 @@ options:
 name: test
 sourceKubeconfig: /tmp/kubeconfig
 listen: 127.0.0.1:9443
-contexts: [alpha]
-primaryContext: alpha
+contexts:
+  names: [alpha]
+  primary: alpha
 bearerToken: token
 proxyTTL: nope
 tls:
@@ -101,6 +103,20 @@ options:
   retryBackoff: 100ms
 `,
 			wantErrContains: "parse proxyTTL",
+		},
+		{
+			name: "legacy contexts list",
+			data: `version: 1
+name: test
+sourceKubeconfig: /tmp/kubeconfig
+listen: 127.0.0.1:9443
+contexts: [alpha]
+bearerToken: token
+tls:
+  certPEM: cert
+  keyPEM: key
+`,
+			wantErrContains: "parse state file",
 		},
 	}
 
@@ -261,16 +277,9 @@ func TestValidateRejectsMissingRequiredFields(t *testing.T) {
 		{
 			name: "contexts",
 			mutate: func(profile *Profile) {
-				profile.Contexts = nil
+				profile.Contexts = ContextSelection{}
 			},
 			wantErrContains: "state contexts are required",
-		},
-		{
-			name: "primary context",
-			mutate: func(profile *Profile) {
-				profile.PrimaryContext = ""
-			},
-			wantErrContains: "state primaryContext is required",
 		},
 		{
 			name: "bearer token",
@@ -296,16 +305,23 @@ func TestValidateRejectsMissingRequiredFields(t *testing.T) {
 		{
 			name: "duplicate contexts",
 			mutate: func(profile *Profile) {
-				profile.Contexts = []string{"alpha", "alpha"}
+				profile.Contexts.Names = []string{"alpha", "alpha"}
 			},
 			wantErrContains: `state context "alpha" is configured more than once`,
 		},
 		{
 			name: "primary context outside contexts",
 			mutate: func(profile *Profile) {
-				profile.PrimaryContext = "beta"
+				profile.Contexts.Primary = "beta"
 			},
-			wantErrContains: `state primaryContext "beta" is not included in contexts`,
+			wantErrContains: `state contexts.primary "beta" is not selected by contexts`,
+		},
+		{
+			name: "invalid context regexp",
+			mutate: func(profile *Profile) {
+				profile.Contexts.Regexp = "["
+			},
+			wantErrContains: "parse contexts.regexp",
 		},
 	}
 
@@ -321,6 +337,18 @@ func TestValidateRejectsMissingRequiredFields(t *testing.T) {
 				t.Fatalf("error = %q, want to contain %q", err.Error(), tt.wantErrContains)
 			}
 		})
+	}
+}
+
+func TestValidateAcceptsCombinedContextSelectorsAndOptionalPrimary(t *testing.T) {
+	profile := validTestProfile()
+	profile.Contexts = ContextSelection{
+		Regexp: "^prod-",
+		Names:  []string{"shared"},
+	}
+
+	if err := profile.Validate(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -366,10 +394,12 @@ func validTestProfile() *Profile {
 		Name:             "test-proxy",
 		SourceKubeconfig: "/tmp/kubeconfig",
 		Listen:           "127.0.0.1:9443",
-		Contexts:         []string{"kind-test"},
-		PrimaryContext:   "kind-test",
-		BearerToken:      "token",
-		ProxyTTL:         "10m",
+		Contexts: ContextSelection{
+			Names:   []string{"kind-test"},
+			Primary: "kind-test",
+		},
+		BearerToken: "token",
+		ProxyTTL:    "10m",
 		TLS: TLS{
 			CertPEM: "cert",
 			KeyPEM:  "key",

@@ -12,7 +12,15 @@ import (
 )
 
 func TestSourceSelectContexts(t *testing.T) {
-	source := loadSelectionTestSource(t, []string{"alpha", "beta", "prod-west", "proxy"}, "beta")
+	source := loadSelectionTestSource(t, []string{"alpha", "beta", "managed-proxy", "managed-proxy-two", "prod-west", "proxy", "renamed-proxy"}, "beta")
+	for _, contextName := range []string{"managed-proxy", "managed-proxy-two", "proxy"} {
+		managedEntryName := formatProxyEntryName(contextName)
+		source.rawConfig.Contexts[contextName].Cluster = managedEntryName
+		source.rawConfig.Contexts[contextName].AuthInfo = managedEntryName
+	}
+	renamedEntryName := formatProxyEntryName("original-proxy")
+	source.rawConfig.Contexts["renamed-proxy"].Cluster = renamedEntryName
+	source.rawConfig.Contexts["renamed-proxy"].AuthInfo = renamedEntryName
 	tests := []struct {
 		name            string
 		selection       ContextSelection
@@ -49,12 +57,41 @@ func TestSourceSelectContexts(t *testing.T) {
 			wantPrimary:  "prod-west",
 		},
 		{
-			name: "contexts and regexp conflict",
+			name: "explicit contexts and regexp are combined without duplicates",
 			selection: ContextSelection{
-				SelectedContexts: []string{"alpha"},
-				ContextRegexp:    "beta",
+				SelectedContexts: []string{"prod-west", "alpha"},
+				ContextRegexp:    "^(alpha|beta)$",
 			},
-			wantErrContains: "--contexts and --context-regexp are mutually exclusive",
+			wantContexts: []string{"prod-west", "alpha", "beta"},
+			wantPrimary:  "beta",
+		},
+		{
+			name: "regexp excludes all managed proxy contexts",
+			selection: ContextSelection{
+				ProxyContextName: "new-proxy",
+				ContextRegexp:    ".*",
+			},
+			wantContexts: []string{"alpha", "beta", "prod-west"},
+			wantPrimary:  "beta",
+		},
+		{
+			name: "explicit contexts include managed proxy contexts",
+			selection: ContextSelection{
+				ProxyContextName: "proxy",
+				SelectedContexts: []string{"managed-proxy"},
+			},
+			wantContexts: []string{"managed-proxy"},
+			wantPrimary:  "managed-proxy",
+		},
+		{
+			name: "explicit managed proxy context complements regexp",
+			selection: ContextSelection{
+				ProxyContextName: "proxy",
+				SelectedContexts: []string{"managed-proxy"},
+				ContextRegexp:    ".*",
+			},
+			wantContexts: []string{"managed-proxy", "alpha", "beta", "prod-west"},
+			wantPrimary:  "beta",
 		},
 		{
 			name:            "invalid regexp",

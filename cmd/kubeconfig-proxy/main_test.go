@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/IMMORTALxJO/kubeconfig-proxy/internal/proxy"
 	proxystate "github.com/IMMORTALxJO/kubeconfig-proxy/internal/state"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -173,6 +174,86 @@ func TestAddContextWritesStateAndKubeconfigExecContext(t *testing.T) {
 	assertMainTestProxyKubeconfig(t, kubeconfigPath, statePath, profile)
 }
 
+func TestAddContextPersistsContextSelectors(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	tests := []struct {
+		name         string
+		selectorArgs []string
+		want         proxystate.ContextSelection
+	}{
+		{
+			name: "default regexp",
+			want: proxystate.ContextSelection{Regexp: ".*"},
+		},
+		{
+			name:         "regexp only",
+			selectorArgs: []string{"--context-regexp", "^prod-.*"},
+			want:         proxystate.ContextSelection{Regexp: "^prod-.*"},
+		},
+		{
+			name:         "names only",
+			selectorArgs: []string{"--contexts", "alpha"},
+			want:         proxystate.ContextSelection{Names: []string{"alpha"}},
+		},
+		{
+			name: "combined selectors and primary",
+			selectorArgs: []string{
+				"--contexts", "alpha",
+				"--context-regexp", "^prod-.*",
+				"--primary-context", "prod-b",
+			},
+			want: proxystate.ContextSelection{
+				Regexp:  "^prod-.*",
+				Names:   []string{"alpha"},
+				Primary: "prod-b",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			kubeconfigPath := writeMainTestKubeconfigWithContexts(t, []mainTestContext{
+				{name: "alpha", serverURL: upstream.URL, caData: mainTestServerCAData(upstream)},
+				{name: "prod-a", serverURL: upstream.URL, caData: mainTestServerCAData(upstream)},
+				{name: "prod-b", serverURL: upstream.URL, caData: mainTestServerCAData(upstream)},
+			})
+			statePath := filepath.Join(t.TempDir(), "selectors.yaml")
+			args := []string{
+				"add-context", "proxy",
+				"--kubeconfig", kubeconfigPath,
+				"--state", statePath,
+				"--listen", "127.0.0.1:0",
+			}
+			args = append(args, test.selectorArgs...)
+			if err := runWithArgs(args, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			profile := loadMainTestProfile(t, statePath)
+			if profile.Contexts.Regexp != test.want.Regexp ||
+				!slices.Equal(profile.Contexts.Names, test.want.Names) ||
+				profile.Contexts.Primary != test.want.Primary {
+				t.Fatalf("state contexts = %#v, want %#v", profile.Contexts, test.want)
+			}
+			data, err := os.ReadFile(statePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stateYAML := string(data)
+			if len(test.want.Names) == 0 && strings.Contains(stateYAML, "  names:") {
+				t.Fatalf("state should omit unresolved names:\n%s", stateYAML)
+			}
+			if test.want.Primary == "" && strings.Contains(stateYAML, "  primary:") {
+				t.Fatalf("state should omit inferred primary:\n%s", stateYAML)
+			}
+		})
+	}
+}
+
 func assertMainTestProxyState(t *testing.T, statePath string) *proxystate.Profile {
 	t.Helper()
 
@@ -201,8 +282,8 @@ func assertMainTestProxyStateCore(t *testing.T, profile *proxystate.Profile) {
 	if profile.Listen != "127.0.0.1:27443" {
 		t.Fatalf("profile listen = %q, want fixed listen addr", profile.Listen)
 	}
-	if !slices.Equal(profile.Contexts, []string{"alpha"}) {
-		t.Fatalf("profile contexts = %v, want [alpha]", profile.Contexts)
+	if !slices.Equal(profile.Contexts.Names, []string{"alpha"}) || profile.Contexts.Primary != "alpha" {
+		t.Fatalf("profile contexts = %#v, want explicit alpha selection and primary", profile.Contexts)
 	}
 	if profile.ProxyTTL != "3m0s" {
 		t.Fatalf("profile proxyTTL = %q, want 3m0s", profile.ProxyTTL)
@@ -686,8 +767,7 @@ func TestServeStateStopsAfterTTLWithoutRequests(t *testing.T) {
 		Name:             "ttl-proxy",
 		SourceKubeconfig: sourcePath,
 		Listen:           listenAddr,
-		Contexts:         []string{"alpha"},
-		PrimaryContext:   "alpha",
+		Contexts:         proxystate.ContextSelection{Names: []string{"alpha"}, Primary: "alpha"},
 		BearerToken:      token,
 		ProxyTTL:         "500ms",
 		TLS: proxystate.TLS{
@@ -754,8 +834,7 @@ func TestServeStateReplacesProcessWhenStateFileChanges(t *testing.T) {
 		Name:             "restart-proxy",
 		SourceKubeconfig: sourcePath,
 		Listen:           listenAddr,
-		Contexts:         []string{"alpha"},
-		PrimaryContext:   "alpha",
+		Contexts:         proxystate.ContextSelection{Names: []string{"alpha"}, Primary: "alpha"},
 		BearerToken:      "state-token",
 		ProxyTTL:         "0s",
 		TLS: proxystate.TLS{
@@ -786,8 +865,7 @@ func TestServeStateReplacesProcessWhenStateFileChanges(t *testing.T) {
 		t.Fatalf("initial proxy body = %s, want alpha target", body)
 	}
 
-	profile.Contexts = []string{"beta"}
-	profile.PrimaryContext = "beta"
+	profile.Contexts = proxystate.ContextSelection{Names: []string{"beta"}, Primary: "beta"}
 	if err := proxystate.Save(statePath, profile); err != nil {
 		t.Fatal(err)
 	}
@@ -871,8 +949,7 @@ func newOIDCReloadTest(t *testing.T, upstream *httptest.Server) oidcReloadTest {
 		Name:             "oidc-reload-proxy",
 		SourceKubeconfig: sourcePath,
 		Listen:           listenAddr,
-		Contexts:         []string{"alpha"},
-		PrimaryContext:   "alpha",
+		Contexts:         proxystate.ContextSelection{Names: []string{"alpha"}, Primary: "alpha"},
 		BearerToken:      "state-token",
 		ProxyTTL:         "0s",
 		TLS: proxystate.TLS{
@@ -1542,8 +1619,7 @@ func TestServeStateStopsWhenStateFileDisappears(t *testing.T) {
 		Name:             "removed-proxy",
 		SourceKubeconfig: sourcePath,
 		Listen:           listenAddr,
-		Contexts:         []string{"alpha"},
-		PrimaryContext:   "alpha",
+		Contexts:         proxystate.ContextSelection{Names: []string{"alpha"}, Primary: "alpha"},
 		BearerToken:      "state-token",
 		ProxyTTL:         "0s",
 		TLS: proxystate.TLS{
@@ -1737,8 +1813,7 @@ func TestRunCredentialWritesExecCredentialWhenProxyIsReady(t *testing.T) {
 		Name:             "credential-proxy",
 		SourceKubeconfig: "/tmp/kubeconfig",
 		Listen:           strings.TrimPrefix(ready.URL, "https://"),
-		Contexts:         []string{"alpha"},
-		PrimaryContext:   "alpha",
+		Contexts:         proxystate.ContextSelection{Names: []string{"alpha"}, Primary: "alpha"},
 		BearerToken:      token,
 		ProxyTTL:         "10m",
 		TLS: proxystate.TLS{
@@ -1804,8 +1879,7 @@ func TestRunCredentialStartsDetachedServeWhenProxyIsNotReady(t *testing.T) {
 		Name:             "credential-proxy",
 		SourceKubeconfig: "/tmp/kubeconfig",
 		Listen:           strings.TrimPrefix(ready.URL, "https://"),
-		Contexts:         []string{"alpha"},
-		PrimaryContext:   "alpha",
+		Contexts:         proxystate.ContextSelection{Names: []string{"alpha"}, Primary: "alpha"},
 		BearerToken:      token,
 		ProxyTTL:         "0",
 		TLS: proxystate.TLS{
@@ -1849,8 +1923,7 @@ func TestRunWithArgsDispatchesCredential(t *testing.T) {
 		Name:             "credential-proxy",
 		SourceKubeconfig: "/tmp/kubeconfig",
 		Listen:           strings.TrimPrefix(ready.URL, "https://"),
-		Contexts:         []string{"alpha"},
-		PrimaryContext:   "alpha",
+		Contexts:         proxystate.ContextSelection{Names: []string{"alpha"}, Primary: "alpha"},
 		BearerToken:      token,
 		ProxyTTL:         "0",
 		TLS: proxystate.TLS{
@@ -1937,8 +2010,9 @@ func TestRunCredentialReturnsLoadAndClientErrors(t *testing.T) {
 name: proxy
 sourceKubeconfig: /tmp/kubeconfig
 listen: 127.0.0.1:9443
-contexts: [alpha]
-primaryContext: alpha
+contexts:
+  names: [alpha]
+  primary: alpha
 bearerToken: token
 proxyTTL: nope
 tls:
@@ -2130,8 +2204,9 @@ func TestLoadServeRuntimeRejectsInvalidTLSKeyPair(t *testing.T) {
 name: proxy
 sourceKubeconfig: `+sourcePath+`
 listen: 127.0.0.1:9443
-contexts: [alpha]
-primaryContext: alpha
+contexts:
+  names: [alpha]
+  primary: alpha
 bearerToken: token
 proxyTTL: 10m
 tls:
@@ -2206,8 +2281,7 @@ func TestLoadServeRuntimeRejectsMissingSelectedContext(t *testing.T) {
 	sourcePath := writeMainTestKubeconfig(t, "https://cluster.example.test", nil)
 	profile := validMainTestProfile()
 	profile.SourceKubeconfig = sourcePath
-	profile.Contexts = []string{"missing"}
-	profile.PrimaryContext = "missing"
+	profile.Contexts = proxystate.ContextSelection{Names: []string{"missing"}, Primary: "missing"}
 	statePath := filepath.Join(t.TempDir(), "state.yaml")
 	if err := proxystate.Save(statePath, profile); err != nil {
 		t.Fatal(err)
@@ -2217,6 +2291,64 @@ func TestLoadServeRuntimeRejectsMissingSelectedContext(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `context "missing" not found`) {
 		t.Fatalf("loadServeRuntime error = %v, want missing context", err)
 	}
+}
+
+func TestLoadServeRuntimeResolvesNewRegexpMatches(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"gitVersion":"v1.test"}`))
+	}))
+	defer upstream.Close()
+
+	kubeconfigPath := writeMainTestKubeconfigWithContexts(t, []mainTestContext{{
+		name: "prod-a", serverURL: upstream.URL, caData: mainTestServerCAData(upstream),
+	}})
+	statePath := filepath.Join(t.TempDir(), "regexp-proxy.yaml")
+	if err := runWithArgs([]string{
+		"add-context", "proxy",
+		"--kubeconfig", kubeconfigPath,
+		"--state", statePath,
+		"--listen", "127.0.0.1:0",
+		"--context-regexp", "^prod-",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime, _, err := loadServeRuntime(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := targetNames(runtime.targets); !slices.Equal(got, []string{"prod-a"}) {
+		t.Fatalf("initial targets = %v, want [prod-a]", got)
+	}
+
+	config, err := clientcmd.LoadFromFile(kubeconfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Clusters["cluster-prod-b"] = &clientcmdapi.Cluster{
+		Server: upstream.URL, CertificateAuthorityData: mainTestServerCAData(upstream),
+	}
+	config.AuthInfos["user-prod-b"] = &clientcmdapi.AuthInfo{Token: "source-token"}
+	config.Contexts["prod-b"] = &clientcmdapi.Context{Cluster: "cluster-prod-b", AuthInfo: "user-prod-b"}
+	if err := clientcmd.WriteToFile(*config, kubeconfigPath); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime, _, err = loadServeRuntime(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := targetNames(runtime.targets); !slices.Equal(got, []string{"prod-a", "prod-b"}) {
+		t.Fatalf("targets after kubeconfig update = %v, want [prod-a prod-b]", got)
+	}
+}
+
+func targetNames(targets []proxy.Target) []string {
+	names := make([]string, 0, len(targets))
+	for _, target := range targets {
+		names = append(names, target.Name)
+	}
+	return names
 }
 
 func TestServeRuntimeReturnsListenError(t *testing.T) {
@@ -2380,10 +2512,12 @@ func validMainTestProfile() *proxystate.Profile {
 		Name:             "proxy",
 		SourceKubeconfig: "/tmp/kubeconfig",
 		Listen:           "127.0.0.1:9443",
-		Contexts:         []string{"alpha"},
-		PrimaryContext:   "alpha",
-		BearerToken:      "token",
-		ProxyTTL:         "10m",
+		Contexts: proxystate.ContextSelection{
+			Names:   []string{"alpha"},
+			Primary: "alpha",
+		},
+		BearerToken: "token",
+		ProxyTTL:    "10m",
 		TLS: proxystate.TLS{
 			CertPEM: "cert",
 			KeyPEM:  "key",

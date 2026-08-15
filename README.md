@@ -62,8 +62,9 @@ kubeconfig-proxy delete-context proxy-context
 
 ## How It Works
 
-The proxy keeps a list of source contexts from the original kubeconfig. Requests
-made through the proxy context are routed according to request type:
+The proxy keeps source-context selection rules and resolves them against the
+current source kubeconfig whenever `serve` starts. Requests made through the
+proxy context are routed according to request type:
 
 The complete request matrix, including target selection, concurrency, and
 failure semantics, is in [ROUTING.md](ROUTING.md).
@@ -118,9 +119,35 @@ use a readable sanitized prefix plus a short hash. This keeps names such as
 `prod/blue` and `prod_blue` on distinct state paths.
 
 It is written with file mode `0600` and contains the proxy's private TLS key,
-certificate, bearer token, selected source contexts, primary context, listen
-address, and runtime options. The kubeconfig stores only the public proxy server
-URL, certificate authority data, and exec command.
+certificate, bearer token, source-context selection rules, listen address, and
+runtime options. The kubeconfig stores only the public proxy server URL,
+certificate authority data, and exec command.
+
+State schema version 1 stores context selection as a nested object. For example:
+
+```yaml
+version: 1
+contexts:
+  regexp: '^prod-.*'
+  names:
+    - shared
+  primary: prod-a
+```
+
+`regexp` and `names` are complementary: the resolved target set is their union,
+with duplicates removed. `names` and `primary` are present only when
+`--contexts` and `--primary-context` were passed explicitly. A state file with
+only `--context-regexp '^prod-.*'` therefore contains:
+
+```yaml
+contexts:
+  regexp: '^prod-.*'
+```
+
+Regular-expression selection excludes contexts managed by
+`kubeconfig-proxy`, including contexts renamed after creation. Such a context
+can be used as a target only when it is listed explicitly with `--contexts`;
+the proxy context currently being created cannot select itself.
 
 `--proxy-ttl` controls idle shutdown. If no proxied Kubernetes API requests are
 active for that duration, the auto-started proxy process exits by itself. Health
@@ -134,13 +161,14 @@ While `serve` is running, it watches both the state file and the selected source
 kubeconfig. Changing either file replaces the `serve` process so all runtime
 settings and upstream clients are rebuilt from scratch. Refreshed OIDC tokens,
 client certificates, and exec credential configuration are therefore used
-without recreating the proxy context. A detected change remains pending while
-proxy requests are in flight; the process is replaced only after the last one
-finishes. Long-running watches and streaming subresources can therefore defer a
-reload indefinitely, but they are never interrupted by it. Clients can
-reconnect immediately when the local address and proxy credentials remain
-unchanged; otherwise they must reload the generated kubeconfig entries written
-by `add-context`.
+without recreating the proxy context. Context selection rules are also resolved
+again, so new contexts matching `contexts.regexp` are added automatically. A
+detected change remains pending while proxy requests are in flight; the process
+is replaced only after the last one finishes. Long-running watches and streaming
+subresources can therefore defer a reload indefinitely, but they are never
+interrupted by it. Clients can reconnect immediately when the local address and
+proxy credentials remain unchanged; otherwise they must reload the generated
+kubeconfig entries written by `add-context`.
 
 ## Selecting Source Contexts
 
@@ -153,15 +181,27 @@ kubeconfig-proxy add-context prod-proxy \
   --primary-context prod-a
 ```
 
+Explicit names and a regular expression can be combined:
+
+```bash
+kubeconfig-proxy add-context prod-proxy \
+  --contexts shared \
+  --context-regexp '^prod-' \
+  --primary-context prod-a
+```
+
 The CLI reads and updates one kubeconfig file. `--kubeconfig` selects it
 explicitly. When the flag is omitted, the first existing file from the ordinary
 Kubernetes precedence list is selected: entries in `KUBECONFIG` are considered
 from left to right, or `~/.kube/config` is used when the environment variable is
 unset. Multiple `KUBECONFIG` files are not merged.
 
-If `--contexts` is omitted, all contexts from the selected file are used. If
-`--primary-context` is omitted, that file's current context is used; when there
-is no current context, the first selected context is used.
+If both `--contexts` and `--context-regexp` are omitted, the state stores
+`contexts.regexp: '.*'`, selecting all ordinary source contexts while excluding
+all contexts managed by `kubeconfig-proxy`. If `--primary-context` is omitted,
+the current context is used when it belongs to the resolved target set;
+otherwise the first selected context is used. This inferred primary is not
+persisted in state and is resolved again after source kubeconfig changes.
 
 ## Resource Routing Annotations
 
@@ -231,7 +271,10 @@ werf example.
 - `--contexts dev,stage,prod` limits the proxy to specific source contexts.
   Repeating a context name is rejected so mutations cannot be sent to the same
   cluster twice.
-- `--context-regexp '^prod-'` selects source contexts by regular expression.
+- `--context-regexp '^prod-'` adds source contexts selected by regular
+  expression. It can be combined with `--contexts`; without either selector it
+  defaults to `.*`. Managed `kubeconfig-proxy` contexts are excluded from
+  regexp matches and must be named explicitly with `--contexts`.
 - `--primary-context dev` selects the context used for discovery and other
   primary-only operations.
 - `--listen 127.0.0.1:9443` sets the proxy listen address.

@@ -94,7 +94,16 @@ func loadServeRuntime(statePath string) (*serveRuntimeConfig, runtimeFileSnapsho
 	if err != nil {
 		return nil, runtimeFileSnapshot{}, err
 	}
-	targets, primary, err := upstream.LoadTargets(source, profile.Contexts, profile.PrimaryContext)
+	selectedContexts, selectedPrimary, err := source.SelectContexts(kubeconfig.ContextSelection{
+		ProxyContextName: profile.Name,
+		SelectedContexts: profile.Contexts.Names,
+		ContextRegexp:    profile.Contexts.Regexp,
+		PrimaryContext:   profile.Contexts.Primary,
+	})
+	if err != nil {
+		return nil, runtimeFileSnapshot{}, err
+	}
+	targets, primary, err := upstream.LoadTargets(source, selectedContexts, selectedPrimary)
 	if err != nil {
 		return nil, runtimeFileSnapshot{}, err
 	}
