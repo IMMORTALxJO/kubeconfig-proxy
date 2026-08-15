@@ -19,25 +19,19 @@ workflow](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/comp
 
 ## Compatibility Matrix
 
-The `Kubernetes compatibility` workflow runs every combination below. The
-primary cluster supplies discovery, while the secondary cluster exercises the
-multi-context routing, aggregation, and streaming paths.
+The `Kubernetes compatibility` workflow runs every kubectl and Kubernetes
+profile pairing below. Both kind clusters use the same Kubernetes profile in
+each cell while still exercising multi-context routing and aggregation.
 
-| kubectl | Primary cluster | Secondary cluster | Cells |
-| --- | --- | --- | --- |
-| 1.34 | 1.34, 1.35 | 1.34, 1.35, 1.36 | 6 |
-| 1.35 | 1.34, 1.35, 1.36 | 1.34, 1.35, 1.36 | 9 |
-| 1.36 | 1.35, 1.36 | 1.34, 1.35, 1.36 | 6 |
+| kubectl | Kubernetes / kind clusters | Cells |
+| --- | --- | --- |
+| 1.34 | 1.34, 1.35, 1.36 | 3 |
+| 1.35 | 1.34, 1.35, 1.36 | 3 |
+| 1.36 | 1.34, 1.35, 1.36 | 3 |
 
-All 21 supported combinations run only when a maintainer starts the
+All 9 combinations run only when a maintainer starts the
 `Kubernetes compatibility` workflow manually. It is not a required merge
-check. The six excluded pairs have a two-minor kubectl/API-server skew, which
-Kubernetes does not support.
-
-Each active minor is also run through the upstream Kubernetes `[sig-cli]
-Kubectl client` e2e suite using a single-source proxy. This suite validates
-general client compatibility; the 21-case routing matrix is the safety net for
-the product-specific multi-cluster behaviour.
+check.
 
 ## Supported Scope
 
@@ -49,7 +43,8 @@ aggregated API implementations, kubectl plugins, or provider-specific auth
 plugins.
 
 Kubernetes supports kubectl within one minor version of a kube-apiserver. The
-matrix includes every skew-valid kubectl/primary pair in this window. `client-go`
+matrix also runs the two edge pairings with a two-minor skew as compatibility
+probes; they do not expand the upstream-supported skew policy. `client-go`
 `v0.36` remains the proxy's upstream client and is tested against all three
 cluster profiles. See the upstream [version skew policy](https://kubernetes.io/releases/version-skew-policy/)
 and [client-go compatibility matrix](https://github.com/kubernetes/client-go).
@@ -63,12 +58,13 @@ clusters when changing either cluster profile:
 KCP_RECREATE_KIND=1 \
 KCP_KUBECTL_VERSION_PROFILE=1.34 \
 KCP_CLUSTER_A_VERSION_PROFILE=1.35 \
-KCP_CLUSTER_B_VERSION_PROFILE=1.36 \
+KCP_CLUSTER_B_VERSION_PROFILE=1.35 \
 KCP_SKIP_WERF=1 \
 e2e/run.sh
 ```
 
-To run the upstream kubectl client suite for a profile:
+The upstream kubectl client suite is not part of the compatibility workflow.
+To run it separately for a profile:
 
 ```bash
 KCP_KUBERNETES_VERSION_PROFILE=1.35 e2e/run-upstream-kubectl-e2e.sh

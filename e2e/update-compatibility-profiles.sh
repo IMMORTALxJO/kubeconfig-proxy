@@ -63,6 +63,22 @@ profile_value() {
 	' "$VERSIONS_FILE"
 }
 
+resolve_kubernetes_tag_commit() {
+	local release="$1"
+	local remote="${2:-https://github.com/kubernetes/kubernetes.git}"
+	local commit
+
+	commit="$(git ls-remote "$remote" "refs/tags/$release^{}" | awk 'NR == 1 { print $1 }')"
+	if [[ -z "$commit" ]]; then
+		commit="$(git ls-remote --refs "$remote" "refs/tags/$release" | awk 'NR == 1 { print $1 }')"
+	fi
+	if [[ -z "$commit" ]]; then
+		printf 'could not resolve Kubernetes tag %s\n' "$release" >&2
+		return 1
+	fi
+	printf '%s\n' "$commit"
+}
+
 resolve_new_profile() {
 	local profile="$1"
 	local release="v${profile}.0"
@@ -70,11 +86,7 @@ resolve_new_profile() {
 	local token
 	local digest
 
-	commit="$(git ls-remote --refs https://github.com/kubernetes/kubernetes.git "refs/tags/$release" | awk 'NR == 1 { print $1 }')"
-	if [[ -z "$commit" ]]; then
-		printf 'could not resolve Kubernetes tag %s\n' "$release" >&2
-		return 1
-	fi
+	commit="$(resolve_kubernetes_tag_commit "$release")"
 	token="$(curl -fsSL 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:kindest/node:pull' | jq -er '.token')"
 	digest="$(curl -fsSI \
 		-H "Authorization: Bearer $token" \
@@ -201,10 +213,6 @@ write_versions_test_file() {
 # shellcheck disable=SC2016
 write_compatibility_workflow() {
 	local profile
-	local kubectl_profile
-	local primary_profile
-	local kubectl_minor
-	local primary_minor
 	local last_profile="${DESIRED_PROFILES[$((${#DESIRED_PROFILES[@]} - 1))]}"
 
 	{
@@ -213,37 +221,18 @@ write_compatibility_workflow() {
 		printf '%s\n\n' 'permissions:' '  contents: read'
 		printf '%s\n' 'jobs:'
 		printf '%s\n' '  routing:'
-		printf '%s\n' '    name: kubectl ${{ matrix.kubectl }}, primary ${{ matrix.primary }}, secondary ${{ matrix.secondary }}'
+		printf '%s\n' '    name: kubectl ${{ matrix.kubectl }}, Kubernetes ${{ matrix.cluster }}'
 		printf '%s\n' '    runs-on: ubuntu-latest' '    timeout-minutes: 45' '    strategy:' '      fail-fast: false' '      matrix:'
 		printf '        kubectl: ['
 		for profile in "${DESIRED_PROFILES[@]}"; do printf '"%s"%s' "$profile" "$( [[ "$profile" == "$last_profile" ]] || printf ', ')"; done
-		printf ']\n        primary: ['
+		printf ']\n        cluster: ['
 		for profile in "${DESIRED_PROFILES[@]}"; do printf '"%s"%s' "$profile" "$( [[ "$profile" == "$last_profile" ]] || printf ', ')"; done
-		printf ']\n        secondary: ['
-		for profile in "${DESIRED_PROFILES[@]}"; do printf '"%s"%s' "$profile" "$( [[ "$profile" == "$last_profile" ]] || printf ', ')"; done
-		printf ']\n        exclude:\n'
-		for kubectl_profile in "${DESIRED_PROFILES[@]}"; do
-			kubectl_minor="${kubectl_profile#1.}"
-			for primary_profile in "${DESIRED_PROFILES[@]}"; do
-				primary_minor="${primary_profile#1.}"
-				if ((kubectl_minor - primary_minor > 1 || primary_minor - kubectl_minor > 1)); then
-					printf '          - kubectl: "%s"\n            primary: "%s"\n' "$kubectl_profile" "$primary_profile"
-				fi
-			done
-		done
+		printf ']\n'
 		printf '\n%s\n' '    steps:'
 		printf '%s\n' '      - name: Checkout' '        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1'
 		printf '\n%s\n' '      - name: Set up Go' '        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0' '        with:' '          go-version-file: go.mod' '          cache: true'
 		printf '\n%s\n' '      - name: Install kind' '        run: |' '          go install sigs.k8s.io/kind@v0.30.0' '          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"'
-		printf '\n%s\n' '      - name: Run routing compatibility suite' '        env:' '          KCP_SKIP_MAKE_CHECK: "1"' '          KCP_SKIP_WERF: "1"' '          KCP_E2E_CHECKS: context,aggregation,routing,rollout,subresources,watch,helm' '          KCP_E2E_PREFIX: compat' '          KCP_KUBECTL_VERSION_PROFILE: ${{ matrix.kubectl }}' '          KCP_CLUSTER_A_VERSION_PROFILE: ${{ matrix.primary }}' '          KCP_CLUSTER_B_VERSION_PROFILE: ${{ matrix.secondary }}' '        run: e2e/run.sh'
-		printf '\n%s\n' '  upstream-kubectl:' '    name: upstream kubectl ${{ matrix.cluster }}' '    runs-on: ubuntu-latest' '    timeout-minutes: 390' '    strategy:' '      fail-fast: false' '      matrix:'
-		printf '        cluster: ['
-		for profile in "${DESIRED_PROFILES[@]}"; do printf '"%s"%s' "$profile" "$( [[ "$profile" == "$last_profile" ]] || printf ', ')"; done
-		printf ']\n\n'
-		printf '%s\n' '    steps:' '      - name: Checkout' '        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1'
-		printf '\n%s\n' '      - name: Set up Go' '        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0' '        with:' '          go-version-file: go.mod' '          cache: true'
-		printf '\n%s\n' '      - name: Install kind' '        run: |' '          go install sigs.k8s.io/kind@v0.30.0' '          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"'
-		printf '\n%s\n' '      - name: Run upstream kubectl client suite through proxy' '        env:' '          KCP_KUBERNETES_VERSION_PROFILE: ${{ matrix.cluster }}' '        run: e2e/run-upstream-kubectl-e2e.sh'
+		printf '\n%s\n' '      - name: Run routing compatibility suite' '        env:' '          KCP_SKIP_MAKE_CHECK: "1"' '          KCP_SKIP_WERF: "1"' '          KCP_E2E_CHECKS: context,aggregation,routing,rollout,subresources,watch,helm' '          KCP_E2E_PREFIX: compat' '          KCP_KUBECTL_VERSION_PROFILE: ${{ matrix.kubectl }}' '          KCP_CLUSTER_A_VERSION_PROFILE: ${{ matrix.cluster }}' '          KCP_CLUSTER_B_VERSION_PROFILE: ${{ matrix.cluster }}' '        run: e2e/run.sh'
 	} >"$WORKFLOW_FILE"
 }
 
@@ -252,13 +241,8 @@ write_compatibility_document() {
 	local profile
 	local release
 	local kubectl_profile
-	local primary_profile
-	local kubectl_minor
-	local primary_minor
-	local primary_profiles
-	local cells
 	local all_profiles
-	local total_cells=0
+	local total_cells=$((${#DESIRED_PROFILES[@]} * ${#DESIRED_PROFILES[@]}))
 
 	all_profiles="$(join_profiles "${DESIRED_PROFILES[@]}")"
 	{
@@ -271,35 +255,26 @@ write_compatibility_document() {
 			printf '| %s | %s | %s | %s |\n' "$profile" "$release" "$release" "$release"
 		done
 		printf '\n%s\n' '## Compatibility Matrix'
-		printf '\n%s\n' 'The `Kubernetes compatibility` workflow runs every combination below. The' 'primary cluster supplies discovery, while the secondary cluster exercises the' 'multi-context routing, aggregation, and streaming paths.'
-		printf '\n%s\n' '| kubectl | Primary cluster | Secondary cluster | Cells |' '| --- | --- | --- | --- |'
+		printf '\n%s\n' 'The `Kubernetes compatibility` workflow runs every kubectl and Kubernetes' 'profile pairing below. Both kind clusters use the same Kubernetes profile in' 'each cell while still exercising multi-context routing and aggregation.'
+		printf '\n%s\n' '| kubectl | Kubernetes / kind clusters | Cells |' '| --- | --- | --- |'
 		for kubectl_profile in "${DESIRED_PROFILES[@]}"; do
-			kubectl_minor="${kubectl_profile#1.}"
-			primary_profiles=()
-			for primary_profile in "${DESIRED_PROFILES[@]}"; do
-				primary_minor="${primary_profile#1.}"
-				if ((kubectl_minor - primary_minor <= 1 && primary_minor - kubectl_minor <= 1)); then primary_profiles+=("$primary_profile"); fi
-			done
-			cells=$((${#primary_profiles[@]} * ${#DESIRED_PROFILES[@]}))
-			total_cells=$((total_cells + cells))
-			printf '| %s | %s | %s | %s |\n' "$kubectl_profile" "$(join_profiles "${primary_profiles[@]}")" "$all_profiles" "$cells"
+			printf '| %s | %s | %s |\n' "$kubectl_profile" "$all_profiles" "${#DESIRED_PROFILES[@]}"
 		done
-		printf '\nAll %s supported combinations run only when a maintainer starts the\n' "$total_cells"
-		printf '%s\n' '`Kubernetes compatibility` workflow manually. It is not a required merge' 'check. Pairs with a two-minor kubectl/API-server skew are excluded because' 'Kubernetes does not support them.'
-		printf '\n%s\n' 'Each active minor is also run through the upstream Kubernetes `[sig-cli]' 'Kubectl client` e2e suite using a single-source proxy. This suite validates' "general client compatibility; the ${total_cells}-case routing matrix is the safety net for" 'the product-specific multi-cluster behaviour.'
+		printf '\nAll %s combinations run only when a maintainer starts the\n' "$total_cells"
+		printf '%s\n' '`Kubernetes compatibility` workflow manually. It is not a required merge' 'check.'
 		printf '\n%s\n' '## Supported Scope'
 		printf '\n%s\n' 'The matrix verifies the routing contract for Kubernetes stable APIs: discovery,' 'CRUD and server-side mutations, lists and pagination, watches, pod connection' 'subresources, read-only contexts, Helm release storage, and source markers.' 'It does not claim feature equivalence for alpha/beta APIs, arbitrary CRDs,' 'aggregated API implementations, kubectl plugins, or provider-specific auth' 'plugins.'
-		printf '\n%s\n' 'Kubernetes supports kubectl within one minor version of a kube-apiserver. The' 'matrix includes every skew-valid kubectl/primary pair in this window. `client-go`' "\`v0.36\` remains the proxy's upstream client and is tested against all three" 'cluster profiles. See the upstream [version skew policy](https://kubernetes.io/releases/version-skew-policy/)' 'and [client-go compatibility matrix](https://github.com/kubernetes/client-go).'
+		printf '\n%s\n' 'Kubernetes supports kubectl within one minor version of a kube-apiserver. The' 'matrix also runs the two edge pairings with a two-minor skew as compatibility' 'probes; they do not expand the upstream-supported skew policy. `client-go`' "\`v0.36\` remains the proxy's upstream client and is tested against all three" 'cluster profiles. See the upstream [version skew policy](https://kubernetes.io/releases/version-skew-policy/)' 'and [client-go compatibility matrix](https://github.com/kubernetes/client-go).'
 		printf '\n%s\n' '## Running a Cell Locally'
 		printf '\n%s\n' 'Use the profile variables to run an individual matrix cell. Recreate local kind' 'clusters when changing either cluster profile:'
 		printf '\n%s\n' '```bash'
 		printf '%s %s\n' 'KCP_RECREATE_KIND=1' '\\'
 		printf '%s %s\n' "KCP_KUBECTL_VERSION_PROFILE=${DESIRED_PROFILES[0]}" '\\'
 		printf '%s %s\n' "KCP_CLUSTER_A_VERSION_PROFILE=${DESIRED_PROFILES[1]}" '\\'
-		printf '%s %s\n' "KCP_CLUSTER_B_VERSION_PROFILE=${DESIRED_PROFILES[2]}" '\\'
+		printf '%s %s\n' "KCP_CLUSTER_B_VERSION_PROFILE=${DESIRED_PROFILES[1]}" '\\'
 		printf '%s %s\n' 'KCP_SKIP_WERF=1' '\\'
 		printf '%s\n' 'e2e/run.sh' '```'
-		printf '\n%s\n' 'To run the upstream kubectl client suite for a profile:'
+		printf '\n%s\n' 'The upstream kubectl client suite is not part of the compatibility workflow.' 'To run it separately for a profile:'
 		printf '\n%s\n' '```bash' "KCP_KUBERNETES_VERSION_PROFILE=${DESIRED_PROFILES[1]} e2e/run-upstream-kubectl-e2e.sh" '```'
 		printf '\n%s\n' 'This file, `e2e/versions.sh`, its focused test, and the workflow matrix are' 'generated by `e2e/update-compatibility-profiles.sh`. The weekly refresh workflow' 'opens a pull request only when Kubernetes support profiles change.'
 	} >"$COMPATIBILITY_FILE"

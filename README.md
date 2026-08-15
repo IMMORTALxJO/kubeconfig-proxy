@@ -412,13 +412,12 @@ fan-out remain covered by the project integration tests.
 
 ## Kubernetes Compatibility
 
-[![Kubernetes compatibility](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/compatibility.yml/badge.svg?branch=main)](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/compatibility.yml)
+[![Kubernetes compatibility](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/compatibility.yml/badge.svg?branch=master)](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/compatibility.yml)
 
 The supported compatibility window is the current three active Kubernetes and
-kubectl minor versions. The compatibility workflow verifies every
-Kubernetes-supported combination of kubectl, primary cluster, and secondary
-cluster, then runs the upstream `[sig-cli] Kubectl client` suite for each
-minor version. The exact tested images, patch versions, scope, latest workflow
+kubectl minor versions. The compatibility workflow verifies all nine kubectl
+and Kubernetes profile pairings, using the selected Kubernetes version for both
+kind clusters. The exact tested images, patch versions, scope, latest workflow
 result, and commands for running an individual cell are in
 [COMPATIBILITY.md](COMPATIBILITY.md).
 

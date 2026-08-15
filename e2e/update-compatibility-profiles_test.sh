@@ -45,6 +45,19 @@ fi
 
 temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/kcp-compatibility-test.XXXXXX")"
 trap 'rm -rf "$temporary_dir"' EXIT
+
+tag_remote="$temporary_dir/kubernetes.git"
+tag_worktree="$temporary_dir/kubernetes-worktree"
+git init --bare "$tag_remote" >/dev/null
+git init "$tag_worktree" >/dev/null
+git -C "$tag_worktree" config user.name test
+git -C "$tag_worktree" config user.email test@example.com
+git -C "$tag_worktree" commit --allow-empty -m test >/dev/null
+tag_commit="$(git -C "$tag_worktree" rev-parse HEAD)"
+git -C "$tag_worktree" tag -a v1.99.0 -m v1.99.0
+git -C "$tag_worktree" push "$tag_remote" v1.99.0 >/dev/null
+assert_equals "$(resolve_kubernetes_tag_commit v1.99.0 "$tag_remote")" "$tag_commit"
+
 WORK_DIR="$temporary_dir/profile-data"
 mkdir -p "$WORK_DIR"
 DESIRED_PROFILES=(1.34 1.35 1.36)
@@ -70,8 +83,18 @@ for profile in "${DESIRED_PROFILES[@]}"; do
 	assert_equals "$KCP_SELECTED_KUBECTL_VERSION" "${KCP_SELECTED_KUBERNETES_VERSION}"
 done
 line_continuation=$'\\'
-rg -F "KCP_CLUSTER_B_VERSION_PROFILE=1.36 $line_continuation" "$COMPATIBILITY_FILE" >/dev/null
-rg -F 'KCP_CLUSTER_B_VERSION_PROFILE: ${{ matrix.secondary }}' "$WORKFLOW_FILE" >/dev/null
+rg -F "KCP_CLUSTER_B_VERSION_PROFILE=1.35 $line_continuation" "$COMPATIBILITY_FILE" >/dev/null
+rg -F 'KCP_CLUSTER_A_VERSION_PROFILE: ${{ matrix.cluster }}' "$WORKFLOW_FILE" >/dev/null
+rg -F 'KCP_CLUSTER_B_VERSION_PROFILE: ${{ matrix.cluster }}' "$WORKFLOW_FILE" >/dev/null
+rg -F 'All 9 combinations run only when a maintainer starts the' "$COMPATIBILITY_FILE" >/dev/null
+if rg -F 'matrix.primary' "$WORKFLOW_FILE" >/dev/null || rg -F 'matrix.secondary' "$WORKFLOW_FILE" >/dev/null; then
+	printf 'generated workflow still contains a primary/secondary version matrix\n' >&2
+	exit 1
+fi
+if rg -F 'upstream-kubectl:' "$WORKFLOW_FILE" >/dev/null; then
+	printf 'generated compatibility workflow still contains upstream kubectl jobs\n' >&2
+	exit 1
+fi
 
 (
 	cp "$ROOT/e2e/versions.sh" "$temporary_dir/current-versions.sh"
