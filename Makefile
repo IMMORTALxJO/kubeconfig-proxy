@@ -25,7 +25,7 @@ SHELL_FILES := install.sh e2e/run.sh e2e/run-upstream-kubectl-e2e.sh e2e/version
 GOTOOLCHAIN_ENV := GOTOOLCHAIN=$(GO_TOOLCHAIN)
 E2E_VARIANT_GOALS := $(filter local kubectl kind,$(MAKECMDGOALS))
 
-.PHONY: help fmt fmt-check yamlfmt yamlfmt-check vet staticcheck actionlint shellcheck gosec vuln test race build build-cover check e2e-selection-test e2e-prefix-test e2e-werf-test e2e-versions-test e2e-profile-update-test clean e2e local kubectl kind
+.PHONY: help fmt fmt-check yamlfmt yamlfmt-check vet staticcheck actionlint shellcheck gosec vuln test race leak build build-cover check e2e-selection-test e2e-prefix-test e2e-werf-test e2e-versions-test e2e-profile-update-test clean e2e local kubectl kind
 
 ifneq ($(strip $(E2E_VARIANT_GOALS)),)
 ifneq ($(words $(E2E_VARIANT_GOALS)),1)
@@ -45,6 +45,7 @@ help:
 	@echo "  vuln         Run govulncheck"
 	@echo "  test         Run tests"
 	@echo "  race         Run race tests"
+	@echo "  leak         Run goroutine leak tests"
 	@echo "  build        Build the CLI binary"
 	@echo "  build-cover  Build the CLI binary with coverage instrumentation"
 	@echo "  e2e-selection-test  Test targeted e2e check selection"
@@ -93,6 +94,9 @@ test:
 race:
 	$(GOTOOLCHAIN_ENV) $(GO) test -race $(RACE_PKGS)
 
+leak:
+	$(GOTOOLCHAIN_ENV) $(GO) test -tags=leak $(PKGS)
+
 build:
 	mkdir -p $(BUILD_DIR)
 	$(GOTOOLCHAIN_ENV) $(GO) build -trimpath -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PACKAGE)
@@ -101,7 +105,7 @@ build-cover:
 	mkdir -p $(BUILD_DIR)
 	$(GOTOOLCHAIN_ENV) $(GO) build -cover -covermode=atomic -coverpkg=$(COVER_PACKAGES) -trimpath -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PACKAGE)
 
-check: fmt-check vet staticcheck actionlint shellcheck gosec vuln test race build e2e-selection-test e2e-prefix-test e2e-werf-test e2e-versions-test e2e-profile-update-test
+check: fmt-check vet staticcheck actionlint shellcheck gosec vuln test race leak build e2e-selection-test e2e-prefix-test e2e-werf-test e2e-versions-test e2e-profile-update-test
 
 e2e-selection-test:
 	bash e2e/checks/selection_test.sh

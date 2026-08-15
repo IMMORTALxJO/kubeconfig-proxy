@@ -54,5 +54,8 @@ jobs:
       - name: Race test proxy package
         run: make race
 
+      - name: Goroutine leak test
+        run: make leak
+
       - name: Build
         run: make build BUILD_DIR=/tmp

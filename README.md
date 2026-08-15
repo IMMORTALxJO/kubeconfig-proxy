@@ -292,6 +292,7 @@ Run tests:
 ```bash
 make test
 make race
+make leak
 ```
 
 Build the binary:
