@@ -51,6 +51,57 @@ func TestSaveAndLoadRuntimeRoundTripWithPrivatePermissions(t *testing.T) {
 	}
 }
 
+func TestSaveOmitsEmptySourceKubeconfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proxy.yaml")
+	profile := validTestProfile()
+	profile.SourceKubeconfig = ""
+
+	if err := Save(path, profile); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "sourceKubeconfig:") {
+		t.Fatalf("state contains an empty sourceKubeconfig key:\n%s", data)
+	}
+	runtime, err := LoadRuntime(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Profile.SourceKubeconfig != "" {
+		t.Fatalf("loaded source kubeconfig = %q, want empty", runtime.Profile.SourceKubeconfig)
+	}
+}
+
+func TestSaveAndLoadRuntimeUsesSourceKubeconfigKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proxy.yaml")
+	profile := validTestProfile()
+
+	if err := Save(path, profile); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "sourceKubeconfig: /tmp/kubeconfig") {
+		t.Fatalf("state does not contain sourceKubeconfig:\n%s", data)
+	}
+	if strings.Contains(string(data), "\nkubeconfig:") {
+		t.Fatalf("state contains obsolete kubeconfig key:\n%s", data)
+	}
+
+	runtime, err := LoadRuntime(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Profile.SourceKubeconfig != profile.SourceKubeconfig {
+		t.Fatalf("loaded source kubeconfig = %q, want %q", runtime.Profile.SourceKubeconfig, profile.SourceKubeconfig)
+	}
+}
+
 func TestLoadRuntimeRejectsInvalidStateFiles(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -259,13 +310,6 @@ func TestValidateRejectsMissingRequiredFields(t *testing.T) {
 				profile.Name = ""
 			},
 			wantErrContains: "state name is required",
-		},
-		{
-			name: "source kubeconfig",
-			mutate: func(profile *Profile) {
-				profile.SourceKubeconfig = ""
-			},
-			wantErrContains: "state sourceKubeconfig is required",
 		},
 		{
 			name: "listen",

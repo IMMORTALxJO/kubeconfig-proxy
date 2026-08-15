@@ -123,6 +123,17 @@ certificate, bearer token, source-context selection rules, listen address, and
 runtime options. The kubeconfig stores only the public proxy server URL,
 certificate authority data, and exec command.
 
+By default, the state does not store a kubeconfig path. A new `serve` process
+uses the standard Kubernetes loading rules from its environment, including
+merging the files listed in `KUBECONFIG`. Starting the proxy after moving a
+kubeconfig and updating `KUBECONFIG` therefore does not require recreating the
+proxy context. When `add-context --kubeconfig <path>` is used, state instead
+contains the absolute pinned path:
+
+```yaml
+sourceKubeconfig: /absolute/path/to/config
+```
+
 State schema version 1 stores context selection as a nested object. For example:
 
 ```yaml
@@ -157,18 +168,19 @@ to disable idle shutdown.
 Serve logs are disabled by default. Pass `--logs-enabled` to `add-context` to
 write auto-started `serve` output to `<state>.log`.
 
-While `serve` is running, it watches both the state file and the selected source
-kubeconfig. Changing either file replaces the `serve` process so all runtime
-settings and upstream clients are rebuilt from scratch. Refreshed OIDC tokens,
-client certificates, and exec credential configuration are therefore used
-without recreating the proxy context. Context selection rules are also resolved
-again, so new contexts matching `contexts.regexp` are added automatically. A
-detected change remains pending while proxy requests are in flight; the process
-is replaced only after the last one finishes. Long-running watches and streaming
-subresources can therefore defer a reload indefinitely, but they are never
-interrupted by it. Clients can reconnect immediately when the local address and
-proxy credentials remain unchanged; otherwise they must reload the generated
-kubeconfig entries written by `add-context`.
+While `serve` is running, it watches both the state file and every source
+kubeconfig file in the active loading rules. Changing any watched file replaces
+the `serve` process so all runtime settings and upstream clients are rebuilt
+from scratch. Refreshed OIDC tokens, client certificates, and exec credential
+configuration are therefore used without recreating the proxy context. Context
+selection rules are also resolved again, so new contexts matching
+`contexts.regexp` are added automatically. A detected change remains pending
+while proxy requests are in flight; the process is replaced only after the last
+one finishes. Long-running watches and streaming subresources can therefore
+defer a reload indefinitely, but they are never interrupted by it. Clients can
+reconnect immediately when the local address and proxy credentials remain
+unchanged; otherwise they must reload the generated kubeconfig entries written
+by `add-context`.
 
 ## Selecting Source Contexts
 
@@ -190,11 +202,11 @@ kubeconfig-proxy add-context prod-proxy \
   --primary-context prod-a
 ```
 
-The CLI reads and updates one kubeconfig file. `--kubeconfig` selects it
-explicitly. When the flag is omitted, the first existing file from the ordinary
-Kubernetes precedence list is selected: entries in `KUBECONFIG` are considered
-from left to right, or `~/.kube/config` is used when the environment variable is
-unset. Multiple `KUBECONFIG` files are not merged.
+`--kubeconfig` selects one source kubeconfig explicitly and pins its absolute
+path in state. When the flag is omitted, source contexts are loaded with the
+standard Kubernetes rules: files from `KUBECONFIG` are merged in precedence
+order, or `~/.kube/config` is used when the variable is unset. The managed
+proxy entries are written to the first existing file in that precedence list.
 
 If both `--contexts` and `--context-regexp` are omitted, the state stores
 `contexts.regexp: '.*'`, selecting all ordinary source contexts while excluding
@@ -264,9 +276,9 @@ werf example.
 ## Commands And Flags
 
 - `add-context <name>` adds an auto-started proxy context to a kubeconfig.
-- `--kubeconfig ~/.kube/config` selects the single source kubeconfig file to
-  read and update. If omitted, the first file in the normal Kubernetes
-  precedence list is selected; multiple `KUBECONFIG` files are not merged.
+- `--kubeconfig ~/.kube/config` selects one source kubeconfig file and stores
+  its absolute path in state. If omitted, source contexts follow the standard
+  Kubernetes loading rules and the state omits the `sourceKubeconfig` key.
 - `--state /path/to/proxy.yaml` overrides the generated state file path.
 - `--contexts dev,stage,prod` limits the proxy to specific source contexts.
   Repeating a context name is rejected so mutations cannot be sent to the same

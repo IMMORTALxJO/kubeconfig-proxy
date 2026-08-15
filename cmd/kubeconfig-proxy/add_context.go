@@ -38,7 +38,7 @@ func runAddContext(args []string) error {
 		return err
 	}
 
-	absoluteKubeconfigPath, absoluteStatePath, err := resolveAddContextPaths(options.kubeconfigPath, options.statePath, options.contextName)
+	kubeconfigPath, kubeconfigWritePath, absoluteStatePath, err := resolveAddContextPaths(options.kubeconfigPath, options.statePath, options.contextName)
 	if err != nil {
 		return err
 	}
@@ -47,7 +47,7 @@ func runAddContext(args []string) error {
 		return err
 	}
 
-	source, err := kubeconfig.LoadSource(absoluteKubeconfigPath)
+	source, err := kubeconfig.LoadSource(kubeconfigPath)
 	if err != nil {
 		return err
 	}
@@ -66,7 +66,7 @@ func runAddContext(args []string) error {
 		return err
 	}
 
-	profile, certPEM, err := newAddContextProfile(options, absoluteKubeconfigPath, resolvedListenAddr, contextSelection)
+	profile, certPEM, err := newAddContextProfile(options, kubeconfigPath, resolvedListenAddr, contextSelection)
 	if err != nil {
 		return err
 	}
@@ -75,11 +75,11 @@ func runAddContext(args []string) error {
 	}
 
 	serverURL := "https://" + resolvedListenAddr
-	if err := kubeconfig.AddProxyContext(absoluteKubeconfigPath, options.contextName, serverURL, primary.Namespace, options.execCommand, absoluteStatePath, certPEM); err != nil {
+	if err := kubeconfig.AddProxyContext(kubeconfigWritePath, options.contextName, serverURL, primary.Namespace, options.execCommand, absoluteStatePath, certPEM); err != nil {
 		return err
 	}
 
-	logAddContextResult(options, absoluteKubeconfigPath, absoluteStatePath, serverURL, targets, primary)
+	logAddContextResult(options, kubeconfigWritePath, absoluteStatePath, serverURL, targets, primary)
 	return nil
 }
 
@@ -91,7 +91,7 @@ func parseAddContextOptions(args []string) (addContextOptions, error) {
 		args = args[1:]
 	}
 	var (
-		kubeconfigPath = flags.String("kubeconfig", resolveDefaultKubeconfigPath(), "kubeconfig path to update")
+		kubeconfigPath = flags.String("kubeconfig", "", "explicit kubeconfig path; defaults to standard Kubernetes loading rules")
 		statePath      = flags.String("state", "", "state file path; defaults to ~/.kube/kubeconfig-proxy/<context>.yaml")
 		listenAddr     = flags.String("listen", "", "proxy listen address; defaults to an available 127.0.0.1 port")
 		contextsCSV    = flags.String("contexts", "", "comma-separated source kubeconfig contexts to include")
@@ -145,22 +145,32 @@ func resolveAddContextName(contextName string, flags *flag.FlagSet) (string, err
 	return contextName, nil
 }
 
-func resolveAddContextPaths(kubeconfigPath, statePath, contextName string) (string, string, error) {
-	absoluteKubeconfigPath, err := filepath.Abs(kubeconfigPath)
+func resolveAddContextPaths(kubeconfigPath, statePath, contextName string) (string, string, string, error) {
+	resolvedKubeconfigPath := ""
+	kubeconfigWritePath := resolveDefaultKubeconfigPath()
+	if kubeconfigPath != "" {
+		absoluteKubeconfigPath, err := filepath.Abs(kubeconfigPath)
+		if err != nil {
+			return "", "", "", err
+		}
+		resolvedKubeconfigPath = absoluteKubeconfigPath
+		kubeconfigWritePath = absoluteKubeconfigPath
+	}
+	absoluteKubeconfigWritePath, err := filepath.Abs(kubeconfigWritePath)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if statePath == "" {
 		statePath, err = resolveDefaultStatePath(contextName)
 		if err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 	}
 	absoluteStatePath, err := filepath.Abs(statePath)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return absoluteKubeconfigPath, absoluteStatePath, nil
+	return resolvedKubeconfigPath, absoluteKubeconfigWritePath, absoluteStatePath, nil
 }
 
 func stateContextSelection(options addContextOptions) proxystate.ContextSelection {

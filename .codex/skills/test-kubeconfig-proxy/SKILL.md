@@ -161,6 +161,8 @@ The runner covers the first integration ring for this project:
 - Aggregated list pagination with a global limit and cross-context continuation.
 - Duplicate source-context rejection before proxy state is written.
 - Collision-resistant default state paths for context names that sanitize alike.
+- Explicit kubeconfig paths persisted in state and default loading that follows
+  `KUBECONFIG` after the file is moved.
 - Fan-out create mutations.
 - `POST` and `PUT` manifest bodies with the virtual `kcp-context` label stripped before forwarding.
 - `kubeconfig-proxy.io/target-context` routing to one or more targets.

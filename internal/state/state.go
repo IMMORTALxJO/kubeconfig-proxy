@@ -27,7 +27,7 @@ var createTemporaryFile = func(dir, pattern string) (temporaryFile, error) {
 type Profile struct {
 	Version          int              `json:"version"`
 	Name             string           `json:"name"`
-	SourceKubeconfig string           `json:"sourceKubeconfig"`
+	SourceKubeconfig string           `json:"sourceKubeconfig,omitempty"`
 	Listen           string           `json:"listen"`
 	Contexts         ContextSelection `json:"contexts"`
 	BearerToken      string           `json:"bearerToken"`
@@ -162,7 +162,6 @@ func (p *Profile) validateRequiredFields() error {
 		name  string
 	}{
 		{p.Name, "state name"},
-		{p.SourceKubeconfig, "state sourceKubeconfig"},
 		{p.Listen, "state listen"},
 		{p.BearerToken, "state bearerToken"},
 		{p.TLS.CertPEM, "state tls.certPEM"},
