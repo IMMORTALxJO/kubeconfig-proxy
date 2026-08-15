@@ -1516,6 +1516,73 @@ func TestWatchRuntimeFilesDetectsNewKubeconfigPrecedenceFile(t *testing.T) {
 	assertRuntimeFileWatcherEvent(t, changed, errSourceKubeconfigChanged)
 }
 
+func TestSnapshotKubeconfigFilesSkipsEmptyAndDuplicatePaths(t *testing.T) {
+	kubeconfigPath := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(kubeconfigPath, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := snapshotKubeconfigFiles([]string{"", kubeconfigPath, kubeconfigPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("watched kubeconfig files = %d, want 1", len(files))
+	}
+	if files[0].path != kubeconfigPath || !files[0].snapshot.exists {
+		t.Fatalf("watched kubeconfig file = %+v, want existing %q", files[0], kubeconfigPath)
+	}
+}
+
+func TestSnapshotKubeconfigFilesReturnsReadError(t *testing.T) {
+	_, err := snapshotKubeconfigFiles([]string{t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "read source kubeconfig") {
+		t.Fatalf("snapshotKubeconfigFiles error = %v, want source kubeconfig read error", err)
+	}
+}
+
+func TestWaitForStableOptionalRuntimeFileSnapshot(t *testing.T) {
+	t.Run("file appears", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "kubeconfig")
+		if err := os.WriteFile(path, []byte("source"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		snapshot, err := waitForStableOptionalRuntimeFileSnapshot(context.Background(), path, runtimeFileSnapshot{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !snapshot.exists {
+			t.Fatal("stable optional snapshot does not contain the new file")
+		}
+	})
+
+	t.Run("canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, err := waitForStableOptionalRuntimeFileSnapshot(ctx, filepath.Join(t.TempDir(), "kubeconfig"), runtimeFileSnapshot{})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("stable optional snapshot error = %v, want context cancellation", err)
+		}
+	})
+
+	t.Run("read error", func(t *testing.T) {
+		_, err := waitForStableOptionalRuntimeFileSnapshot(context.Background(), t.TempDir(), runtimeFileSnapshot{})
+		if err == nil {
+			t.Fatal("stable optional snapshot returned nil read error")
+		}
+	})
+}
+
+func TestWatchRuntimeFilesReportsKubeconfigReadError(t *testing.T) {
+	statePath, _, stateSnapshot, _ := newRuntimeFileWatcherTest(t)
+	kubeconfigPath := t.TempDir()
+
+	changed := watchRuntimeFiles(context.Background(), statePath, stateSnapshot, []watchedRuntimeFile{{path: kubeconfigPath}})
+	assertRuntimeFileWatcherError(t, changed, "read source kubeconfig")
+}
+
 func TestWatchRuntimeFilesStopsWhenCanceled(t *testing.T) {
 	statePath, sourcePath, stateSnapshot, sourceSnapshot := newRuntimeFileWatcherTest(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2364,6 +2431,21 @@ func TestLoadServeRuntimeReturnsKubeconfigErrors(t *testing.T) {
 				t.Fatalf("loadServeRuntime error = %v, want to contain %q", err, test.wantErrContains)
 			}
 		})
+	}
+}
+
+func TestLoadServeRuntimeReturnsDefaultKubeconfigError(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "missing-kubeconfig"))
+	profile := validMainTestProfile()
+	profile.SourceKubeconfig = ""
+	statePath := filepath.Join(t.TempDir(), "state.yaml")
+	if err := proxystate.Save(statePath, profile); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := loadServeRuntime(statePath)
+	if err == nil || !strings.Contains(err.Error(), "standard Kubernetes loading rules") {
+		t.Fatalf("loadServeRuntime error = %v, want default kubeconfig loading error", err)
 	}
 }
 
