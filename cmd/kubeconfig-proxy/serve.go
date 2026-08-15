@@ -63,15 +63,15 @@ func runServeStateWithReplacer(args []string, stop <-chan os.Signal, replaceProc
 }
 
 type serveRuntimeConfig struct {
-	profile        *proxystate.Profile
-	requestTimeout time.Duration
-	retryBackoff   time.Duration
-	proxyTTL       time.Duration
-	targets        []proxy.Target
-	primary        proxy.Target
-	handler        http.Handler
-	tlsCertificate tls.Certificate
-	sourceSnapshot runtimeFileSnapshot
+	profile         *proxystate.Profile
+	requestTimeout  time.Duration
+	retryBackoff    time.Duration
+	proxyTTL        time.Duration
+	targets         []proxy.Target
+	primary         proxy.Target
+	handler         http.Handler
+	tlsCertificate  tls.Certificate
+	kubeconfigFiles []watchedRuntimeFile
 }
 
 func loadServeRuntime(statePath string) (*serveRuntimeConfig, runtimeFileSnapshot, error) {
@@ -86,11 +86,14 @@ func loadServeRuntime(statePath string) (*serveRuntimeConfig, runtimeFileSnapsho
 	}
 	profile := stateRuntime.Profile
 
-	sourceSnapshot, err := readRuntimeFileSnapshot(profile.SourceKubeconfig)
-	if err != nil {
-		return nil, runtimeFileSnapshot{}, fmt.Errorf("read source kubeconfig %s: %w", profile.SourceKubeconfig, err)
-	}
 	source, err := kubeconfig.LoadSource(profile.SourceKubeconfig)
+	if err != nil {
+		if profile.SourceKubeconfig != "" {
+			return nil, runtimeFileSnapshot{}, fmt.Errorf("read source kubeconfig %s: %w", profile.SourceKubeconfig, err)
+		}
+		return nil, runtimeFileSnapshot{}, fmt.Errorf("load source kubeconfig using standard Kubernetes loading rules: %w", err)
+	}
+	kubeconfigFiles, err := snapshotKubeconfigFiles(source.KubeconfigPaths())
 	if err != nil {
 		return nil, runtimeFileSnapshot{}, err
 	}
@@ -125,15 +128,15 @@ func loadServeRuntime(statePath string) (*serveRuntimeConfig, runtimeFileSnapsho
 	}
 
 	return &serveRuntimeConfig{
-		profile:        profile,
-		requestTimeout: stateRuntime.RequestTimeout,
-		retryBackoff:   stateRuntime.RetryBackoff,
-		proxyTTL:       stateRuntime.ProxyTTL,
-		targets:        targets,
-		primary:        primary,
-		handler:        handler,
-		tlsCertificate: tlsCertificate,
-		sourceSnapshot: sourceSnapshot,
+		profile:         profile,
+		requestTimeout:  stateRuntime.RequestTimeout,
+		retryBackoff:    stateRuntime.RetryBackoff,
+		proxyTTL:        stateRuntime.ProxyTTL,
+		targets:         targets,
+		primary:         primary,
+		handler:         handler,
+		tlsCertificate:  tlsCertificate,
+		kubeconfigFiles: kubeconfigFiles,
 	}, snapshot, nil
 }
 
@@ -156,13 +159,7 @@ func serveRuntime(statePath string, runtime *serveRuntimeConfig, snapshot runtim
 
 	watchCtx, cancelWatch := context.WithCancel(context.Background())
 	defer cancelWatch()
-	runtimeChanged := watchRuntimeFiles(
-		watchCtx,
-		statePath,
-		snapshot,
-		runtime.profile.SourceKubeconfig,
-		runtime.sourceSnapshot,
-	)
+	runtimeChanged := watchRuntimeFiles(watchCtx, statePath, snapshot, runtime.kubeconfigFiles)
 
 	err = serveHTTP(listener, runtime.handler, runtime.tlsCertificate, runtime.proxyTTL, runtime.profile.BearerToken, stop, runtimeChanged, logger)
 	if errors.Is(err, errStateFileChanged) {

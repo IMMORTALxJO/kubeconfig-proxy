@@ -124,8 +124,8 @@ or remove actual duplication.
 `add-context` performs the following steps:
 
 1. Parse and validate CLI options.
-2. Resolve absolute kubeconfig and state paths and choose a local listen
-   address.
+2. Resolve the state path, the kubeconfig file to update, any explicitly pinned
+   kubeconfig path, and a local listen address.
 3. Load the source kubeconfig once through `internal/kubeconfig`.
 4. Combine explicitly named contexts with regular-expression matches; when
    neither selector is provided, use the persisted default expression `.*`.
@@ -137,16 +137,19 @@ or remove actual duplication.
    than the currently resolved context list.
 10. Write the managed cluster, auth info, and context to the kubeconfig.
 
-The CLI reads and updates one source kubeconfig file. An explicit
-`--kubeconfig` selects it directly. Without the flag, the first existing file
-from the client-go precedence list is selected; multiple files listed in
-`KUBECONFIG` are not merged.
+An explicit `--kubeconfig` loads one file, stores its absolute path in state as
+`sourceKubeconfig`, and writes the managed entries to that file. Without the
+flag, the state omits `sourceKubeconfig`; loading follows the standard client-go
+precedence rules and merges files listed in `KUBECONFIG`. Managed entries are
+written to the first existing file in the precedence list.
 
 The generated kubeconfig contains the local HTTPS endpoint, public certificate
 data, and an exec credential command. The bearer token and private key exist
 only in the state file.
 
-State schema version 1 stores context selection under `contexts`: `names` and
+State schema version 1 optionally stores an explicit absolute source path as
+`sourceKubeconfig`. Its absence selects standard Kubernetes loading rules.
+Context selection is stored under `contexts`: `names` and
 `regexp` are complementary selectors whose results are combined without
 duplicates, while optional `primary` records only an explicit
 `--primary-context`. Resolved regexp matches and an inferred primary are runtime
@@ -191,11 +194,13 @@ expired proxy without treating the serve process as a permanent daemon.
 
 1. load and validate the profile;
 2. parse duration strings once into a runtime profile;
-3. resolve the saved context selectors against the current source kubeconfig
-   and construct upstream targets;
+3. load either the explicitly pinned kubeconfig or the standard Kubernetes
+   precedence set, then resolve the saved context selectors and construct
+   upstream targets;
 4. construct the proxy handler and TLS certificate;
 5. listen on the configured address;
-6. watch the state file and source kubeconfig for modification or removal.
+6. watch the state file and every kubeconfig path in the active loading rules
+   for modification, creation, or removal.
 
 When either watched file changes, replacement remains pending until there are no
 active proxy requests. The HTTP server then stops accepting requests, shuts down
@@ -339,9 +344,9 @@ bodies are copied incrementally.
 
 ## State and security boundaries
 
-The state schema is versioned. Existing field names are compatibility
-contracts; incompatible schema changes require an explicit versioning and
-migration decision.
+The state schema is versioned. State version `1` keeps `sourceKubeconfig` for
+explicit pinned paths while making the field optional; older state files remain
+valid and continue to use their pinned kubeconfig.
 
 State persistence uses a temporary file followed by rename. State files and
 managed kubeconfig files use mode `0600`; their parent directories use mode

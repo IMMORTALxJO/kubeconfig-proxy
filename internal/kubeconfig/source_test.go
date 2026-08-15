@@ -174,6 +174,27 @@ func TestLoadSourceReturnsLoadErrors(t *testing.T) {
 	}
 }
 
+func TestLoadSourceUsesStandardKubeconfigPrecedence(t *testing.T) {
+	firstPath := writeSelectionTestKubeconfig(t, []string{"alpha"}, "alpha")
+	secondPath := writeSelectionTestKubeconfig(t, []string{"beta"}, "")
+	t.Setenv("KUBECONFIG", strings.Join([]string{firstPath, secondPath}, string(os.PathListSeparator)))
+
+	source, err := LoadSource("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contexts, _, err := source.SelectContexts(ContextSelection{ContextRegexp: ".*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"alpha", "beta"}; !slices.Equal(contexts, want) {
+		t.Fatalf("contexts = %v, want %v", contexts, want)
+	}
+	if want := []string{firstPath, secondPath}; !slices.Equal(source.KubeconfigPaths(), want) {
+		t.Fatalf("kubeconfig paths = %v, want %v", source.KubeconfigPaths(), want)
+	}
+}
+
 func TestSourceResolvesContextsAndClientConfig(t *testing.T) {
 	source := loadSelectionTestSource(t, []string{"beta", "alpha"}, "beta")
 
