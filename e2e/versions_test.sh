@@ -19,10 +19,11 @@ assert_equals() {
 kcp_select_cluster_version 1.34
 assert_equals "$KCP_SELECTED_KUBERNETES_VERSION" "v1.34.0"
 assert_equals "$KCP_SELECTED_KIND_NODE_IMAGE" "kindest/node:v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a"
+assert_equals "$KCP_SELECTED_KUBERNETES_COMMIT" "f28b4c9efbca5c5c0af716d9f2d5702667ee8a45"
 
 kcp_select_cluster_version 1.35
 assert_equals "$KCP_SELECTED_KUBERNETES_VERSION" "v1.35.0"
-assert_equals "$KCP_SELECTED_KUBERNETES_COMMIT" "2049416c7235eeec9a413c38472708e49af3ed88"
+assert_equals "$KCP_SELECTED_KUBERNETES_COMMIT" "66452049f3d692768c39c797b21b793dce80314e"
 
 kcp_select_cluster_version 1.36
 assert_equals "$KCP_SELECTED_KUBERNETES_VERSION" "v1.36.1"
