@@ -153,11 +153,11 @@ duplicates, while optional `primary` records only an explicit
 data and are deliberately not persisted. The previous flat representation of
 `contexts` is not supported.
 
-Regexp selection ignores every context whose cluster and auth-info references
-match the managed `kubeconfig-proxy/<context-name>` entries. Explicit `names`
-may include another managed proxy context, but direct self-selection remains
-invalid. This keeps broad expressions such as `.*` from accidentally creating
-proxy chains while preserving intentional composition.
+Regexp selection ignores every context whose cluster reference uses the
+reserved `kubeconfig-proxy/` prefix, including contexts renamed after creation.
+Explicit `names` may include another managed proxy context, but direct
+self-selection remains invalid. This keeps broad expressions such as `.*` from
+accidentally creating proxy chains while preserving intentional composition.
 
 Safe context names retain their historical state filename. Unsafe or long names
 use a sanitized readable prefix plus a short hash so distinct context names do

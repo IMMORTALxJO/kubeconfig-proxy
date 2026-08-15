@@ -145,9 +145,9 @@ contexts:
 ```
 
 Regular-expression selection excludes contexts managed by
-`kubeconfig-proxy`. Such a context can be used as a target only when it is
-listed explicitly with `--contexts`; the proxy context currently being created
-cannot select itself.
+`kubeconfig-proxy`, including contexts renamed after creation. Such a context
+can be used as a target only when it is listed explicitly with `--contexts`;
+the proxy context currently being created cannot select itself.
 
 `--proxy-ttl` controls idle shutdown. If no proxied Kubernetes API requests are
 active for that duration, the auto-started proxy process exits by itself. Health

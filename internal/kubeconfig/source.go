@@ -141,8 +141,7 @@ func (s *Source) isManagedProxyContext(contextName string) bool {
 	if kubeContext == nil {
 		return false
 	}
-	entryName := formatProxyEntryName(contextName)
-	return kubeContext.Cluster == entryName && kubeContext.AuthInfo == entryName
+	return strings.HasPrefix(kubeContext.Cluster, proxyEntryPrefix)
 }
 
 func (s *Source) validateSelectedContexts(proxyContextName string, contextNames []string) error {

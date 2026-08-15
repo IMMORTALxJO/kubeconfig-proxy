@@ -12,12 +12,15 @@ import (
 )
 
 func TestSourceSelectContexts(t *testing.T) {
-	source := loadSelectionTestSource(t, []string{"alpha", "beta", "managed-proxy", "managed-proxy-two", "prod-west", "proxy"}, "beta")
+	source := loadSelectionTestSource(t, []string{"alpha", "beta", "managed-proxy", "managed-proxy-two", "prod-west", "proxy", "renamed-proxy"}, "beta")
 	for _, contextName := range []string{"managed-proxy", "managed-proxy-two", "proxy"} {
 		managedEntryName := formatProxyEntryName(contextName)
 		source.rawConfig.Contexts[contextName].Cluster = managedEntryName
 		source.rawConfig.Contexts[contextName].AuthInfo = managedEntryName
 	}
+	renamedEntryName := formatProxyEntryName("original-proxy")
+	source.rawConfig.Contexts["renamed-proxy"].Cluster = renamedEntryName
+	source.rawConfig.Contexts["renamed-proxy"].AuthInfo = renamedEntryName
 	tests := []struct {
 		name            string
 		selection       ContextSelection
