@@ -3,6 +3,7 @@ module github.com/IMMORTALxJO/kubeconfig-proxy
 go 1.26.6
 
 require (
+	go.uber.org/goleak v1.3.0
 	k8s.io/apimachinery v0.36.3
 	k8s.io/client-go v0.36.3
 	sigs.k8s.io/yaml v1.6.0
