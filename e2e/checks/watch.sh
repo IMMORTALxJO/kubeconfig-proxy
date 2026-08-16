@@ -83,6 +83,17 @@ compact_context_etcd_history() {
   kubectl_ctx "$context_name" -n kube-system exec "$etcd_pod" -- "${etcdctl[@]}" compact "$revision" >/dev/null
 }
 
+advance_configmap_watch_cache() {
+  local context_name="$1"
+  local namespace="$2"
+  local configmap="$3"
+  local revision
+
+  for ((revision = 1; revision <= 256; revision++)); do
+    kubectl_ctx "$context_name" -n "$namespace" annotate configmap "$configmap" kubeconfig-proxy.io/e2e-watch-cache-revision="$revision" --overwrite >/dev/null || return
+  done
+}
+
 wait_for_process_exit() {
   local pid="$1"
   local attempt
@@ -268,6 +279,9 @@ run_watch_checks() {
   rm -f "$paginated_watch_log"
 
   if ! run_cmd "compact kubeconfig-proxy-a etcd history for expired watch" compact_context_etcd_history "$CTX_A"; then
+    return
+  fi
+  if ! run_cmd "advance kubeconfig-proxy-a watch cache past compaction" advance_configmap_watch_cache "$CTX_A" "$NS" "$paginated_seed_a"; then
     return
   fi
   dropped_watch_list="$(kubectl_ctx "$PROXY_CONTEXT" get --raw "/api/v1/namespaces/$NS/configmaps?resourceVersion=0" 2>&1)"
