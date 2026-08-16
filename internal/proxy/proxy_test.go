@@ -507,7 +507,7 @@ func TestListEntriesAndMarkEvent(t *testing.T) {
 	if _, _, ok := listEntries(map[string]any{}); ok {
 		t.Fatal("listEntries() accepted non-list payload")
 	}
-	event := markEvent([]byte(`{"type":"ADDED","object":{"metadata":{"name":"demo"}}}`), "two")
+	event := markEvent([]byte(`{"type":"ADDED","object":{"metadata":{"name":"demo"}}}`), "two", nil)
 	if !contains(string(event), sourceContextAnnotation) || !contains(string(event), `"two"`) {
 		t.Fatalf("event = %s", event)
 	}
@@ -738,18 +738,221 @@ func TestResponseHelpers(t *testing.T) {
 }
 
 func TestAggregateWatchForwardsAndMarksEvents(t *testing.T) {
+	watchHandler := func(name, version string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("watch") != "true" {
+				_, _ = w.Write([]byte(`{"metadata":{"resourceVersion":"` + version + `"},"items":[]}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json;stream=watch")
+			_, _ = w.Write([]byte(`{"type":"ADDED","object":{"metadata":{"name":"` + name + `","resourceVersion":"` + version + `"}}}` + "\n"))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		}
+	}
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": watchHandler("one", "10"),
+		"two": watchHandler("two", "20"),
+	})
+	defer cleanup()
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, proxyServer.URL+"/api/v1/configmaps?watch=true", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer test")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	decoder := json.NewDecoder(response.Body)
+	seen := map[string]bool{}
+	for range 2 {
+		var event struct {
+			Object struct {
+				Metadata struct {
+					Name        string            `json:"name"`
+					Annotations map[string]string `json:"annotations"`
+				} `json:"metadata"`
+			} `json:"object"`
+		}
+		if err := decoder.Decode(&event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Object.Metadata.Annotations[sourceContextAnnotation] == "" {
+			t.Fatalf("event has no source context annotation: %#v", event)
+		}
+		seen[event.Object.Metadata.Name] = true
+	}
+	if !seen["one"] || !seen["two"] {
+		t.Fatalf("watch events = %v, want both contexts", seen)
+	}
+}
+
+func TestWatchEventsAdvanceAggregateResourceVersions(t *testing.T) {
+	resourceVersions := map[string]string{"one": "10", "two": "20"}
+	one := markEvent([]byte(`{"type":"ADDED","object":{"metadata":{"name":"one","resourceVersion":"11"}}}`), "one", resourceVersions)
+	assertWatchEventResourceVersions(t, one, map[string]string{"one": "11", "two": "20"})
+	two := markEvent([]byte(`{"type":"ADDED","object":{"metadata":{"name":"two","resourceVersion":"21"}}}`), "two", resourceVersions)
+	assertWatchEventResourceVersions(t, two, map[string]string{"one": "11", "two": "21"})
+}
+
+func TestWatchResourceVersionsPreservesZero(t *testing.T) {
+	targets := []Target{{Name: "one"}, {Name: "two"}}
+	p := &Proxy{}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/configmaps?watch=true&resourceVersion=0", http.NoBody)
+	versions, failure, err := p.watchResourceVersions(request, targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failure.err != nil || failure.status != 0 {
+		t.Fatalf("failure = %#v", failure)
+	}
+	if versions["one"] != "0" || versions["two"] != "0" {
+		t.Fatalf("resource versions = %v, want zero for every context", versions)
+	}
+}
+
+func TestAggregateWatchRejectsInvalidAggregateResourceVersion(t *testing.T) {
+	tests := map[string]string{
+		"malformed": aggregateResourceVersionPrefix + "not-base64",
+		"missing context": encodeAggregateResourceVersions(map[string]string{
+			"one": "10",
+		}),
+	}
+	for name, resourceVersion := range tests {
+		t.Run(name, func(t *testing.T) {
+			calls := &callLog{}
+			p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+				"one": calls.handler("one", `{}`),
+				"two": calls.handler("two", `{}`),
+			})
+			defer cleanup()
+
+			response := serve(p, http.MethodGet, "/api/v1/configmaps?watch=true&resourceVersion="+url.QueryEscape(resourceVersion), "")
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+			}
+			if got := calls.names(); len(got) != 0 {
+				t.Fatalf("upstream calls = %v, want none", got)
+			}
+		})
+	}
+}
+
+func TestAggregateWatchStopsWhenOneUpstreamCloses(t *testing.T) {
+	otherCanceled := make(chan struct{})
 	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
 		"one": func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte("{\"type\":\"ADDED\",\"object\":{\"metadata\":{\"name\":\"one\"}}}\n"))
+			w.Header().Set("Content-Type", "application/json;stream=watch")
+			_, _ = w.Write([]byte(`{"type":"ADDED","object":{"metadata":{"name":"one","resourceVersion":"11"}}}` + "\n"))
 		},
-		"two": func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte("{\"type\":\"ADDED\",\"object\":{\"metadata\":{\"name\":\"two\"}}}\n"))
+		"two": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json;stream=watch")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			close(otherCanceled)
 		},
 	})
 	defer cleanup()
-	response := serve(p, http.MethodGet, "/api/v1/configmaps?watch=true", "")
-	if response.Code != http.StatusOK || !contains(response.Body.String(), `"one"`) || !contains(response.Body.String(), `"two"`) || !contains(response.Body.String(), sourceContextAnnotation) {
-		t.Fatalf("watch response = %d %s", response.Code, response.Body.String())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resourceVersion := url.QueryEscape(encodeAggregateResourceVersions(map[string]string{"one": "10", "two": "20"}))
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/configmaps?watch=true&resourceVersion="+resourceVersion, http.NoBody).WithContext(ctx)
+	request.Header.Set("Authorization", "Bearer test")
+	recorder := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		p.ServeHTTP(recorder, request)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("aggregate watch remained open after one upstream closed")
+	}
+	select {
+	case <-otherCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("remaining upstream watch was not canceled")
+	}
+}
+
+func TestAggregateWatchCancelsPendingOpenAfterFailure(t *testing.T) {
+	pendingStarted := make(chan struct{})
+	pendingCanceled := make(chan struct{})
+	p, cleanup := newProxy(t, "one", map[string]http.HandlerFunc{
+		"one": func(w http.ResponseWriter, _ *http.Request) {
+			<-pendingStarted
+			w.WriteHeader(http.StatusServiceUnavailable)
+		},
+		"two": func(_ http.ResponseWriter, r *http.Request) {
+			close(pendingStarted)
+			<-r.Context().Done()
+			close(pendingCanceled)
+		},
+	})
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resourceVersion := url.QueryEscape(encodeAggregateResourceVersions(map[string]string{"one": "10", "two": "20"}))
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/configmaps?watch=true&resourceVersion="+resourceVersion, http.NoBody).WithContext(ctx)
+	request.Header.Set("Authorization", "Bearer test")
+	recorder := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		p.ServeHTTP(recorder, request)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("aggregate watch did not cancel a pending open after another target failed")
+	}
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	select {
+	case <-pendingCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("pending upstream watch was not canceled")
+	}
+}
+
+func assertWatchEventResourceVersions(t *testing.T, event []byte, want map[string]string) {
+	t.Helper()
+	var payload struct {
+		Object struct {
+			Metadata struct {
+				ResourceVersion string `json:"resourceVersion"`
+			} `json:"metadata"`
+		} `json:"object"`
+	}
+	if err := json.Unmarshal(event, &payload); err != nil {
+		t.Fatal(err)
+	}
+	got := aggregateResourceVersions(payload.Object.Metadata.ResourceVersion)
+	if len(got) != len(want) {
+		t.Fatalf("resource versions = %v, want %v", got, want)
+	}
+	for contextName, version := range want {
+		if got[contextName] != version {
+			t.Fatalf("resource versions = %v, want %v", got, want)
+		}
 	}
 }
 
@@ -992,7 +1195,8 @@ func TestAggregateWatchClosesStreamsOpenedAfterFailure(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/configmaps?watch=true", http.NoBody)
+	resourceVersion := url.QueryEscape(encodeAggregateResourceVersions(map[string]string{"failure": "10", "stream": "20"}))
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/configmaps?watch=true&resourceVersion="+resourceVersion, http.NoBody)
 	p.aggregateWatch(recorder, request)
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)

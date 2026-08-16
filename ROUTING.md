@@ -98,9 +98,18 @@ not silently return a partial list.
 
 | Request pattern | Target | Result |
 | --- | --- | --- |
-| `GET {collection-path}?watch=true` | All contexts concurrently | Open one watch per context and forward events as they arrive.  Add the source annotation and virtual label to event objects.  Ordering between contexts is intentionally undefined. |
+| `GET {collection-path}?watch=true` | All contexts concurrently | Establish a resource-version position for every context, open one watch per context, and forward events as they arrive.  Add the source annotation and virtual label to event objects.  Every event carries the updated opaque aggregate resource version.  Ordering between contexts is intentionally undefined. |
 | Named object watch (`GET {object-path}?watch=true`) or collection watch with `fieldSelector=metadata.name={name}` | Contexts containing the named object | First locate the object in every context.  Open one watch only for each found object, using its context-local resource version.  A `404` is an expected absence during the lookup. |
 | Secret or ConfigMap collection watch whose decoded `labelSelector` contains `owner=helm` or `owner==helm`, in Helm compatibility mode | Primary | Stream one matching history only. |
+
+When `resourceVersion` is absent, the proxy first captures the current list
+resource version from every selected context.  Every forwarded event
+contains the latest complete vector; only the coordinate for the event's source
+context advances.  If any upstream watch ends, the proxy cancels the remaining
+upstream watches and closes the downstream stream instead of continuing with a
+partial set of contexts.  A malformed aggregate resource version, or one that
+does not contain every selected context, returns local `400 Bad Request` before
+any upstream watch is opened.
 
 The initial upstream-open failure must identify its context.  Successful streams
 are not buffered and are not subject to the ordinary request timeout.

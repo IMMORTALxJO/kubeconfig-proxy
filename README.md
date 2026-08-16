@@ -74,8 +74,10 @@ failure semantics, is in [ROUTING.md](ROUTING.md).
 - paginated lists honor one global `limit` and use an opaque proxy continuation
   token to advance across contexts without duplicates or omissions; every
   continuation request must include a positive `limit`;
-- ordinary collection watches are streamed from all selected contexts; named
-  watches use only contexts where the object exists;
+- ordinary collection watches are streamed from all selected contexts; every
+  event carries the latest aggregate resource version, and the client stream
+  closes when any selected context's watch ends; named watches use only
+  contexts where the object exists;
 - create, update, patch, and delete requests are sent to all selected contexts
   unless routing annotations or an existing object select specific targets;
 - discovery requests use the primary context;

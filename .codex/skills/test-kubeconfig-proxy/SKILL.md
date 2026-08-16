@@ -42,7 +42,8 @@ KCP_E2E_CHECKS=routing KCP_SKIP_MAKE_CHECK=1 KCP_SKIP_WERF=1 e2e/run.sh
 - `routing` — mutation routing, named reads, read-only mode, and `kubectl debug`.
 - `rollout` — `kubectl rollout restart` and `status` routing.
 - `subresources` — logs, exec, attach, and port-forward.
-- `watch` — multi-cluster and paginated watch behavior.
+- `watch` — multi-cluster and paginated watch behavior, aggregate resource
+  version advancement, and fail-fast stream termination.
 - `helm` — primary-only Helm release-storage reads.
 - `werf` — the `examples/werf` converge/dismiss flow.
 
@@ -178,7 +179,9 @@ The runner covers the first integration ring for this project:
   deployments in both source clusters. Identically named deployments retain
   ordinary Kubernetes watch identity, so one status request is not asserted as
   a cross-context readiness barrier.
-- Multi-cluster `kubectl get -w` events from both source clusters.
+- Multi-cluster `kubectl get -w` events from both source clusters, preserving
+  and advancing the full aggregate resource version.
+- Aggregate watch termination when any upstream cluster's watch ends.
 - PATCH routing based on the existing object when the patch body has no annotations.
 - DELETE routing only to clusters where the named object exists.
 - Read-only proxy context allowing read requests and rejecting mutating requests with `403`.
@@ -217,7 +220,8 @@ The two-cluster runner sources category files from `e2e/checks/`:
   `kubectl debug`.
 - `rollout.sh` covers Deployment restart and status routing.
 - `subresources.sh` covers logs, exec, attach, and port-forward.
-- `watch.sh` covers multi-cluster watch events.
+- `watch.sh` covers multi-cluster watch events, aggregate resource versions,
+  and upstream-loss termination.
 - `werf.sh` covers Helm storage (`helm`) and the werf example (`werf`).
 
 Keep checks as functions that use the runner's helpers (`run_cmd`,

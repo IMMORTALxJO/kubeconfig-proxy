@@ -250,12 +250,17 @@ aggregate resource version. A later watch decodes it and sends each target only
 its own resource version.
 
 Watch streams are opened concurrently and copied to the client as events
-arrive. Event writes are serialized, but ordering between clusters is
-intentionally not defined. An ordinary collection watch opens one upstream
-stream per configured target and forwards field selectors unchanged. A named
-object watch, or a collection watch with an exact `metadata.name` field
-selector, first probes all targets and opens streams only where the object was
-found.
+arrive. For a watch with no requested resource version, the proxy first captures
+a list resource version from every selected target. Event writes and
+resource-version updates are serialized, so every event carries the latest
+complete vector and only its source target's coordinate advances. Ordering
+between clusters is intentionally not defined. If any upstream stream ends,
+the proxy cancels all remaining streams and closes the downstream response;
+aggregate watches never continue with a partial target set. An ordinary
+collection watch opens one upstream stream per configured target and forwards
+field selectors unchanged. A named object watch, or a collection watch with an
+exact `metadata.name` field selector, first probes all targets and opens streams
+only where the object was found.
 
 ### Cross-context pagination
 
