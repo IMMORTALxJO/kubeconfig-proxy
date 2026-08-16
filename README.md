@@ -2,6 +2,7 @@
 
 [![codecov](https://codecov.io/gh/IMMORTALxJO/kubeconfig-proxy/branch/master/graph/badge.svg)](https://codecov.io/gh/IMMORTALxJO/kubeconfig-proxy)
 [![DeepSource](https://app.deepsource.com/gh/IMMORTALxJO/kubeconfig-proxy.svg/?label=active+issues&show_trend=true&token=2ECRVPtIrh_osePv7GJ4OOhA)](https://app.deepsource.com/gh/IMMORTALxJO/kubeconfig-proxy/)
+[![Kubernetes compatibility: 1.34, 1.35, 1.36](https://img.shields.io/github/actions/workflow/status/IMMORTALxJO/kubeconfig-proxy/compatibility.yml?branch=master&label=Kubernetes%201.34%20%7C%201.35%20%7C%201.36&logo=kubernetes)](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/compatibility.yml)
 
 ![kubeconfig-proxy request flow](assets/kubeconfig-proxy-flow.svg)
 
@@ -411,8 +412,6 @@ expects one coherent Kubernetes API server; multi-cluster aggregation and
 fan-out remain covered by the project integration tests.
 
 ## Kubernetes Compatibility
-
-[![Kubernetes compatibility](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/compatibility.yml/badge.svg?branch=master)](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/compatibility.yml)
 
 The supported compatibility window is the current three active Kubernetes and
 kubectl minor versions. The compatibility workflow verifies all nine kubectl

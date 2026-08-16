@@ -7,6 +7,7 @@ VERSIONS_FILE="$ROOT/e2e/versions.sh"
 VERSIONS_TEST_FILE="$ROOT/e2e/versions_test.sh"
 COMPATIBILITY_FILE="$ROOT/COMPATIBILITY.md"
 WORKFLOW_FILE="$ROOT/.github/workflows/compatibility.yml"
+README_FILE="$ROOT/README.md"
 WORK_DIR=""
 
 kcp_compatibility_profiles_for() {
@@ -280,6 +281,34 @@ write_compatibility_document() {
 	} >"$COMPATIBILITY_FILE"
 }
 
+write_readme_compatibility_badge() {
+	local badge_profiles=""
+	local profile
+	local replacement
+	local temporary_file
+
+	for profile in "${DESIRED_PROFILES[@]}"; do
+		badge_profiles="${badge_profiles:+${badge_profiles}%20%7C%20}${profile}"
+	done
+	replacement="[![Kubernetes compatibility: $(join_profiles "${DESIRED_PROFILES[@]}")](https://img.shields.io/github/actions/workflow/status/IMMORTALxJO/kubeconfig-proxy/compatibility.yml?branch=master&label=Kubernetes%20${badge_profiles}&logo=kubernetes)](https://github.com/IMMORTALxJO/kubeconfig-proxy/actions/workflows/compatibility.yml)"
+	temporary_file="$(mktemp "${README_FILE}.XXXXXX")"
+	if ! awk -v replacement="$replacement" '
+		/^\[!\[Kubernetes compatibility/ {
+			print replacement
+			replacements++
+			next
+		}
+		{ print }
+		END { if (replacements != 1) exit 1 }
+	' "$README_FILE" >"$temporary_file"; then
+		rm -f "$temporary_file"
+		printf 'expected exactly one Kubernetes compatibility badge in %s\n' "$README_FILE" >&2
+		return 1
+	fi
+	cp "$temporary_file" "$README_FILE"
+	rm -f "$temporary_file"
+}
+
 main() {
 	local stable_version
 	local current_profile_list
@@ -305,6 +334,7 @@ main() {
 	write_versions_test_file
 	write_compatibility_workflow
 	write_compatibility_document
+	write_readme_compatibility_badge
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

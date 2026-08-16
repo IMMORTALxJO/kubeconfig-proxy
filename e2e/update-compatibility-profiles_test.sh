@@ -69,10 +69,13 @@ VERSIONS_FILE="$temporary_dir/versions.sh"
 VERSIONS_TEST_FILE="$temporary_dir/versions_test.sh"
 COMPATIBILITY_FILE="$temporary_dir/COMPATIBILITY.md"
 WORKFLOW_FILE="$temporary_dir/compatibility.yml"
+README_FILE="$temporary_dir/README.md"
+cp "$ROOT/README.md" "$README_FILE"
 write_versions_file
 write_versions_test_file
 write_compatibility_workflow
 write_compatibility_document
+write_readme_compatibility_badge
 
 bash -n "$VERSIONS_FILE" "$VERSIONS_TEST_FILE"
 # shellcheck source=/dev/null
@@ -87,6 +90,7 @@ rg -F "KCP_CLUSTER_B_VERSION_PROFILE=1.35 $line_continuation" "$COMPATIBILITY_FI
 rg -F 'KCP_CLUSTER_A_VERSION_PROFILE: ${{ matrix.cluster }}' "$WORKFLOW_FILE" >/dev/null
 rg -F 'KCP_CLUSTER_B_VERSION_PROFILE: ${{ matrix.cluster }}' "$WORKFLOW_FILE" >/dev/null
 rg -F 'All 9 combinations run only when a maintainer starts the' "$COMPATIBILITY_FILE" >/dev/null
+rg -F 'label=Kubernetes%201.34%20%7C%201.35%20%7C%201.36' "$README_FILE" >/dev/null
 if rg -F 'matrix.primary' "$WORKFLOW_FILE" >/dev/null || rg -F 'matrix.secondary' "$WORKFLOW_FILE" >/dev/null; then
 	printf 'generated workflow still contains a primary/secondary version matrix\n' >&2
 	exit 1
@@ -102,6 +106,8 @@ fi
 	VERSIONS_TEST_FILE="$temporary_dir/updated-versions_test.sh"
 	COMPATIBILITY_FILE="$temporary_dir/updated-COMPATIBILITY.md"
 	WORKFLOW_FILE="$temporary_dir/updated-compatibility.yml"
+	README_FILE="$temporary_dir/updated-README.md"
+	cp "$ROOT/README.md" "$README_FILE"
 	resolve_new_profile() {
 		printf '%s\t%s\t%s\n' 'v1.37.0' 'kindest/node:v1.37.0@sha256:test' 'test-commit'
 	}
@@ -118,4 +124,5 @@ fi
 	fi
 	rg -F 'cluster: ["1.35", "1.36", "1.37"]' "$WORKFLOW_FILE" >/dev/null
 	rg -F 'repository is Kubernetes and kubectl `1.35, 1.36, 1.37`.' "$COMPATIBILITY_FILE" >/dev/null
+	rg -F 'label=Kubernetes%201.35%20%7C%201.36%20%7C%201.37' "$README_FILE" >/dev/null
 )
