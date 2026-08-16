@@ -62,6 +62,27 @@ aggregate_context_resource_version() {
   printf '%s' "$value" | sed -n "s/.*\"$context_name\":\"\([^\"]*\)\".*/\1/p"
 }
 
+compact_context_etcd_history() {
+  local context_name="$1"
+  local etcd_pod
+  local status
+  local revision
+  local -a etcdctl=(
+    etcdctl
+    --endpoints=https://127.0.0.1:2379
+    --cacert=/etc/kubernetes/pki/etcd/ca.crt
+    --cert=/etc/kubernetes/pki/etcd/healthcheck-client.crt
+    --key=/etc/kubernetes/pki/etcd/healthcheck-client.key
+  )
+
+  etcd_pod="$(kubectl_ctx "$context_name" -n kube-system get pods -l component=etcd -o jsonpath='{.items[0].metadata.name}')" || return
+  [[ -n "$etcd_pod" ]] || return 1
+  status="$(kubectl_ctx "$context_name" -n kube-system exec "$etcd_pod" -- "${etcdctl[@]}" endpoint status --write-out=json)" || return
+  revision="$(printf '%s' "$status" | sed -n 's/.*"revision":\([0-9][0-9]*\).*/\1/p')"
+  [[ -n "$revision" ]] || return 1
+  kubectl_ctx "$context_name" -n kube-system exec "$etcd_pod" -- "${etcdctl[@]}" compact "$revision" >/dev/null
+}
+
 wait_for_process_exit() {
   local pid="$1"
   local attempt
@@ -246,6 +267,9 @@ run_watch_checks() {
   wait "$paginated_watch_pid" 2>/dev/null || true
   rm -f "$paginated_watch_log"
 
+  if ! run_cmd "compact kubeconfig-proxy-a etcd history for expired watch" compact_context_etcd_history "$CTX_A"; then
+    return
+  fi
   dropped_watch_list="$(kubectl_ctx "$PROXY_CONTEXT" get --raw "/api/v1/namespaces/$NS/configmaps?resourceVersion=0" 2>&1)"
   dropped_watch_resource_version="$(printf '%s' "$dropped_watch_list" | sed -n 's/.*"metadata":{"resourceVersion":"\([^"]*\)".*/\1/p')"
   if ! dropped_watch_resource_versions="$(decode_aggregate_resource_version "$dropped_watch_resource_version" 2>/dev/null)"; then
