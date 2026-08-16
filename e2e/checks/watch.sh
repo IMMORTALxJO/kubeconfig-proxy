@@ -16,6 +16,66 @@ wait_for_watch_pattern() {
   return 1
 }
 
+watch_event_resource_version() {
+  local name="$1"
+  local file="$2"
+
+  grep -F "\"name\":\"$name\"" "$file" 2>/dev/null |
+    tail -n 1 |
+    sed -n 's/.*"resourceVersion":"\([^"]*\)".*/\1/p'
+}
+
+decode_aggregate_resource_version() {
+  local value="$1"
+  local encoded
+
+  [[ "$value" == kubeconfig-proxy:* ]] || return 1
+  encoded="${value#kubeconfig-proxy:}"
+  encoded="${encoded//-/+}"
+  encoded="${encoded//_/\/}"
+  case $((${#encoded} % 4)) in
+    2) encoded="${encoded}==" ;;
+    3) encoded="${encoded}=" ;;
+    0) ;;
+    *) return 1 ;;
+  esac
+
+  if base64 --decode </dev/null >/dev/null 2>&1; then
+    printf '%s' "$encoded" | base64 --decode
+  else
+    printf '%s' "$encoded" | base64 -D
+  fi
+}
+
+encode_aggregate_resource_versions() {
+  local value="$1"
+  local encoded
+
+  encoded="$(printf '%s' "$value" | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '=')"
+  printf 'kubeconfig-proxy:%s' "$encoded"
+}
+
+aggregate_context_resource_version() {
+  local value="$1"
+  local context_name="$2"
+
+  printf '%s' "$value" | sed -n "s/.*\"$context_name\":\"\([^\"]*\)\".*/\1/p"
+}
+
+wait_for_process_exit() {
+  local pid="$1"
+  local attempt
+
+  for ((attempt = 0; attempt < 20; attempt++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null || true
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 run_watch_checks() {
   local watch_log="$TMP_DIR/configmap-watch.log"
   local named_watch_log="$TMP_DIR/named-configmap-watch.log"
@@ -29,9 +89,25 @@ run_watch_checks() {
   local paginated_seed_a
   local paginated_seed_b
   local paginated_watch
+  local paginated_watch_b
   local paginated_label="kubeconfig-proxy.io/e2e-paginated-watch=$E2E_RESOURCE_PREFIX"
   local paginated_list
   local paginated_resource_version
+  local watch_a_resource_version
+  local watch_b_resource_version
+  local watch_a_resource_versions
+  local watch_b_resource_versions
+  local watch_a_context_a_version
+  local watch_a_context_b_version
+  local watch_b_context_a_version
+  local watch_b_context_b_version
+  local dropped_watch_log="$TMP_DIR/dropped-upstream-watch.log"
+  local dropped_watch_pid=""
+  local dropped_watch_list
+  local dropped_watch_resource_version
+  local dropped_watch_resource_versions
+  local dropped_watch_context_b_version
+  local forced_stale_resource_version
   local source_a_resource_version
   local source_b_resource_version
   local attempt
@@ -42,6 +118,7 @@ run_watch_checks() {
   paginated_seed_a="$(e2e_resource_name page-watch-seed-a)"
   paginated_seed_b="$(e2e_resource_name page-watch-seed-b)"
   paginated_watch="$(e2e_resource_name page-watch-event)"
+  paginated_watch_b="$(e2e_resource_name page-watch-event-b)"
 
   kubectl_ctx "$PROXY_CONTEXT" -n "$NS" get configmaps -w >"$watch_log" 2>&1 &
   watch_pid=$!
@@ -128,7 +205,77 @@ run_watch_checks() {
     add_result "FAIL" "paginated watch receives kubeconfig-proxy-a event" "$(tail -n 20 "$paginated_watch_log" 2>/dev/null || true)"
   fi
 
+  watch_a_resource_version="$(watch_event_resource_version "$paginated_watch" "$paginated_watch_log")"
+  if watch_a_resource_versions="$(decode_aggregate_resource_version "$watch_a_resource_version" 2>/dev/null)" &&
+    [[ "$watch_a_resource_versions" == *"\"$CTX_A\":\""* && "$watch_a_resource_versions" == *"\"$CTX_B\":\""* ]]; then
+    add_result "PASS" "watch event keeps aggregate resource versions after kubeconfig-proxy-a update" "$watch_a_resource_versions"
+  else
+    add_result "FAIL" "watch event keeps aggregate resource versions after kubeconfig-proxy-a update" "resourceVersion=$watch_a_resource_version"
+  fi
+
+  run_cmd "create paginated watched configmap in kubeconfig-proxy-b" kubectl_ctx "$CTX_B" -n "$NS" create configmap "$paginated_watch_b" --from-literal=value=event
+  if wait_for_watch_pattern "\"name\":\"$paginated_watch_b\"" "$paginated_watch_log"; then
+    add_result "PASS" "paginated watch receives kubeconfig-proxy-b event" "$paginated_watch_b"
+  else
+    add_result "FAIL" "paginated watch receives kubeconfig-proxy-b event" "$(tail -n 20 "$paginated_watch_log" 2>/dev/null || true)"
+  fi
+
+  watch_b_resource_version="$(watch_event_resource_version "$paginated_watch_b" "$paginated_watch_log")"
+  if watch_b_resource_versions="$(decode_aggregate_resource_version "$watch_b_resource_version" 2>/dev/null)" &&
+    [[ "$watch_b_resource_versions" == *"\"$CTX_A\":\""* && "$watch_b_resource_versions" == *"\"$CTX_B\":\""* ]]; then
+    add_result "PASS" "watch event keeps aggregate resource versions after kubeconfig-proxy-b update" "$watch_b_resource_versions"
+  else
+    add_result "FAIL" "watch event keeps aggregate resource versions after kubeconfig-proxy-b update" "resourceVersion=$watch_b_resource_version"
+  fi
+
+  watch_a_context_a_version="$(aggregate_context_resource_version "$watch_a_resource_versions" "$CTX_A")"
+  watch_a_context_b_version="$(aggregate_context_resource_version "$watch_a_resource_versions" "$CTX_B")"
+  watch_b_context_a_version="$(aggregate_context_resource_version "$watch_b_resource_versions" "$CTX_A")"
+  watch_b_context_b_version="$(aggregate_context_resource_version "$watch_b_resource_versions" "$CTX_B")"
+  if [[ -n "$watch_a_context_a_version" &&
+    "$watch_b_context_a_version" == "$watch_a_context_a_version" &&
+    -n "$watch_a_context_b_version" &&
+    -n "$watch_b_context_b_version" &&
+    "$watch_b_context_b_version" != "$watch_a_context_b_version" ]]; then
+    add_result "PASS" "watch advances only the event source resource version" "$watch_b_resource_versions"
+  else
+    add_result "FAIL" "watch advances only the event source resource version" "after-a=$watch_a_resource_versions; after-b=$watch_b_resource_versions"
+  fi
+
   kill "$paginated_watch_pid" 2>/dev/null || true
   wait "$paginated_watch_pid" 2>/dev/null || true
   rm -f "$paginated_watch_log"
+
+  dropped_watch_list="$(kubectl_ctx "$PROXY_CONTEXT" get --raw "/api/v1/namespaces/$NS/configmaps?resourceVersion=0" 2>&1)"
+  dropped_watch_resource_version="$(printf '%s' "$dropped_watch_list" | sed -n 's/.*"metadata":{"resourceVersion":"\([^"]*\)".*/\1/p')"
+  if ! dropped_watch_resource_versions="$(decode_aggregate_resource_version "$dropped_watch_resource_version" 2>/dev/null)"; then
+    add_result "FAIL" "prepare dropped upstream watch" "$dropped_watch_list"
+    return
+  fi
+  dropped_watch_context_b_version="$(aggregate_context_resource_version "$dropped_watch_resource_versions" "$CTX_B")"
+  if [[ -z "$dropped_watch_context_b_version" ]]; then
+    add_result "FAIL" "prepare dropped upstream watch" "$dropped_watch_resource_versions"
+    return
+  fi
+  forced_stale_resource_version="$(encode_aggregate_resource_versions "{\"$CTX_A\":\"1\",\"$CTX_B\":\"$dropped_watch_context_b_version\"}")"
+
+  kubectl_ctx "$PROXY_CONTEXT" get --raw "/api/v1/namespaces/$NS/configmaps?watch=true&timeoutSeconds=20&resourceVersion=$forced_stale_resource_version" >"$dropped_watch_log" 2>&1 &
+  dropped_watch_pid=$!
+  if ! wait_for_watch_pattern '"type":"ERROR"' "$dropped_watch_log"; then
+    add_result "FAIL" "one upstream watch terminates" "$(tail -n 20 "$dropped_watch_log" 2>/dev/null || true)"
+    kill "$dropped_watch_pid" 2>/dev/null || true
+    wait "$dropped_watch_pid" 2>/dev/null || true
+    rm -f "$dropped_watch_log"
+    return
+  fi
+  add_result "PASS" "one upstream watch terminates" "kubeconfig-proxy-a rejected stale resourceVersion"
+
+  if wait_for_process_exit "$dropped_watch_pid"; then
+    add_result "PASS" "aggregate watch closes when one upstream terminates" "client stream closed"
+  else
+    add_result "FAIL" "aggregate watch closes when one upstream terminates" "client stream remained open after kubeconfig-proxy-a watch ended; $(tail -n 20 "$dropped_watch_log" 2>/dev/null || true)"
+    kill "$dropped_watch_pid" 2>/dev/null || true
+    wait "$dropped_watch_pid" 2>/dev/null || true
+  fi
+  rm -f "$dropped_watch_log"
 }

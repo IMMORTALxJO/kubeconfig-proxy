@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	neturl "net/url"
 	"strings"
@@ -24,7 +25,7 @@ func (p *Proxy) aggregateWatch(w http.ResponseWriter, r *http.Request) {
 		p.aggregateNamedWatch(w, namedWatch)
 		return
 	}
-	aggregateWatchTargets(w, r, p.targets)
+	p.aggregateWatchTargets(w, r, p.targets)
 }
 
 func namedWatchRequest(original *http.Request, resource resourcePath) (*http.Request, bool) {
@@ -74,11 +75,15 @@ func (p *Proxy) aggregateNamedWatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		versions[response.target.Name] = version
-		if shouldSendInitialEvents {
-			initialEvents = append(initialEvents, initialWatchEvent(response.body, response.target.Name))
+	}
+	if shouldSendInitialEvents {
+		for _, response := range responses {
+			if response.status >= 200 && response.status < 300 {
+				initialEvents = append(initialEvents, initialWatchEvent(response.body, response.target.Name, versions))
+			}
 		}
 	}
-	aggregateWatchTargetsWithInitialEvents(w, withAggregateResourceVersions(r, versions), targets, initialEvents)
+	p.aggregateWatchTargetsWithInitialEvents(w, withAggregateResourceVersions(r, versions), targets, initialEvents)
 }
 
 func namedWatchProbePath(r *http.Request, resource resourcePath) string {
@@ -89,12 +94,24 @@ func namedWatchProbePath(r *http.Request, resource resourcePath) string {
 	return strings.TrimSuffix(r.URL.Path, "/") + "/" + neturl.PathEscape(name)
 }
 
-func aggregateWatchTargets(w http.ResponseWriter, r *http.Request, targets []Target) {
-	aggregateWatchTargetsWithInitialEvents(w, r, targets, nil)
+func (p *Proxy) aggregateWatchTargets(w http.ResponseWriter, r *http.Request, targets []Target) {
+	p.aggregateWatchTargetsWithInitialEvents(w, r, targets, nil)
 }
 
-func aggregateWatchTargetsWithInitialEvents(w http.ResponseWriter, r *http.Request, targets []Target, initialEvents [][]byte) {
-	streams, failure := openWatches(r.Context(), r, targets)
+func (p *Proxy) aggregateWatchTargetsWithInitialEvents(w http.ResponseWriter, r *http.Request, targets []Target, initialEvents [][]byte) {
+	resourceVersions, failure, err := p.watchResourceVersions(r, targets)
+	if err != nil {
+		writeStatus(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if failure.err != nil || failure.status != 0 {
+		writeTargetFailure(w, failure)
+		return
+	}
+	watchRequest := withAggregateResourceVersions(r, resourceVersions)
+	watchCtx, cancelWatch := context.WithCancel(r.Context())
+	defer cancelWatch()
+	streams, failure := openWatches(watchCtx, watchRequest, targets)
 	if failure.err != nil || failure.status < 200 || failure.status >= 300 {
 		for _, stream := range streams {
 			closeWatchStream(stream)
@@ -102,11 +119,6 @@ func aggregateWatchTargetsWithInitialEvents(w http.ResponseWriter, r *http.Reque
 		writeTargetFailure(w, failure)
 		return
 	}
-	defer func() {
-		for _, stream := range streams {
-			closeWatchStream(stream)
-		}
-	}()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	for _, event := range initialEvents {
@@ -119,20 +131,95 @@ func aggregateWatchTargetsWithInitialEvents(w http.ResponseWriter, r *http.Reque
 	}
 	var writeMu sync.Mutex
 	var wg sync.WaitGroup
+	streamEnded := make(chan struct{}, len(streams))
 	for _, stream := range streams {
 		stream := stream
 		wg.Add(1)
-		go func() { defer wg.Done(); copyWatch(r.Context(), w, &writeMu, stream) }()
+		go func() {
+			defer wg.Done()
+			copyWatch(watchCtx, w, &writeMu, stream, resourceVersions)
+			streamEnded <- struct{}{}
+		}()
+	}
+	<-streamEnded
+	cancelWatch()
+	for _, stream := range streams {
+		closeWatchStream(stream)
 	}
 	wg.Wait()
 }
 
-func initialWatchEvent(body []byte, contextName string) []byte {
+func (p *Proxy) watchResourceVersions(r *http.Request, targets []Target) (map[string]string, upstreamResponse, error) {
+	requestedVersion := r.URL.Query().Get("resourceVersion")
+	if strings.HasPrefix(requestedVersion, aggregateResourceVersionPrefix) {
+		versions := aggregateResourceVersions(requestedVersion)
+		if versions == nil {
+			return nil, upstreamResponse{}, fmt.Errorf("invalid aggregate watch resource version")
+		}
+		validated, err := resourceVersionsForTargets(versions, targets)
+		if err != nil {
+			return nil, upstreamResponse{}, err
+		}
+		return validated, upstreamResponse{}, nil
+	}
+	if requestedVersion != "" {
+		versions := make(map[string]string, len(targets))
+		for _, target := range targets {
+			versions[target.Name] = requestedVersion
+		}
+		return versions, upstreamResponse{}, nil
+	}
+
+	responses := p.requestTargets(r.Context(), targets, watchVersionRequest(r), nil)
+	versions := make(map[string]string, len(responses))
+	for _, response := range responses {
+		if response.err != nil || response.status < 200 || response.status >= 300 {
+			return nil, response, nil
+		}
+		version, err := listResourceVersion(response.body)
+		if err != nil {
+			return nil, upstreamResponse{target: response.target, err: err}, nil
+		}
+		versions[response.target.Name] = version
+	}
+	return versions, upstreamResponse{}, nil
+}
+
+func resourceVersionsForTargets(versions map[string]string, targets []Target) (map[string]string, error) {
+	validated := make(map[string]string, len(targets))
+	for _, target := range targets {
+		version := versions[target.Name]
+		if version == "" {
+			return nil, fmt.Errorf("missing watch resource version for context %q", target.Name)
+		}
+		validated[target.Name] = version
+	}
+	return validated, nil
+}
+
+func watchVersionRequest(r *http.Request) *http.Request {
+	request := r.Clone(r.Context())
+	url := *r.URL
+	query := url.Query()
+	query.Del("watch")
+	query.Del("timeoutSeconds")
+	query.Del("allowWatchBookmarks")
+	query.Del("sendInitialEvents")
+	query.Del("continue")
+	query.Del("resourceVersionMatch")
+	query.Set("limit", "1")
+	query.Set("resourceVersion", "0")
+	url.RawQuery = query.Encode()
+	request.URL = &url
+	return request
+}
+
+func initialWatchEvent(body []byte, contextName string, resourceVersions map[string]string) []byte {
 	event := make([]byte, 0, len(body)+24)
 	event = append(event, `{"type":"ADDED","object":`...)
 	event = append(event, body...)
 	event = append(event, '}')
-	return markEvent(event, contextName)
+	return markEvent(event, contextName, resourceVersions)
 }
 
 func withAggregateResourceVersions(original *http.Request, versions map[string]string) *http.Request {
@@ -158,13 +245,17 @@ func openWatches(ctx context.Context, original *http.Request, targets []Target) 
 	resourceVersions := aggregateResourceVersions(original.URL.Query().Get("resourceVersion"))
 	results := make([]watchStream, len(targets))
 	failures := make([]upstreamResponse, len(targets))
+	cancels := make([]context.CancelFunc, len(targets))
+	completed := make(chan int, len(targets))
 	var wg sync.WaitGroup
 	for i, target := range targets {
 		i, target := i, target
+		requestCtx, cancel := context.WithCancel(ctx)
+		cancels[i] = cancel
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			requestCtx, cancel := context.WithCancel(ctx)
+			defer func() { completed <- i }()
 			requestOriginal := original
 			if resourceVersions != nil {
 				requestOriginal = original.Clone(requestCtx)
@@ -195,22 +286,30 @@ func openWatches(ctx context.Context, original *http.Request, targets []Target) 
 			results[i] = watchStream{target: target, response: response, cancel: cancel}
 		}()
 	}
-	wg.Wait()
-	for _, failure := range failures {
-		if failure.err != nil || failure.status != 0 {
-			return results, failure
+	failureIndex := -1
+	for range targets {
+		i := <-completed
+		if failureIndex < 0 && (failures[i].err != nil || failures[i].status != 0) {
+			failureIndex = i
+			for _, cancel := range cancels {
+				cancel()
+			}
 		}
+	}
+	wg.Wait()
+	if failureIndex >= 0 {
+		return results, failures[failureIndex]
 	}
 	return results, upstreamResponse{status: http.StatusOK}
 }
 
-func copyWatch(ctx context.Context, w http.ResponseWriter, mu *sync.Mutex, stream watchStream) {
+func copyWatch(ctx context.Context, w http.ResponseWriter, mu *sync.Mutex, stream watchStream, resourceVersions map[string]string) {
 	reader := bufio.NewReader(stream.response.Body)
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			line = markEvent(line, stream.target.Name)
 			mu.Lock()
+			line = markEvent(line, stream.target.Name, resourceVersions)
 			_, _ = w.Write(line)
 			if flusher, ok := w.(http.Flusher); ok {
 				flusher.Flush()
@@ -223,10 +322,16 @@ func copyWatch(ctx context.Context, w http.ResponseWriter, mu *sync.Mutex, strea
 	}
 }
 
-func markEvent(line []byte, contextName string) []byte {
+func markEvent(line []byte, contextName string, resourceVersions map[string]string) []byte {
 	var event map[string]any
 	if json.Unmarshal(line, &event) != nil {
 		return line
+	}
+	if metadata, ok := entryMetadata(event["object"]); ok {
+		if version, ok := metadata["resourceVersion"].(string); ok && version != "" && resourceVersions != nil {
+			resourceVersions[contextName] = version
+			metadata["resourceVersion"] = encodeAggregateResourceVersions(resourceVersions)
+		}
 	}
 	markEntry(event["object"], contextName)
 	result, err := json.Marshal(event)
