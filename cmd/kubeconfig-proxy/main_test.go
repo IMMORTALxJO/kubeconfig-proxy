@@ -1123,45 +1123,16 @@ func assertServeProcessReplacement(t *testing.T, statePath string, replacedState
 }
 
 func TestServeHTTPRuntimeReloadWaitsForInFlightRequest(t *testing.T) {
-	listenAddr, err := pickAvailableListenAddr()
-	if err != nil {
-		t.Fatal(err)
-	}
-	listener, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	certPEM, keyPEM, err := generateTLSCertificate(listenAddr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tlsCertificate, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	listener, tlsCertificate, client, baseURL := newAuthenticatedServeHTTPTest(t)
 	requestStarted := make(chan struct{})
 	requestCanceled := make(chan struct{})
 	releaseRequest := make(chan struct{})
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/watch" {
-			_, _ = w.Write([]byte("ok"))
-			return
-		}
-		close(requestStarted)
-		select {
-		case <-r.Context().Done():
-			close(requestCanceled)
-		case <-releaseRequest:
-			_, _ = w.Write([]byte("ok"))
-		}
-	})
 	runtimeChanged := make(chan error, 1)
 	serveErrCh := make(chan error, 1)
 	go func() {
 		serveErrCh <- serveHTTP(
 			listener,
-			handler,
+			newRuntimeReloadTestHandler(requestStarted, requestCanceled, releaseRequest),
 			tlsCertificate,
 			0,
 			"state-token",
@@ -1171,23 +1142,7 @@ func TestServeHTTPRuntimeReloadWaitsForInFlightRequest(t *testing.T) {
 		)
 	}()
 
-	client, err := newProfileHTTPClient(&proxystate.Profile{TLS: proxystate.TLS{CertPEM: string(certPEM)}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	request, err := http.NewRequest(http.MethodGet, "https://"+listenAddr+"/watch", http.NoBody)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Authorization", "Bearer state-token")
-	requestErrCh := make(chan error, 1)
-	go func() {
-		response, requestErr := client.Do(request)
-		if requestErr == nil {
-			_ = response.Body.Close()
-		}
-		requestErrCh <- requestErr
-	}()
+	requestErrCh := startMainTestRequest(client, newAuthorizedMainTestRequest(t, baseURL+"/watch"))
 
 	select {
 	case <-requestStarted:
@@ -1202,25 +1157,74 @@ func TestServeHTTPRuntimeReloadWaitsForInFlightRequest(t *testing.T) {
 		t.Fatalf("serveHTTP returned while a request was in flight: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
-	probeRequest, err := http.NewRequest(http.MethodGet, "https://"+listenAddr+"/probe", http.NoBody)
-	if err != nil {
-		t.Fatal(err)
-	}
-	probeRequest.Header.Set("Authorization", "Bearer state-token")
-	probeResponse, err := client.Do(probeRequest)
-	if err != nil {
-		t.Fatalf("proxy stopped accepting requests while reload was pending: %v", err)
-	}
-	_ = probeResponse.Body.Close()
-	if probeResponse.StatusCode != http.StatusOK {
-		t.Fatalf("probe status while reload was pending = %d, want %d", probeResponse.StatusCode, http.StatusOK)
-	}
+	assertMainTestRequestStatus(t, client, baseURL+"/probe", http.StatusOK)
 	close(releaseRequest)
 	if err := <-requestErrCh; err != nil {
 		t.Fatalf("in-flight request failed: %v", err)
 	}
 	if err := <-serveErrCh; !errors.Is(err, errSourceKubeconfigChanged) {
 		t.Fatalf("serveHTTP error = %v, want source kubeconfig change", err)
+	}
+}
+
+func newAuthenticatedServeHTTPTest(t *testing.T) (net.Listener, tls.Certificate, *http.Client, string) {
+	t.Helper()
+	listener, tlsCertificate := newServeHTTPTestListener(t)
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsCertificate.Certificate[0]})
+	client, err := newProfileHTTPClient(&proxystate.Profile{TLS: proxystate.TLS{CertPEM: string(certPEM)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return listener, tlsCertificate, client, "https://" + listener.Addr().String()
+}
+
+func newRuntimeReloadTestHandler(requestStarted, requestCanceled, releaseRequest chan struct{}) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/watch" {
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
+		close(requestStarted)
+		select {
+		case <-r.Context().Done():
+			close(requestCanceled)
+		case <-releaseRequest:
+			_, _ = w.Write([]byte("ok"))
+		}
+	})
+}
+
+func newAuthorizedMainTestRequest(t *testing.T, url string) *http.Request {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, url, http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer state-token")
+	return request
+}
+
+func startMainTestRequest(client *http.Client, request *http.Request) <-chan error {
+	requestErrCh := make(chan error, 1)
+	go func() {
+		response, err := client.Do(request)
+		if err == nil {
+			_ = response.Body.Close()
+		}
+		requestErrCh <- err
+	}()
+	return requestErrCh
+}
+
+func assertMainTestRequestStatus(t *testing.T, client *http.Client, url string, wantStatus int) {
+	t.Helper()
+	response, err := client.Do(newAuthorizedMainTestRequest(t, url))
+	if err != nil {
+		t.Fatalf("proxy request failed: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != wantStatus {
+		t.Fatalf("response status = %d, want %d", response.StatusCode, wantStatus)
 	}
 }
 
