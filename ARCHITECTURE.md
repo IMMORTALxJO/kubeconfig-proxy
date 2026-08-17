@@ -182,7 +182,9 @@ The credential command:
 3. checks the authenticated local readiness endpoint over TLS;
 4. starts a detached `serve --state <path>` process when the endpoint is not
    ready;
-5. waits for readiness and returns a Kubernetes `ExecCredential`.
+5. waits for readiness while monitoring the detached process, returning an
+   error immediately if `serve` exits, then returns a Kubernetes
+   `ExecCredential`.
 
 For a non-zero proxy TTL, the credential expiration is derived from that TTL
 with a safety skew. This lets Kubernetes refresh credentials and restart an

@@ -28,6 +28,10 @@ func runCredential(args []string) error {
 }
 
 func runCredentialWithCommandFactory(args []string, commandFactory detachedServeCommandFactory) error {
+	return runCredentialWithCommandFactoryAndTimeout(args, commandFactory, credentialStartupTimeout)
+}
+
+func runCredentialWithCommandFactoryAndTimeout(args []string, commandFactory detachedServeCommandFactory, startupTimeout time.Duration) error {
 	flags := flag.NewFlagSet("kubeconfig-proxy credential", flag.ContinueOnError)
 	statePath := flags.String("state", "", "state file path")
 	if err := flags.Parse(args); err != nil {
@@ -53,10 +57,11 @@ func runCredentialWithCommandFactory(args []string, commandFactory detachedServe
 		return err
 	}
 	if checkReady(client, profile) != nil {
-		if err := startDetachedServe(*statePath, profile.LogsEnabled, commandFactory); err != nil {
+		serveExited, err := startDetachedServe(*statePath, profile.LogsEnabled, commandFactory)
+		if err != nil {
 			return err
 		}
-		if err := waitReady(client, profile, 10*time.Second); err != nil {
+		if err := waitReadyWithServeExit(client, profile, startupTimeout, serveExited); err != nil {
 			return err
 		}
 	}
@@ -84,6 +89,10 @@ func lockState(statePath string) (func(), error) {
 }
 
 func waitReady(client *http.Client, profile *proxystate.Profile, timeout time.Duration) error {
+	return waitReadyWithServeExit(client, profile, timeout, nil)
+}
+
+func waitReadyWithServeExit(client *http.Client, profile *proxystate.Profile, timeout time.Duration, serveExited <-chan error) error {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
@@ -92,7 +101,18 @@ func waitReady(client *http.Client, profile *proxystate.Profile, timeout time.Du
 		} else {
 			lastErr = err
 		}
-		time.Sleep(100 * time.Millisecond)
+		retryDelay := 100 * time.Millisecond
+		if remaining := time.Until(deadline); remaining < retryDelay {
+			retryDelay = remaining
+		}
+		select {
+		case err := <-serveExited:
+			if err != nil {
+				return fmt.Errorf("serve exited before readiness: %w", err)
+			}
+			return fmt.Errorf("serve exited before readiness")
+		case <-time.After(retryDelay):
+		}
 	}
 	return fmt.Errorf("proxy did not become ready at https://%s: %w", profile.Listen, lastErr)
 }
@@ -129,14 +149,14 @@ func newProfileHTTPClient(profile *proxystate.Profile) (*http.Client, error) {
 	}, nil
 }
 
-func startDetachedServe(statePath string, logsEnabled bool, commandFactory detachedServeCommandFactory) error {
+func startDetachedServe(statePath string, logsEnabled bool, commandFactory detachedServeCommandFactory) (<-chan error, error) {
 	executable, err := os.Executable()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	nullFile, err := os.Open(os.DevNull)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer nullFile.Close()
 
@@ -146,7 +166,7 @@ func startDetachedServe(statePath string, logsEnabled bool, commandFactory detac
 		logPath := statePath + ".log"
 		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) // #nosec G304 -- log path is derived from the explicit local state path.
 		if err != nil {
-			return err
+			return nil, err
 		}
 		defer logFile.Close()
 		stdout = logFile
@@ -157,11 +177,17 @@ func startDetachedServe(statePath string, logsEnabled bool, commandFactory detac
 	cmd.Stdin = nullFile
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Env = os.Environ()
-	if err := cmd.Start(); err != nil {
-		return err
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
 	}
-	return cmd.Process.Release()
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	exited := make(chan error, 1)
+	go func() {
+		exited <- cmd.Wait()
+	}()
+	return exited, nil
 }
 
 func writeExecCredential(w io.Writer, token string, expiration *time.Time) error {

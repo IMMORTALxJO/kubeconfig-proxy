@@ -108,8 +108,9 @@ The generated `prod-proxy` context points to a local HTTPS endpoint and uses a
 kubeconfig exec credential command. When `kubectl` uses that context, it runs
 `kubeconfig-proxy credential --state <path>`. The credential command starts
 `kubeconfig-proxy serve --state <path>` automatically if the proxy is not
-already running, waits for readiness, and returns the bearer token expected by
-the local proxy.
+already running, waits up to one minute for readiness, and returns the bearer
+token expected by the local proxy. The startup window accommodates proxy
+contexts with many source contexts.
 
 The state file defaults to:
 
