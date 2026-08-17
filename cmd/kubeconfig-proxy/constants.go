@@ -7,6 +7,8 @@ import (
 
 const readinessPath = "/-/kubeconfig-proxy/ready"
 
+const credentialStartupTimeout = time.Minute
+
 const statePollInterval = time.Second
 
 // Let in-place writers such as client-go finish before replacing the process.

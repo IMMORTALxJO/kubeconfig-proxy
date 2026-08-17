@@ -2027,7 +2027,7 @@ func TestRunCredentialStartsDetachedServeWhenProxyIsNotReady(t *testing.T) {
 	commandFactory := func(executable, statePath string) *exec.Cmd {
 		startedStatePath.Store(statePath)
 		cmd := exec.Command(executable, "-test.run=TestDetachedServeHelperProcess")
-		cmd.Env = append(os.Environ(), "KCP_TEST_DETACHED_HELPER=1")
+		cmd.Env = append(os.Environ(), "KCP_TEST_DETACHED_HELPER=1", "KCP_TEST_DETACHED_HELPER_DELAY=500ms")
 		return cmd
 	}
 
@@ -2134,7 +2134,7 @@ func TestStartDetachedServeStartsHelperProcessAndWritesLogs(t *testing.T) {
 	}
 
 	statePath := filepath.Join(t.TempDir(), "proxy.yaml")
-	if err := startDetachedServe(statePath, true, commandFactory); err != nil {
+	if _, err := startDetachedServe(statePath, true, commandFactory); err != nil {
 		t.Fatal(err)
 	}
 	if info, err := os.Stat(statePath + ".log"); err != nil {
@@ -2147,6 +2147,16 @@ func TestStartDetachedServeStartsHelperProcessAndWritesLogs(t *testing.T) {
 func TestDetachedServeHelperProcess(t *testing.T) {
 	if os.Getenv("KCP_TEST_DETACHED_HELPER") != "1" {
 		t.Skip("helper process")
+	}
+	if os.Getenv("KCP_TEST_DETACHED_HELPER_FAIL") == "1" {
+		t.Fatal("requested detached helper failure")
+	}
+	if delay := os.Getenv("KCP_TEST_DETACHED_HELPER_DELAY"); delay != "" {
+		duration, err := time.ParseDuration(delay)
+		if err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(duration)
 	}
 }
 
@@ -2244,6 +2254,81 @@ func TestWaitReadyTimesOut(t *testing.T) {
 	if !strings.Contains(err.Error(), "proxy did not become ready") {
 		t.Fatalf("error = %q, want timeout readiness error", err.Error())
 	}
+}
+
+func TestRunCredentialWaitsForSlowDetachedServe(t *testing.T) {
+	token := "state-token"
+	var readinessChecks atomic.Int32
+	ready := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if readinessChecks.Add(1) < 3 {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ok\n"))
+	}))
+	defer ready.Close()
+
+	commandFactory := func(executable, _ string) *exec.Cmd {
+		cmd := exec.Command(executable, "-test.run=TestDetachedServeHelperProcess")
+		cmd.Env = append(os.Environ(), "KCP_TEST_DETACHED_HELPER=1", "KCP_TEST_DETACHED_HELPER_DELAY=500ms")
+		return cmd
+	}
+	statePath := writeCredentialTestState(t, ready, token)
+
+	output := captureStdout(t, func() error {
+		return runCredentialWithCommandFactoryAndTimeout([]string{"--state", statePath}, commandFactory, time.Second)
+	})
+	if !strings.Contains(output, `"token":"state-token"`) {
+		t.Fatalf("credential output = %s, want token", output)
+	}
+	if got := readinessChecks.Load(); got < 3 {
+		t.Fatalf("readiness checks = %d, want startup retries", got)
+	}
+}
+
+func TestRunCredentialReturnsWhenDetachedServeExitsBeforeReadiness(t *testing.T) {
+	ready := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+	}))
+	defer ready.Close()
+
+	commandFactory := func(executable, _ string) *exec.Cmd {
+		cmd := exec.Command(executable, "-test.run=TestDetachedServeHelperProcess")
+		cmd.Env = append(os.Environ(), "KCP_TEST_DETACHED_HELPER=1", "KCP_TEST_DETACHED_HELPER_FAIL=1")
+		return cmd
+	}
+	statePath := writeCredentialTestState(t, ready, "state-token")
+	err := runCredentialWithCommandFactoryAndTimeout([]string{"--state", statePath}, commandFactory, 5*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "serve exited before readiness") {
+		t.Fatalf("credential error = %v, want early serve exit", err)
+	}
+}
+
+func writeCredentialTestState(t *testing.T, server *httptest.Server, token string) string {
+	t.Helper()
+	profile := &proxystate.Profile{
+		Version:          proxystate.Version,
+		Name:             "credential-proxy",
+		SourceKubeconfig: "/tmp/kubeconfig",
+		Listen:           strings.TrimPrefix(server.URL, "https://"),
+		Contexts:         proxystate.ContextSelection{Names: []string{"alpha"}, Primary: "alpha"},
+		BearerToken:      token,
+		ProxyTTL:         "0",
+		TLS: proxystate.TLS{
+			CertPEM: string(mainTestServerCAData(server)),
+			KeyPEM:  "unused by credential command",
+		},
+		Options: proxystate.ProxyOptions{
+			RequestTimeout: "30s",
+			Retries:        0,
+			RetryBackoff:   "1ms",
+		},
+	}
+	statePath := filepath.Join(t.TempDir(), "credential-proxy.yaml")
+	if err := proxystate.Save(statePath, profile); err != nil {
+		t.Fatal(err)
+	}
+	return statePath
 }
 
 func TestProfileHTTPClientRejectsInvalidCertificate(t *testing.T) {
