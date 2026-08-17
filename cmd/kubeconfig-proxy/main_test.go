@@ -2144,6 +2144,54 @@ func TestStartDetachedServeStartsHelperProcessAndWritesLogs(t *testing.T) {
 	}
 }
 
+func TestStartDetachedServeUsesDefaultEnvironment(t *testing.T) {
+	var command *exec.Cmd
+	commandFactory := func(_, _ string) *exec.Cmd {
+		command = exec.Command("true")
+		return command
+	}
+
+	exited, err := startDetachedServe(filepath.Join(t.TempDir(), "proxy.yaml"), false, commandFactory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(command.Env) == 0 {
+		t.Fatal("detached serve environment is empty")
+	}
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("detached serve error = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("detached serve did not exit")
+	}
+}
+
+func TestStartDetachedServeReturnsStartAndLogErrors(t *testing.T) {
+	t.Run("process start", func(t *testing.T) {
+		commandFactory := func(_, _ string) *exec.Cmd {
+			return exec.Command(filepath.Join(t.TempDir(), "missing-executable"))
+		}
+		if _, err := startDetachedServe(filepath.Join(t.TempDir(), "proxy.yaml"), false, commandFactory); err == nil {
+			t.Fatal("startDetachedServe returned nil start error")
+		}
+	})
+
+	t.Run("log open", func(t *testing.T) {
+		statePath := filepath.Join(t.TempDir(), "proxy.yaml")
+		if err := os.Mkdir(statePath+".log", 0o700); err != nil {
+			t.Fatal(err)
+		}
+		commandFactory := func(executable, _ string) *exec.Cmd {
+			return exec.Command(executable, "-test.run=TestDetachedServeHelperProcess")
+		}
+		if _, err := startDetachedServe(statePath, true, commandFactory); err == nil {
+			t.Fatal("startDetachedServe returned nil log open error")
+		}
+	})
+}
+
 func TestDetachedServeHelperProcess(t *testing.T) {
 	if os.Getenv("KCP_TEST_DETACHED_HELPER") != "1" {
 		t.Skip("helper process")
@@ -2301,6 +2349,36 @@ func TestRunCredentialReturnsWhenDetachedServeExitsBeforeReadiness(t *testing.T)
 	err := runCredentialWithCommandFactoryAndTimeout([]string{"--state", statePath}, commandFactory, 5*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "serve exited before readiness") {
 		t.Fatalf("credential error = %v, want early serve exit", err)
+	}
+}
+
+func TestRunCredentialReturnsDetachedServeStartError(t *testing.T) {
+	ready := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+	}))
+	defer ready.Close()
+
+	commandFactory := func(_, _ string) *exec.Cmd {
+		return exec.Command(filepath.Join(t.TempDir(), "missing-executable"))
+	}
+	statePath := writeCredentialTestState(t, ready, "state-token")
+	if err := runCredentialWithCommandFactoryAndTimeout([]string{"--state", statePath}, commandFactory, time.Second); err == nil {
+		t.Fatal("credential returned nil detached serve start error")
+	}
+}
+
+func TestWaitReadyWithServeExitReturnsSuccessfulProcessExit(t *testing.T) {
+	ready := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+	}))
+	defer ready.Close()
+	serveExited := make(chan error, 1)
+	serveExited <- nil
+
+	profile := &proxystate.Profile{Listen: strings.TrimPrefix(ready.URL, "https://"), BearerToken: "state-token"}
+	err := waitReadyWithServeExit(ready.Client(), profile, time.Second, serveExited)
+	if err == nil || err.Error() != "serve exited before readiness" {
+		t.Fatalf("wait error = %v, want successful serve exit error", err)
 	}
 }
 
