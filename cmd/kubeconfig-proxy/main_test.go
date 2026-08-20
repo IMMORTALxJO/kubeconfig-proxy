@@ -1114,7 +1114,7 @@ func assertServeProcessReplacement(t *testing.T, statePath string, replacedState
 		}
 	case err := <-errCh:
 		t.Fatalf("serve exited before process replacement: %v", err)
-	case <-time.After(3 * time.Second):
+	case <-time.After(7 * time.Second):
 		t.Fatal("serve did not replace its process after runtime configuration changed")
 	}
 	if err := <-errCh; !errors.Is(err, replaceErr) {
@@ -1122,7 +1122,7 @@ func assertServeProcessReplacement(t *testing.T, statePath string, replacedState
 	}
 }
 
-func TestServeHTTPRuntimeReloadWaitsForInFlightRequest(t *testing.T) {
+func TestServeHTTPRuntimeReloadWaitsForIdleWindow(t *testing.T) {
 	listener, tlsCertificate, client, baseURL := newAuthenticatedServeHTTPTest(t)
 	requestStarted := make(chan struct{})
 	requestCanceled := make(chan struct{})
@@ -1162,8 +1162,15 @@ func TestServeHTTPRuntimeReloadWaitsForInFlightRequest(t *testing.T) {
 	if err := <-requestErrCh; err != nil {
 		t.Fatalf("in-flight request failed: %v", err)
 	}
-	if err := <-serveErrCh; !errors.Is(err, errSourceKubeconfigChanged) {
-		t.Fatalf("serveHTTP error = %v, want source kubeconfig change", err)
+	time.Sleep(4 * time.Second)
+	assertMainTestRequestStatus(t, client, baseURL+"/follow-up", http.StatusOK)
+	select {
+	case err := <-serveErrCh:
+		if !errors.Is(err, errSourceKubeconfigChanged) {
+			t.Fatalf("serveHTTP error = %v, want source kubeconfig change", err)
+		}
+	case <-time.After(7 * time.Second):
+		t.Fatal("serveHTTP did not restart after becoming idle")
 	}
 }
 

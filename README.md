@@ -179,12 +179,13 @@ from scratch. Refreshed OIDC tokens, client certificates, and exec credential
 configuration are therefore used without recreating the proxy context. Context
 selection rules are also resolved again, so new contexts matching
 `contexts.regexp` are added automatically. A detected change remains pending
-while proxy requests are in flight; the process is replaced only after the last
-one finishes. Long-running watches and streaming subresources can therefore
-defer a reload indefinitely, but they are never interrupted by it. Clients can
-reconnect immediately when the local address and proxy credentials remain
-unchanged; otherwise they must reload the generated kubeconfig entries written
-by `add-context`.
+until no proxy requests have been active for five seconds. New requests continue
+to be accepted during that interval and restart the idle delay when they finish.
+Long-running watches and streaming subresources can therefore defer a reload
+indefinitely, but they are never interrupted by it. Clients can reconnect
+immediately when the local address and proxy credentials remain unchanged;
+otherwise they must reload the generated kubeconfig entries written by
+`add-context`.
 
 ## Selecting Source Contexts
 

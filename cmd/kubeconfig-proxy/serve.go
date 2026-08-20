@@ -192,6 +192,10 @@ func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.C
 	stop, stopSignals := serveStopChannel(stop)
 	defer stopSignals()
 	var pendingRuntimeChange error
+	reloadTimer := time.NewTimer(runtimeReloadIdleDelay)
+	reloadTimer.Stop()
+	var reloadTimerCh <-chan time.Time
+	defer reloadTimer.Stop()
 
 	for {
 		select {
@@ -203,13 +207,21 @@ func serveHTTP(listener net.Listener, handler http.Handler, tlsCertificate tls.C
 				runtimeChanged = nil
 				continue
 			}
-			if isRuntimeFileChange(err) && !activityHandler.beginDrainIfIdle() {
+			if isRuntimeFileChange(err) {
 				pendingRuntimeChange = err
-				logger.Printf("runtime configuration changed, waiting for active requests before replacing serve process")
+				reloadTimer.Reset(runtimeReloadIdleDelay)
+				reloadTimerCh = reloadTimer.C
+				logger.Printf("runtime configuration changed, waiting for requests to become idle before replacing serve process")
 				continue
 			}
 			return shutdownAfterRuntimeChange(server, err, logger)
 		case <-activityHandler.becameIdle:
+			if pendingRuntimeChange != nil {
+				reloadTimer.Reset(runtimeReloadIdleDelay)
+				reloadTimerCh = reloadTimer.C
+			}
+		case <-reloadTimerCh:
+			reloadTimerCh = nil
 			if pendingRuntimeChange != nil && activityHandler.beginDrainIfIdle() {
 				return shutdownAfterRuntimeChange(server, pendingRuntimeChange, logger)
 			}

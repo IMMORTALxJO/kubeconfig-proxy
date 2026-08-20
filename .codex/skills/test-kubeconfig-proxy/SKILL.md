@@ -161,6 +161,10 @@ The runner covers the first integration ring for this project:
 - Aggregated list responses with the virtual `kcp-context` label.
 - Aggregated list pagination with a global limit and cross-context continuation.
 - Duplicate source-context rejection before proxy state is written.
+- Cold-start and pending-reload access through 20 distinct context aliases
+  that all reference the same kind cluster.
+- Two sequential requests separated by a source kubeconfig update, followed
+  by 400 rapid local requests that expose any listener gap during reload.
 - Collision-resistant default state paths for context names that sanitize alike.
 - Explicit kubeconfig paths persisted in state and default loading that follows
   `KUBECONFIG` after the file is moved.
