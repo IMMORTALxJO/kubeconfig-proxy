@@ -204,11 +204,13 @@ expired proxy without treating the serve process as a permanent daemon.
 6. watch the state file and every kubeconfig path in the active loading rules
    for modification, creation, or removal.
 
-When either watched file changes, replacement remains pending until there are no
-active proxy requests. The HTTP server then stops accepting requests, shuts down
-gracefully, and the `serve` process is replaced through `exec`. Long-running
-watches and streaming subresources can defer replacement indefinitely; reload
-never cancels them. Removing the state file stops the server with an error.
+When either watched file changes, replacement remains pending until there have
+been no active proxy requests for five seconds. New requests remain accepted while
+replacement is pending and restart the idle delay when they finish. The HTTP
+server then stops accepting requests, shuts down gracefully, and the `serve`
+process is replaced through `exec`. Long-running watches and streaming
+subresources can defer replacement indefinitely; reload never cancels them.
+Removing the state file stops the server with an error.
 Replacing the process ensures every runtime setting is read again and clears
 client-go authentication caches before refreshed tokens, client certificates,
 and exec credential configuration are loaded into new upstream transports.

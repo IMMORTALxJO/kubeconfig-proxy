@@ -27,9 +27,11 @@ KUBECONFIG_FILE="$TMP_DIR/kubeconfig"
 STATE_FILE="$TMP_DIR/kind-proxy.yaml"
 RO_STATE_FILE="$TMP_DIR/kind-proxy-readonly.yaml"
 DYNAMIC_STATE_FILE="$TMP_DIR/kind-proxy-dynamic.yaml"
+MANY_CONTEXTS_STATE_FILE="$TMP_DIR/kind-proxy-many-contexts.yaml"
 PROXY_CONTEXT="kind-proxy"
 RO_PROXY_CONTEXT="kind-proxy-readonly"
 DYNAMIC_PROXY_CONTEXT="kind-proxy-dynamic"
+MANY_CONTEXTS_PROXY_CONTEXT="kind-proxy-many-contexts"
 HASHED_PROXY_CONTEXT="kind/proxy-state"
 SAFE_PROXY_CONTEXT="kind_proxy-state"
 DUPLICATE_PROXY_CONTEXT="kind-proxy-duplicate"
@@ -145,7 +147,7 @@ stop_coverage_proxies() {
     printf '%s\n' "$pid" >>"$pids_file"
   done
 
-  for state_path in "$STATE_FILE" "$RO_STATE_FILE" "$DYNAMIC_STATE_FILE"; do
+  for state_path in "$STATE_FILE" "$RO_STATE_FILE" "$DYNAMIC_STATE_FILE" "$MANY_CONTEXTS_STATE_FILE"; do
     proxy_pids_for_state "$state_path" >>"$pids_file"
   done
 
@@ -259,6 +261,7 @@ cleanup() {
     if [[ -x "$BINARY" && -f "$KUBECONFIG_FILE" ]]; then
       KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
       KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$RO_PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
+      KUBECONFIG="$KUBECONFIG_FILE" "$BINARY" delete-context "$MANY_CONTEXTS_PROXY_CONTEXT" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 || true
       if [[ -f "$TMP_DIR/moved-kubeconfig" ]]; then
         KUBECONFIG="$TMP_DIR/moved-kubeconfig" "$BINARY" delete-context "$DYNAMIC_PROXY_CONTEXT" --kubeconfig "$TMP_DIR/moved-kubeconfig" >/dev/null 2>&1 || true
       fi
