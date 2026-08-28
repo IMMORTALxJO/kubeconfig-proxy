@@ -134,7 +134,7 @@ The selected Kubernetes source may require Bash 4.2 or newer to build. On macOS,
 with `brew install bash`; the runner finds the Homebrew path automatically, or
 accepts `KCP_KUBECTL_E2E_BASH=/path/to/bash`. When no suitable Bash is
 available, the runner builds native-platform binaries in Docker with
-`golang:1.26.0-bookworm`; override that image with
+`golang:1.27.0-bookworm`; override that image with
 `KCP_KUBECTL_E2E_BUILDER_IMAGE` if needed.
 Set `KCP_KUBECTL_E2E_DOCKER_PULL_TIMEOUT_SECONDS` to change the Docker image
 pull timeout (default `300`).

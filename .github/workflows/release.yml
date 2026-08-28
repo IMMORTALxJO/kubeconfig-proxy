@@ -27,7 +27,7 @@ jobs:
 
       - name: Vulnerability scan
         env:
-          GOTOOLCHAIN: go1.26.6
+          GOTOOLCHAIN: go1.27.0
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
       - name: Test
